@@ -27,6 +27,7 @@ from job_agent.jobs import (
 from job_agent.models import Job
 from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
 from job_agent.resumes import index_resume_templates
+from job_agent.runners import render_batch_fill_runner
 from job_agent.shortlist import shortlisted_jobs_to_dicts, shortlist_jobs
 from job_agent.source_config import load_jobs_from_source_config
 from hello_agents.agents.job_application_agent import JobApplicationAgent
@@ -368,6 +369,16 @@ def prepare_shortlisted_applications(
     summary_path = out_dir / "batch-summary.json"
     summary_path.write_text(json.dumps(summaries, indent=2, ensure_ascii=True))
     typer.echo(f"Prepared {len(summaries)} application packages at {out_dir}")
+
+
+@applications_app.command("build-batch-runner")
+def build_batch_runner(
+    summary: Path,
+    out: Path = typer.Option(Path("run-application-batch.js"), "--out", help="JavaScript runner output path."),
+) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_batch_fill_runner(json.loads(summary.read_text())))
+    typer.echo(f"Wrote guarded batch runner to {out}")
 
 
 @forms_app.command("build-snapshot-script")

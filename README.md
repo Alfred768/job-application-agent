@@ -210,6 +210,16 @@ job-agent applications prepare-shortlist output/shortlist.json \
 
 This creates one subdirectory per job plus `batch-summary.json`, so the user can audit every generated review packet, tailored resume draft, and guarded fill script before opening the application pages.
 
+Generate a guarded runner for the batch fill scripts:
+
+```bash
+job-agent applications build-batch-runner output/application-batch/batch-summary.json \
+  --out output/application-batch/run-batch.js
+node output/application-batch/run-batch.js
+```
+
+The runner executes each package's `fill-form.js` in sequence. Each fill script opens the application page, fills approved low-risk fields, uploads the approved tailored resume when configured, and leaves final submission for manual review.
+
 Create a review packet from a pasted JD saved as a text file:
 
 ```bash
@@ -299,6 +309,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Batch review-packet generation from RSS/Atom, Greenhouse, Lever, and Remotive job source items.
 - Single-job application package preparation from normalized job source JSON.
 - Batch application package preparation from shortlisted job JSON.
+- Guarded batch runner generation for sequential low-risk form filling.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.

@@ -722,6 +722,44 @@ def test_cli_applications_prepare_shortlist_generates_batch_packages(tmp_path):
     assert "002-webco-backend-engineer" in summary
 
 
+def test_cli_applications_build_batch_runner_writes_guarded_runner(tmp_path):
+    first = tmp_path / "batch" / "001-acme-ai-agent-engineer"
+    second = tmp_path / "batch" / "002-webco-backend-engineer"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    summary_path = tmp_path / "batch" / "batch-summary.json"
+    summary_path.write_text(
+        f"""[
+          {{"company": "Acme AI", "title": "Agent Engineer", "fill_script_path": "{first / "fill-form.js"}"}},
+          {{"company": "WebCo", "title": "Backend Engineer", "fill_script_path": "{second / "fill-form.js"}"}}
+        ]"""
+    )
+    out_path = tmp_path / "batch" / "run-batch.js"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "applications",
+            "build-batch-runner",
+            str(summary_path),
+            "--out",
+            str(out_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote guarded batch runner" in result.output
+    script = out_path.read_text()
+    assert 'spawnSync("node"' in script
+    assert str(first / "fill-form.js") in script
+    assert str(second / "fill-form.js") in script
+    assert "Review each page manually before final submission." in script
+    assert ".click(" not in script
+    assert ".press(" not in script
+    assert ".submit(" not in script
+
+
 def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
     jd_path = tmp_path / "jd.txt"
     jd_path.write_text("Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust.")
