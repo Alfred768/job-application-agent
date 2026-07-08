@@ -74,6 +74,16 @@ Import jobs from a compliant public RSS or Atom feed saved as XML:
 job-agent jobs import-rss jobs.xml --out output/jobs.json --source company-careers-rss
 ```
 
+Generate review packets directly from a compliant public RSS or Atom feed:
+
+```bash
+job-agent jobs review-rss jobs.xml \
+  --out-dir output/rss-reviews \
+  --source company-careers-rss \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db
+```
+
 Create a review packet from a pasted JD saved as a text file:
 
 ```bash
@@ -142,6 +152,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Resume template indexing for role-specific DOCX/PDF files.
 - Manual JD import from text.
 - Public RSS/Atom job feed import with normalized source/apply URLs.
+- Batch review-packet generation from imported RSS/Atom job feed items.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.

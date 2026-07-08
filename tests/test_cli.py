@@ -144,3 +144,32 @@ def test_cli_import_rss_jobs_writes_normalized_json(tmp_path):
     assert '"title": "Agent Engineer"' in text
     assert '"company": "Acme AI"' in text
     assert '"location": "Remote"' in text
+
+
+def test_cli_review_rss_jobs_writes_review_packets(tmp_path):
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build LLM agents with LangChain and FastAPI.</description>
+        <category>Remote</category>
+        </item></channel></rss>"""
+    )
+    out_dir = tmp_path / "reviews"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "review-rss", str(rss_path), "--out-dir", str(out_dir), "--source", "example-rss"],
+    )
+
+    assert result.exit_code == 0
+    assert "Reviewed 1 jobs" in result.output
+    review_files = list(out_dir.glob("*.md"))
+    assert len(review_files) == 1
+    text = review_files[0].read_text()
+    assert "# Application Review" in text
+    assert "Agent Engineer" in text
+    assert "Acme AI" in text
+    assert "## Submit Gate" in text

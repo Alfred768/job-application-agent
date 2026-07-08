@@ -93,3 +93,20 @@ def parse_rss_jobs(rss_xml: str, source: str = "rss", limit: int | None = None) 
 
 def jobs_to_dicts(jobs: list[Job]) -> list[dict[str, str | None]]:
     return [asdict(job) for job in jobs]
+
+
+def format_job_as_jd_text(job: Job) -> str:
+    fields = [
+        f"Company: {job.company}",
+        f"Title: {job.title}",
+    ]
+    if job.location:
+        fields.append(f"Location: {job.location}")
+    fields.append(f"Source: {job.source}")
+    if job.source_url:
+        fields.append(f"Source URL: {job.source_url}")
+    if job.apply_url:
+        fields.append(f"Apply URL: {job.apply_url}")
+    fields.append("")
+    fields.append(job.raw_jd)
+    return "\n".join(fields).strip()

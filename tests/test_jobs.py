@@ -1,4 +1,4 @@
-from job_agent.jobs import import_job_from_text, parse_rss_jobs
+from job_agent.jobs import format_job_as_jd_text, import_job_from_text, parse_rss_jobs
 
 
 def test_import_job_from_text_extracts_basic_fields():
@@ -56,3 +56,24 @@ def test_parse_rss_jobs_normalizes_public_feed_items():
     assert "FastAPI" in jobs[0].raw_jd
     assert jobs[1].title == "ML Platform Engineer"
     assert jobs[1].company == "DataForge"
+
+
+def test_format_job_as_jd_text_preserves_provenance_for_agent_review():
+    job = parse_rss_jobs(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build LLM agents with FastAPI.</description>
+        <category>Remote</category>
+        </item></channel></rss>""",
+        source="example-rss",
+    )[0]
+
+    text = format_job_as_jd_text(job)
+
+    assert "Company: Acme AI" in text
+    assert "Title: Agent Engineer" in text
+    assert "Location: Remote" in text
+    assert "Source: example-rss" in text
+    assert "Apply URL: https://jobs.example.com/acme-agent" in text
+    assert "Build LLM agents" in text

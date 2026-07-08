@@ -418,6 +418,11 @@ ApplicationFormChain:
 
 `RSSJobSourceTool` 属于 Sensors / Perception 层的合规岗位感知工具。它只读取公开 feed，不做 LinkedIn scraping，也不绕过招聘网站访问规则。
 
+当前 CLI 已提供两条公开 feed 路径：
+
+- `job-agent jobs import-rss`：只把 feed 标准化为 JSON 岗位池。
+- `job-agent jobs review-rss`：把 feed 中每个岗位转换为 JD 文本，交给 `JobApplicationAgent` 生成 review packet。
+
 输入：
 
 ```python

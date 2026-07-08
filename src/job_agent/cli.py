@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from job_agent.db import connect, init_db
-from job_agent.jobs import jobs_to_dicts, parse_rss_jobs
+from job_agent.jobs import format_job_as_jd_text, jobs_to_dicts, parse_rss_jobs
+from job_agent.models import Job
 from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 
@@ -21,6 +23,12 @@ class DeterministicLLM:
 
     def invoke(self, messages, **kwargs):
         return ""
+
+
+def _review_slug(index: int, job: Job) -> str:
+    raw = f"{index:03d}-{job.company}-{job.title}".lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    return slug or f"{index:03d}-job"
 
 
 @app.command()
@@ -96,6 +104,46 @@ def import_rss_jobs(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True))
     typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("review-rss")
+def review_rss_jobs(
+    rss_file: Path,
+    out_dir: Path = typer.Option(Path("reviews"), "--out-dir", help="Directory for markdown review packets."),
+    source: str = typer.Option("rss", "--source", help="Source label for provenance."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to review."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    package_dir: Optional[Path] = typer.Option(
+        None,
+        "--package-dir",
+        help="Optional directory root to export per-job application package artifacts.",
+    ),
+) -> None:
+    jobs = parse_rss_jobs(rss_file.read_text(), source=source, limit=limit)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, job in enumerate(jobs, start=1):
+        slug = _review_slug(index, job)
+        agent = JobApplicationAgent(
+            name="job-application-agent",
+            llm=DeterministicLLM(),
+            resume_source_dir=resume_source_dir,
+            database_path=db,
+            package_dir=(package_dir / slug) if package_dir else None,
+        )
+        review = agent.run(format_job_as_jd_text(job))
+        (out_dir / f"{slug}.md").write_text(review)
+
+    typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
 app.add_typer(jobs_app, name="jobs")
