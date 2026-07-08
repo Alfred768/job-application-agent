@@ -18,7 +18,7 @@ from .job_sources import (
 from .fit_scorer import FitScorerTool
 from .jd_parser import JDParserTool
 from .resume_tools import ResumeIndexerTool, ResumeSelectorTool
-from .resume_tailor import ResumeTailorTool, TruthfulnessCheckTool
+from .resume_tailor import ResumeDraftTool, ResumeTailorTool, TruthfulnessCheckTool
 from .review_packet import ReviewPacketTool
 from .submit_gate import SubmitGateTool
 
@@ -37,6 +37,7 @@ __all__ = [
     "JDParserTool",
     "ResumeIndexerTool",
     "ResumeSelectorTool",
+    "ResumeDraftTool",
     "ResumeTailorTool",
     "ReviewPacketTool",
     "SensitiveFieldDetectorTool",

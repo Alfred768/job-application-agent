@@ -532,6 +532,7 @@ class FitScore:
 工具：
 
 - `ResumeTailorTool`
+- `ResumeDraftTool`
 - `TruthfulnessCheckTool`
 
 允许修改：
@@ -549,6 +550,12 @@ class FitScore:
 - 论文状态。
 - 未证实技能。
 - 未证实业务指标。
+
+当前已实现：
+
+- `ResumeTailorTool`：生成 auditable edit plan。
+- `ResumeDraftTool`：基于 base resume text 生成 `tailored-resume.md` 草稿，只插入 supported JD keywords，并把 unsupported keywords 放入 review-required 区域。
+- `TruthfulnessCheckTool`：阻止 unsupported keywords 被当作事实经历写入。
 
 输出：
 

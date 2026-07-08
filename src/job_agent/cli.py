@@ -20,6 +20,7 @@ from job_agent.jobs import (
     parse_rss_jobs,
 )
 from job_agent.models import Job
+from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
 from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.core.llm import HelloAgentsLLM
@@ -132,6 +133,19 @@ def index_resumes(source_dir: Path) -> None:
     typer.echo(f"Indexed {len(templates)} resume templates")
 
 
+@resumes_app.command("tailor")
+def tailor_resume(
+    jd_file: Path,
+    resume: Path = typer.Option(..., "--resume", help="Base resume text/markdown file to preserve."),
+    out: Path = typer.Option(Path("tailored-resume.md"), "--out", help="Tailored resume draft output path."),
+    resume_track: Optional[str] = typer.Option(None, "--resume-track", help="Optional selected resume track."),
+) -> None:
+    plan = propose_resume_edit_plan(jd_file.read_text(), resume_track=resume_track)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_tailored_resume_draft(resume.read_text(), plan))
+    typer.echo(f"Wrote tailored resume draft to {out}")
+
+
 @llm_app.command("smoke")
 def smoke_llm(
     prompt: str = typer.Option("ping", "--prompt", help="Prompt to send to the configured LLM."),
@@ -174,6 +188,11 @@ def prepare_application(
         "--profile",
         help="Optional JSON file containing approved profile facts for form filling.",
     ),
+    resume: Optional[Path] = typer.Option(
+        None,
+        "--resume",
+        help="Optional base resume text/markdown file for tailored resume draft generation.",
+    ),
     use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
     llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
     llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
@@ -210,6 +229,12 @@ def prepare_application(
         )
         (out_dir / "fill-form.js").write_text(
             render_playwright_fill_script(plan, application_url=job.apply_url or job.source_url)
+        )
+
+    if resume:
+        resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
+        (out_dir / "tailored-resume.md").write_text(
+            render_tailored_resume_draft(resume.read_text(), resume_plan)
         )
 
     typer.echo(f"Prepared application package at {out_dir}")

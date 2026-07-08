@@ -83,6 +83,16 @@ Index local resume templates:
 job-agent resumes index "$RESUME_SOURCE_DIR"
 ```
 
+Generate a grounded tailored resume draft from a JD and base resume text:
+
+```bash
+job-agent resumes tailor jd.txt \
+  --resume resume.txt \
+  --out output/tailored-resume.md
+```
+
+The tailored draft preserves the base resume text, emphasizes supported JD keywords, and lists unsupported keywords for manual review instead of inserting them as claims.
+
 Import jobs from a compliant public RSS or Atom feed saved as XML:
 
 ```bash
@@ -143,10 +153,11 @@ job-agent applications prepare output/greenhouse-jobs.json \
   --db job-agent.db \
   --form-snapshot examples/form-snapshot.json \
   --profile examples/profile.json \
+  --resume resume.txt \
   --use-llm
 ```
 
-This writes the review packet, JD analysis, resume edit plan, submit gate, and, when form data is provided, a guarded `fill-form.js` script.
+This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md`.
 
 Create a review packet from a pasted JD saved as a text file:
 
@@ -229,6 +240,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Markdown application review packet generation.
 - HelloAgents-based resume selection and application tracking tools.
 - Auditable resume edit plan generation with unsupported keyword detection.
+- Grounded tailored resume draft generation that does not overwrite source resumes.
 - Local application package export for review artifacts.
 - Form snapshot inspection, sensitive-field detection, and guarded form-fill planning.
 - Guarded Playwright script generation for low-risk browser form filling.

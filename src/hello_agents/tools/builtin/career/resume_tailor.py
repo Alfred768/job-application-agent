@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from hello_agents.tools.base import Tool, ToolParameter
-from job_agent.resume_plans import propose_resume_edit_plan
+from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
 
 
 class ResumeTailorTool(Tool):
@@ -30,6 +30,44 @@ class ResumeTailorTool(Tool):
                 name="jd_text",
                 type="string",
                 description="Raw JD text used to propose resume edits.",
+            ),
+            ToolParameter(
+                name="resume_track",
+                type="string",
+                description="Selected resume track.",
+                required=False,
+                default="",
+            ),
+        ]
+
+
+class ResumeDraftTool(Tool):
+    """Generate a grounded tailored resume draft without overwriting the source resume."""
+
+    def __init__(self):
+        super().__init__(
+            name="resume_draft",
+            description="Generate a reviewable tailored resume draft using only supported JD keywords.",
+        )
+
+    def run(self, parameters: dict[str, Any]) -> str:
+        jd_text = parameters.get("jd_text") or parameters.get("input") or ""
+        resume_text = parameters.get("resume_text") or ""
+        resume_track = parameters.get("resume_track")
+        plan = propose_resume_edit_plan(jd_text, resume_track)
+        return render_tailored_resume_draft(resume_text, plan)
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(
+                name="jd_text",
+                type="string",
+                description="Raw JD text used to propose resume edits.",
+            ),
+            ToolParameter(
+                name="resume_text",
+                type="string",
+                description="Base resume text to preserve in the tailored draft.",
             ),
             ToolParameter(
                 name="resume_track",

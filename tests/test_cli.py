@@ -383,3 +383,75 @@ def test_cli_applications_prepare_generates_package_and_fill_script(tmp_path):
     assert 'await page.goto("https://boards.greenhouse.io/acme/jobs/1");' in script
     assert 'await page.getByLabel("Email").fill("gaoyi@example.com");' in script
     assert ".click(" not in script
+
+
+def test_cli_applications_prepare_can_generate_tailored_resume_draft(tmp_path):
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme AI",
+            "location": "Remote",
+            "raw_jd": "Build LLM agents with LangChain, FastAPI, and Rust.",
+            "source": "greenhouse:acme",
+            "source_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "apply_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "remote_policy": null
+          }
+        ]"""
+    )
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text("Gaoyi Wu\n\nBuilt Python and FastAPI services.")
+    out_dir = tmp_path / "application"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "applications",
+            "prepare",
+            str(jobs_path),
+            "--index",
+            "1",
+            "--out-dir",
+            str(out_dir),
+            "--resume",
+            str(resume_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    tailored = (out_dir / "tailored-resume.md").read_text()
+    assert "# Tailored Resume Draft" in tailored
+    assert "LangChain" in tailored
+    assert "Unsupported JD keywords not inserted: Rust" in tailored
+
+
+def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
+    jd_path = tmp_path / "jd.txt"
+    jd_path.write_text("Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust.")
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text("Gaoyi Wu\n\nBuilt Python and FastAPI services.")
+    out_path = tmp_path / "tailored-resume.md"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "resumes",
+            "tailor",
+            str(jd_path),
+            "--resume",
+            str(resume_path),
+            "--out",
+            str(out_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote tailored resume draft" in result.output
+    text = out_path.read_text()
+    assert "# Tailored Resume Draft" in text
+    assert "LangChain" in text
+    assert "Unsupported JD keywords not inserted: Rust" in text

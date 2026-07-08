@@ -13,6 +13,7 @@ from hello_agents.tools.builtin.career import (
     LeverJobSourceTool,
     ManualJDImportTool,
     RemotiveJobSourceTool,
+    ResumeDraftTool,
     ResumeIndexerTool,
     ResumeSelectorTool,
     ResumeTailorTool,
@@ -61,6 +62,7 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(ReviewPacketTool())
     registry.register_tool(RemotiveJobSourceTool())
     registry.register_tool(RSSJobSourceTool())
+    registry.register_tool(ResumeDraftTool())
     registry.register_tool(SubmitGateTool())
     registry.register_tool(SensitiveFieldDetectorTool())
     registry.register_tool(TruthfulnessCheckTool())
@@ -82,6 +84,7 @@ def test_career_tools_register_with_hello_agents_registry():
         "review_packet",
         "remotive_job_source",
         "rss_job_source",
+        "resume_draft",
         "submit_gate",
         "sensitive_field_detector",
         "truthfulness_check",
@@ -224,6 +227,19 @@ def test_resume_tailor_tool_flags_unsupported_keywords():
     assert '"LangChain"' in result
     assert '"unsupported_keywords": [' in result
     assert '"Rust"' in result
+
+
+def test_resume_draft_tool_generates_grounded_markdown():
+    jd = "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust."
+    resume_text = "Gaoyi Wu\n\nBuilt Python and FastAPI services."
+
+    result = ResumeDraftTool().run({"jd_text": jd, "resume_text": resume_text})
+
+    assert "# Tailored Resume Draft" in result
+    assert "LangChain" in result
+    assert "FastAPI" in result
+    assert "Unsupported JD keywords not inserted: Rust" in result
+    assert resume_text in result
 
 
 def test_truthfulness_check_tool_blocks_unsupported_claims():
