@@ -6,6 +6,7 @@ from .form_tools import (
     FormFillerTool,
     FormFillScriptTool,
     FormInspectorTool,
+    FormSnapshotScriptTool,
     SensitiveFieldDetectorTool,
 )
 from .job_sources import (
@@ -28,6 +29,7 @@ __all__ = [
     "FormFillerTool",
     "FormFillScriptTool",
     "FormInspectorTool",
+    "FormSnapshotScriptTool",
     "GreenhouseJobSourceTool",
     "LeverJobSourceTool",
     "ManualJDImportTool",

@@ -8,6 +8,7 @@ from hello_agents.tools.builtin.career import (
     FormFillerTool,
     FormFillScriptTool,
     FormInspectorTool,
+    FormSnapshotScriptTool,
     GreenhouseJobSourceTool,
     JDParserTool,
     LeverJobSourceTool,
@@ -53,6 +54,7 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(FormInspectorTool())
     registry.register_tool(FormFillerTool())
     registry.register_tool(FormFillScriptTool())
+    registry.register_tool(FormSnapshotScriptTool())
     registry.register_tool(GreenhouseJobSourceTool())
     registry.register_tool(JDParserTool())
     registry.register_tool(LeverJobSourceTool())
@@ -75,6 +77,7 @@ def test_career_tools_register_with_hello_agents_registry():
         "form_inspector",
         "form_filler",
         "form_fill_script",
+        "form_snapshot_script",
         "greenhouse_job_source",
         "jd_parser",
         "lever_job_source",
@@ -325,6 +328,21 @@ def test_form_fill_script_tool_can_upload_resume_file():
     )
 
     assert 'await page.getByLabel("Resume").setInputFiles("/tmp/tailored-resume.pdf");' in result
+    assert ".click(" not in result
+
+
+def test_form_snapshot_script_tool_generates_inspection_only_script():
+    result = FormSnapshotScriptTool().run(
+        {
+            "application_url": "https://jobs.example.com/apply",
+            "output_path": "form-snapshot.json",
+        }
+    )
+
+    assert 'await page.goto("https://jobs.example.com/apply");' in result
+    assert 'fs.writeFileSync("form-snapshot.json"' in result
+    assert "querySelectorAll" in result
+    assert ".fill(" not in result
     assert ".click(" not in result
 
 

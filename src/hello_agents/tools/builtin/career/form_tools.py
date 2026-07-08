@@ -10,6 +10,7 @@ from job_agent.forms import (
     build_form_fill_plan,
     detect_sensitive_fields,
     inspect_form_snapshot,
+    render_playwright_form_snapshot_script,
     render_playwright_fill_script,
 )
 
@@ -148,5 +149,40 @@ class FormFillScriptTool(Tool):
                 type="string",
                 description="Optional approved resume file path for Resume/CV upload fields.",
                 required=False,
+            ),
+        ]
+
+
+class FormSnapshotScriptTool(Tool):
+    """Generate a Playwright script that captures form field metadata only."""
+
+    def __init__(self):
+        super().__init__(
+            name="form_snapshot_script",
+            description="Generate a Playwright script that inspects an ATS form and writes a form snapshot JSON file.",
+        )
+
+    def run(self, parameters: dict[str, Any]) -> str:
+        application_url = parameters.get("application_url")
+        output_path = parameters.get("output_path") or "form-snapshot.json"
+        return render_playwright_form_snapshot_script(
+            application_url=application_url,
+            output_path=str(output_path),
+        )
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(
+                name="application_url",
+                type="string",
+                description="Optional application page URL to open before inspecting fields.",
+                required=False,
+            ),
+            ToolParameter(
+                name="output_path",
+                type="string",
+                description="JSON file path where the captured form snapshot should be written.",
+                required=False,
+                default="form-snapshot.json",
             ),
         ]

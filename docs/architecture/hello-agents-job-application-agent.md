@@ -596,8 +596,10 @@ class ResumeEditPlan:
 工具：
 
 - `FormInspectorTool`
+- `FormSnapshotScriptTool`
 - `SensitiveFieldDetectorTool`
 - 当前已实现：从 JSON form snapshot 归一化字段，并识别敏感字段。
+- 当前已实现：生成 guarded Playwright snapshot script，只读取 ATS 表单字段 metadata，不填写、不上传、不提交。
 
 职责：
 

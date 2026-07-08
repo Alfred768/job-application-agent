@@ -157,3 +157,53 @@ def render_playwright_fill_script(plan: FormFillPlan, application_url: str | Non
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def render_playwright_form_snapshot_script(
+    application_url: str | None = None,
+    output_path: str = "form-snapshot.json",
+) -> str:
+    lines = [
+        'const { chromium } = require("playwright");',
+        'const fs = require("fs");',
+        "",
+        "async function main() {",
+        "  const browser = await chromium.launch({ headless: false });",
+        "  const page = await browser.newPage();",
+    ]
+    if application_url:
+        lines.append(f"  await page.goto({json.dumps(application_url)});")
+    lines.extend(
+        [
+            "  const fields = await page.evaluate(() => {",
+            '    const controls = Array.from(document.querySelectorAll("input, textarea, select"));',
+            "    const labelFor = (control) => {",
+            "      if (control.id) {",
+            '        const explicit = document.querySelector(`label[for="${control.id}"]`);',
+            "        if (explicit && explicit.textContent) return explicit.textContent.trim();",
+            "      }",
+            "      const wrapping = control.closest('label');",
+            "      if (wrapping && wrapping.textContent) return wrapping.textContent.trim();",
+            "      return control.getAttribute('aria-label') || control.getAttribute('placeholder') || control.name || '';",
+            "    };",
+            "    return controls.map((control) => ({",
+            "      label: labelFor(control),",
+            "      type: control.getAttribute('type') || control.tagName.toLowerCase(),",
+            "      required: Boolean(control.required),",
+            "      options: control.tagName.toLowerCase() === 'select'",
+            "        ? Array.from(control.options).map((option) => option.textContent.trim()).filter(Boolean)",
+            "        : [],",
+            "    })).filter((field) => field.label);",
+            "  });",
+            f"  fs.writeFileSync({json.dumps(output_path)}, JSON.stringify(fields, null, 2));",
+            f"  console.log('Wrote form snapshot to {output_path}');",
+            "  console.log('Review the snapshot before using it for guarded form filling.');",
+            "}",
+            "",
+            "main().catch((error) => {",
+            "  console.error(error);",
+            "  process.exit(1);",
+            "});",
+        ]
+    )
+    return "\n".join(lines) + "\n"

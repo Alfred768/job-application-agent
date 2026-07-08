@@ -188,6 +188,15 @@ job-agent jobs review jd.txt \
 Create a guarded form-fill plan from a captured form snapshot and approved profile facts:
 
 ```bash
+job-agent forms build-snapshot-script \
+  --application-url "https://example.com/apply" \
+  --snapshot-out form-snapshot.json \
+  --out output/capture-form-snapshot.js
+```
+
+The snapshot script only reads form metadata such as labels, field types, required flags, and select options. It does not fill fields, upload files, click buttons, or submit the application.
+
+```bash
 job-agent jobs review jd.txt \
   --out output/application-review.md \
   --form-snapshot examples/form-snapshot.json \
@@ -244,6 +253,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Auditable resume edit plan generation with unsupported keyword detection.
 - Grounded tailored resume draft generation that does not overwrite source resumes.
 - Local application package export for review artifacts.
+- Guarded Playwright script generation for form snapshot capture.
 - Form snapshot inspection, sensitive-field detection, and guarded form-fill planning.
 - Guarded Playwright script generation for low-risk browser form filling and approved Resume/CV file upload.
 - Guarded form-fill plan model with manual final-submit policy.

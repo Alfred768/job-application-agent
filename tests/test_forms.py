@@ -3,6 +3,7 @@ from job_agent.forms import (
     FormFillPlan,
     build_form_fill_plan,
     inspect_form_snapshot,
+    render_playwright_form_snapshot_script,
     render_playwright_fill_script,
 )
 
@@ -56,3 +57,19 @@ def test_file_field_requires_review_when_resume_file_missing():
     plan = build_form_fill_plan(fields, {})
 
     assert plan.review_required_fields == ["Resume"]
+
+
+def test_render_playwright_form_snapshot_script_only_inspects_fields():
+    script = render_playwright_form_snapshot_script(
+        application_url="https://jobs.example.com/apply",
+        output_path="form-snapshot.json",
+    )
+
+    assert 'await page.goto("https://jobs.example.com/apply");' in script
+    assert 'fs.writeFileSync("form-snapshot.json"' in script
+    assert "querySelectorAll" in script
+    assert "input, textarea, select" in script
+    assert ".fill(" not in script
+    assert ".setInputFiles(" not in script
+    assert ".click(" not in script
+    assert ".press(" not in script

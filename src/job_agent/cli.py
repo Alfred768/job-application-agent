@@ -10,7 +10,12 @@ from urllib.request import urlopen
 import typer
 
 from job_agent.db import connect, init_db
-from job_agent.forms import build_form_fill_plan, inspect_form_snapshot, render_playwright_fill_script
+from job_agent.forms import (
+    build_form_fill_plan,
+    inspect_form_snapshot,
+    render_playwright_fill_script,
+    render_playwright_form_snapshot_script,
+)
 from job_agent.jobs import (
     format_job_as_jd_text,
     jobs_to_dicts,
@@ -248,6 +253,30 @@ def prepare_application(
         )
 
     typer.echo(f"Prepared application package at {out_dir}")
+
+
+@forms_app.command("build-snapshot-script")
+def build_form_snapshot_script(
+    out: Path = typer.Option(Path("capture-form-snapshot.js"), "--out", help="JavaScript output path."),
+    application_url: Optional[str] = typer.Option(
+        None,
+        "--application-url",
+        help="Optional application page URL to open before inspecting fields.",
+    ),
+    snapshot_out: str = typer.Option(
+        "form-snapshot.json",
+        "--snapshot-out",
+        help="JSON file path where the captured form snapshot should be written by the generated script.",
+    ),
+) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(
+        render_playwright_form_snapshot_script(
+            application_url=application_url,
+            output_path=snapshot_out,
+        )
+    )
+    typer.echo(f"Wrote guarded form snapshot script to {out}")
 
 
 @forms_app.command("build-script")

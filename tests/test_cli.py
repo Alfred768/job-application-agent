@@ -364,6 +364,34 @@ def test_cli_forms_build_script_can_upload_resume_file(tmp_path):
     assert f'await page.getByLabel("Resume").setInputFiles("{resume_path}");' in out_path.read_text()
 
 
+def test_cli_forms_build_snapshot_script_writes_inspection_only_script(tmp_path):
+    out_path = tmp_path / "capture-form.js"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "forms",
+            "build-snapshot-script",
+            "--application-url",
+            "https://jobs.example.com/apply",
+            "--out",
+            str(out_path),
+            "--snapshot-out",
+            "form-snapshot.json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote guarded form snapshot script" in result.output
+    text = out_path.read_text()
+    assert 'await page.goto("https://jobs.example.com/apply");' in text
+    assert 'fs.writeFileSync("form-snapshot.json"' in text
+    assert "querySelectorAll" in text
+    assert ".fill(" not in text
+    assert ".click(" not in text
+
+
 def test_cli_applications_prepare_generates_package_and_fill_script(tmp_path):
     jobs_path = tmp_path / "jobs.json"
     jobs_path.write_text(
