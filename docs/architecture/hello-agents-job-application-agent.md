@@ -606,9 +606,11 @@ class ResumeEditPlan:
 工具：
 
 - `FormFillerTool`
+- `FormFillScriptTool`
 - `FileUploadTool`
 - `SubmitGateTool`
 - 当前已实现：根据 approved profile facts 生成安全的 fill plan，并列出 review-required 字段。
+- 当前已实现：生成 guarded Playwright form-fill script，只填写低风险且高置信字段，不生成点击提交动作。
 
 策略：
 
@@ -617,6 +619,8 @@ class ResumeEditPlan:
 - 未知字段需要确认。
 - 上传简历允许自动执行。
 - 普通网页最终 Submit 不允许自动执行。
+
+`FormFillScriptTool` 是执行器层的中间产物生成器。它可以把 `FormFillPlan` 转成可审计的 Playwright 脚本，自动打开申请页面并填写低风险字段；脚本必须把敏感字段输出为 review list，并在最终提交前停住。
 
 `SubmitGateTool` 必须是强制工具，不能只靠 prompt：
 

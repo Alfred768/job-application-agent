@@ -227,3 +227,36 @@ def test_cli_import_remotive_jobs_writes_normalized_json(tmp_path):
     assert result.exit_code == 0
     assert "Imported 1 jobs" in result.output
     assert '"source": "remotive"' in out_path.read_text()
+
+
+def test_cli_forms_build_script_writes_guarded_playwright_script(tmp_path):
+    form_path = tmp_path / "form.json"
+    form_path.write_text('[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]')
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text('{"email": "gaoyi@example.com", "sponsorship": "Needs review"}')
+    out_path = tmp_path / "fill-form.js"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "forms",
+            "build-script",
+            "--form-snapshot",
+            str(form_path),
+            "--profile",
+            str(profile_path),
+            "--application-url",
+            "https://jobs.example.com/apply",
+            "--out",
+            str(out_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Wrote guarded form-fill script" in result.output
+    text = out_path.read_text()
+    assert 'await page.goto("https://jobs.example.com/apply");' in text
+    assert 'await page.getByLabel("Email").fill("gaoyi@example.com");' in text
+    assert "Do you require visa sponsorship?" in text
+    assert ".click(" not in text

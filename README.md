@@ -19,6 +19,7 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 - `hello_agents.tools.builtin.career.FormInspectorTool`
 - `hello_agents.tools.builtin.career.SensitiveFieldDetectorTool`
 - `hello_agents.tools.builtin.career.FormFillerTool`
+- `hello_agents.tools.builtin.career.FormFillScriptTool`
 - `hello_agents.tools.builtin.career.ResumeIndexerTool`
 - `hello_agents.tools.builtin.career.ResumeSelectorTool`
 - `hello_agents.tools.builtin.career.ResumeTailorTool`
@@ -133,6 +134,16 @@ job-agent jobs review jd.txt \
 
 The form-fill plan maps low-risk fields such as email/name and marks sensitive fields such as sponsorship, work authorization, salary, relocation, demographic, disability, veteran, and legal-attestation fields for review. It does not click Submit.
 
+Generate a guarded Playwright script that fills only low-risk fields and pauses before final submission:
+
+```bash
+job-agent forms build-script \
+  --form-snapshot examples/form-snapshot.json \
+  --profile examples/profile.json \
+  --application-url "https://example.com/apply" \
+  --out output/fill-form.js
+```
+
 Use the HelloAgents API directly:
 
 ```python
@@ -174,4 +185,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Auditable resume edit plan generation with unsupported keyword detection.
 - Local application package export for review artifacts.
 - Form snapshot inspection, sensitive-field detection, and guarded form-fill planning.
+- Guarded Playwright script generation for low-risk browser form filling.
 - Guarded form-fill plan model with manual final-submit policy.

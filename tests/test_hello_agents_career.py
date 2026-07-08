@@ -6,6 +6,7 @@ from hello_agents.tools.builtin.career import (
     ApplicationPackageTool,
     FitScorerTool,
     FormFillerTool,
+    FormFillScriptTool,
     FormInspectorTool,
     GreenhouseJobSourceTool,
     JDParserTool,
@@ -39,6 +40,7 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(FitScorerTool())
     registry.register_tool(FormInspectorTool())
     registry.register_tool(FormFillerTool())
+    registry.register_tool(FormFillScriptTool())
     registry.register_tool(GreenhouseJobSourceTool())
     registry.register_tool(JDParserTool())
     registry.register_tool(LeverJobSourceTool())
@@ -59,6 +61,7 @@ def test_career_tools_register_with_hello_agents_registry():
         "fit_scorer",
         "form_inspector",
         "form_filler",
+        "form_fill_script",
         "greenhouse_job_source",
         "jd_parser",
         "lever_job_source",
@@ -250,6 +253,24 @@ def test_form_filler_tool_creates_review_required_plan():
     assert "can_auto_submit=False" in result
     assert "Email=gaoyi@example.com" in result
     assert "review_required=Do you require visa sponsorship?" in result
+
+
+def test_form_fill_script_tool_generates_guarded_playwright_script():
+    snapshot = '[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]'
+    profile = '{"email": "gaoyi@example.com", "sponsorship": "Needs review"}'
+
+    result = FormFillScriptTool().run(
+        {
+            "form_snapshot_json": snapshot,
+            "profile_json": profile,
+            "application_url": "https://jobs.example.com/apply",
+        }
+    )
+
+    assert 'await page.goto("https://jobs.example.com/apply");' in result
+    assert 'await page.getByLabel("Email").fill("gaoyi@example.com");' in result
+    assert "Do you require visa sponsorship?" in result
+    assert ".click(" not in result
 
 
 def test_application_tracker_tool_creates_application_record(tmp_path):

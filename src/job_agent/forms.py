@@ -110,3 +110,37 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
             )
         )
     return FormFillPlan(fields=plans)
+
+
+def render_playwright_fill_script(plan: FormFillPlan, application_url: str | None = None) -> str:
+    lines = [
+        'const { chromium } = require("playwright");',
+        "",
+        "async function main() {",
+        "  const browser = await chromium.launch({ headless: false });",
+        "  const page = await browser.newPage();",
+    ]
+    if application_url:
+        lines.append(f"  await page.goto({json.dumps(application_url)});")
+
+    for field_item in plan.fields:
+        if field_item.sensitive or field_item.confidence < 0.9 or not field_item.value:
+            continue
+        lines.append(
+            f"  await page.getByLabel({json.dumps(field_item.label)}).fill({json.dumps(field_item.value)});"
+        )
+
+    lines.extend(
+        [
+            f"  console.log('Review required fields:', {json.dumps(plan.review_required_fields)});",
+            f"  console.log('Submit gate:', {json.dumps(plan.submit_gate_reason)});",
+            "  console.log('Review the page manually before any final submission.');",
+            "}",
+            "",
+            "main().catch((error) => {",
+            "  console.error(error);",
+            "  process.exit(1);",
+            "});",
+        ]
+    )
+    return "\n".join(lines) + "\n"

@@ -10,6 +10,7 @@ from job_agent.forms import (
     build_form_fill_plan,
     detect_sensitive_fields,
     inspect_form_snapshot,
+    render_playwright_fill_script,
 )
 
 
@@ -100,5 +101,43 @@ class FormFillerTool(Tool):
                 name="profile_json",
                 type="string",
                 description="JSON object containing approved profile facts.",
+            ),
+        ]
+
+
+class FormFillScriptTool(Tool):
+    """Generate a guarded Playwright script for low-risk form filling."""
+
+    def __init__(self):
+        super().__init__(
+            name="form_fill_script",
+            description="Generate a Playwright form-fill script that avoids sensitive fields and never submits.",
+        )
+
+    def run(self, parameters: dict[str, Any]) -> str:
+        snapshot = parameters.get("form_snapshot_json") or parameters.get("input") or "[]"
+        profile_json = parameters.get("profile_json") or "{}"
+        application_url = parameters.get("application_url")
+        profile = json.loads(profile_json)
+        plan = build_form_fill_plan(inspect_form_snapshot(snapshot), profile)
+        return render_playwright_fill_script(plan, application_url=application_url)
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(
+                name="form_snapshot_json",
+                type="string",
+                description="JSON array of form fields captured from an ATS page.",
+            ),
+            ToolParameter(
+                name="profile_json",
+                type="string",
+                description="JSON object containing approved profile facts.",
+            ),
+            ToolParameter(
+                name="application_url",
+                type="string",
+                description="Optional application page URL to open before filling fields.",
+                required=False,
             ),
         ]

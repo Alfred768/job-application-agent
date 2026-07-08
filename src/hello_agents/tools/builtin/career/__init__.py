@@ -2,7 +2,12 @@
 
 from .application_tracker import ApplicationTrackerTool
 from .document_exporter import ApplicationPackageTool
-from .form_tools import FormFillerTool, FormInspectorTool, SensitiveFieldDetectorTool
+from .form_tools import (
+    FormFillerTool,
+    FormFillScriptTool,
+    FormInspectorTool,
+    SensitiveFieldDetectorTool,
+)
 from .job_sources import (
     GreenhouseJobSourceTool,
     LeverJobSourceTool,
@@ -21,6 +26,7 @@ __all__ = [
     "ApplicationTrackerTool",
     "ApplicationPackageTool",
     "FormFillerTool",
+    "FormFillScriptTool",
     "FormInspectorTool",
     "GreenhouseJobSourceTool",
     "LeverJobSourceTool",

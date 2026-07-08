@@ -10,6 +10,7 @@ from urllib.request import urlopen
 import typer
 
 from job_agent.db import connect, init_db
+from job_agent.forms import build_form_fill_plan, inspect_form_snapshot, render_playwright_fill_script
 from job_agent.jobs import (
     format_job_as_jd_text,
     jobs_to_dicts,
@@ -23,6 +24,7 @@ from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 
 app = typer.Typer(help="Personal job application agent.")
+forms_app = typer.Typer(help="Application form automation commands.")
 jobs_app = typer.Typer(help="Job intake and review commands.")
 resumes_app = typer.Typer(help="Resume template commands.")
 
@@ -65,6 +67,34 @@ def index_resumes(source_dir: Path) -> None:
     for template in templates:
         typer.echo(f"{template.track}: docx={template.docx_path} pdf={template.pdf_path}")
     typer.echo(f"Indexed {len(templates)} resume templates")
+
+
+@forms_app.command("build-script")
+def build_form_script(
+    form_snapshot: Path = typer.Option(
+        ...,
+        "--form-snapshot",
+        help="JSON file containing captured application form fields.",
+    ),
+    profile: Path = typer.Option(
+        ...,
+        "--profile",
+        help="JSON file containing approved profile facts.",
+    ),
+    out: Path = typer.Option(Path("fill-form.js"), "--out", help="JavaScript output path."),
+    application_url: Optional[str] = typer.Option(
+        None,
+        "--application-url",
+        help="Optional application page URL to open before filling fields.",
+    ),
+) -> None:
+    plan = build_form_fill_plan(
+        inspect_form_snapshot(form_snapshot.read_text()),
+        json.loads(profile.read_text()),
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(render_playwright_fill_script(plan, application_url=application_url))
+    typer.echo(f"Wrote guarded form-fill script to {out}")
 
 
 @jobs_app.command("review")
@@ -230,4 +260,5 @@ def review_rss_jobs(
 
 
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(forms_app, name="forms")
 app.add_typer(resumes_app, name="resumes")
