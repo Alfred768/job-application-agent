@@ -1,0 +1,43 @@
+[
+  {
+    "label": "Full Name",
+    "type": "text",
+    "required": true
+  },
+  {
+    "label": "Email",
+    "type": "email",
+    "required": true
+  },
+  {
+    "label": "Phone",
+    "type": "tel",
+    "required": false
+  },
+  {
+    "label": "Portfolio URL",
+    "type": "url",
+    "required": false
+  },
+  {
+    "label": "Cover Letter",
+    "type": "textarea",
+    "required": false
+  },
+  {
+    "label": "Resume",
+    "type": "file",
+    "required": true
+  },
+  {
+    "label": "Are you authorized to work in the United States?",
+    "type": "select",
+    "required": true,
+    "options": ["Yes", "No"]
+  },
+  {
+    "label": "Desired Salary",
+    "type": "text",
+    "required": false
+  }
+]

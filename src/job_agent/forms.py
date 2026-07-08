@@ -85,6 +85,7 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
         value = ""
         confidence = 0.0
         action = "fill"
+        sensitive = is_sensitive_field(field_item.label)
         if field_item.field_type.lower() == "file":
             action = "upload"
             if "resume" in label_lower or "cv" in label_lower:
@@ -105,6 +106,24 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
         elif "github" in label_lower:
             value = profile.get("github", "")
             confidence = 1.0 if value else 0.0
+        elif "portfolio" in label_lower:
+            value = profile.get("portfolio", "") or profile.get("website", "")
+            confidence = 1.0 if value else 0.0
+        elif "website" in label_lower or "personal site" in label_lower:
+            value = profile.get("website", "") or profile.get("portfolio", "")
+            confidence = 1.0 if value else 0.0
+        elif "location" in label_lower or "city" in label_lower:
+            value = profile.get("location", "") or profile.get("city", "")
+            confidence = 1.0 if value else 0.0
+        elif "cover letter" in label_lower:
+            value = profile.get("cover_letter", "")
+            confidence = 1.0 if value else 0.0
+        elif "work authorization" in label_lower or "authorized to work" in label_lower:
+            value = profile.get("work_authorization", "")
+            confidence = 0.5 if value else 0.0
+        elif "salary" in label_lower:
+            value = profile.get("salary", "")
+            confidence = 0.5 if value else 0.0
         elif "sponsor" in label_lower or "visa" in label_lower:
             value = profile.get("sponsorship", "")
             confidence = 0.5 if value else 0.0
@@ -112,7 +131,7 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
             FieldPlan(
                 label=field_item.label,
                 value=value,
-                sensitive=is_sensitive_field(field_item.label),
+                sensitive=sensitive,
                 confidence=confidence,
                 action=action,
             )

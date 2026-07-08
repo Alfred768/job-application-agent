@@ -59,6 +59,40 @@ def test_file_field_requires_review_when_resume_file_missing():
     assert plan.review_required_fields == ["Resume"]
 
 
+def test_form_plan_fills_common_low_risk_profile_fields():
+    fields = inspect_form_snapshot(
+        """[
+          {"label": "Portfolio URL"},
+          {"label": "Personal Website"},
+          {"label": "Current Location"},
+          {"label": "Cover Letter"},
+          {"label": "Desired Salary"},
+          {"label": "Are you authorized to work in the United States?"}
+        ]"""
+    )
+
+    plan = build_form_fill_plan(
+        fields,
+        {
+            "portfolio": "https://gaoyi.example.com",
+            "website": "https://gaoyi.example.com",
+            "location": "New York, NY",
+            "cover_letter": "I am excited to apply because my agent work matches this role.",
+            "salary": "Needs review",
+            "work_authorization": "Needs review",
+        },
+    )
+
+    by_label = {field.label: field for field in plan.fields}
+    assert by_label["Portfolio URL"].value == "https://gaoyi.example.com"
+    assert by_label["Personal Website"].value == "https://gaoyi.example.com"
+    assert by_label["Current Location"].value == "New York, NY"
+    assert by_label["Cover Letter"].value.startswith("I am excited")
+    assert by_label["Desired Salary"].sensitive is True
+    assert by_label["Desired Salary"].confidence < 0.9
+    assert by_label["Are you authorized to work in the United States?"].sensitive is True
+
+
 def test_render_playwright_form_snapshot_script_only_inspects_fields():
     script = render_playwright_form_snapshot_script(
         application_url="https://jobs.example.com/apply",
