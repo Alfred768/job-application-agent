@@ -2,8 +2,8 @@
 
 Date: 2026-07-08
 Status: Ready for user review
-Project root: `/Users/wugaoyi/Learning/Project/Agent_Lesson/Application`
-Resume source: `/Users/wugaoyi/Learning/求职/英文简历(最新)`
+Project root: configurable local checkout
+Resume source: configured through `RESUME_SOURCE_DIR`
 
 ## 1. Project Goal
 
@@ -50,7 +50,7 @@ Job sources:
 
 User assets:
 
-- Existing resume templates in `/Users/wugaoyi/Learning/求职/英文简历(最新)`.
+- Existing resume templates from the local directory configured through `RESUME_SOURCE_DIR`.
 - Existing role-oriented templates: Agent Engineer, SDE, MLE, ML Infra, AI Algorithm Engineer, Data Scientist, Unity ML Infrastructure.
 - User profile facts: name, contact details, links, education, work history, publications, projects, work authorization answers, preferences, and reusable application answers.
 
