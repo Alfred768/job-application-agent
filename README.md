@@ -1,8 +1,20 @@
 # Job Application Agent
 
-Local-first personal job application agent designed with a PEAS task-environment model.
+Local-first personal job application agent designed with a PEAS task-environment model and built on a HelloAgents-style agent/tool framework.
 
 The MVP helps with compliant job intake, JD review, resume-template selection, fit scoring, and review packet generation. Browser form filling is designed with a hard safety gate: final Submit remains manual unless a source-specific adapter explicitly permits auto-submit.
+
+## HelloAgents Base
+
+This project now includes a `hello_agents` package adapted from the public Datawhale Hello-Agents ecosystem, specifically the reusable `hello_agents` framework package found under the upstream co-creation projects. The job application workflow is exposed as:
+
+- `hello_agents.agents.job_application_agent.JobApplicationAgent`
+- `hello_agents.tools.builtin.career.ManualJDImportTool`
+- `hello_agents.tools.builtin.career.FitScorerTool`
+- `hello_agents.tools.builtin.career.ReviewPacketTool`
+- `hello_agents.tools.builtin.career.SubmitGateTool`
+
+The existing CLI calls the HelloAgents-based `JobApplicationAgent` for JD review.
 
 ## Safety Boundaries
 
@@ -49,6 +61,23 @@ Create a review packet from a pasted JD saved as a text file:
 
 ```bash
 job-agent jobs review jd.txt --out output/application-review.md
+```
+
+Use the HelloAgents API directly:
+
+```python
+from hello_agents.agents.job_application_agent import JobApplicationAgent
+
+
+class DeterministicLLM:
+    provider = "deterministic"
+
+    def invoke(self, messages, **kwargs):
+        return ""
+
+
+agent = JobApplicationAgent(name="career-agent", llm=DeterministicLLM())
+print(agent.run("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents."))
 ```
 
 ## Development
