@@ -206,6 +206,9 @@ class MessageRole:
 
 ```text
 OPENAI_API_KEY
+LLM_PROVIDER
+LLM_MODEL_ID
+LLM_BASE_URL
 RESUME_SOURCE_DIR
 OUTPUT_DIR
 DATABASE_PATH
@@ -214,7 +217,7 @@ BROWSER_HEADLESS
 AUTO_SUBMIT_ALLOWLIST
 ```
 
-其中 `AUTO_SUBMIT_ALLOWLIST` 默认必须为空。只有明确允许自动提交的官方 API/ATS adapter 才能加入。
+其中 `AUTO_SUBMIT_ALLOWLIST` 默认必须为空。只有明确允许自动提交的官方 API/ATS adapter 才能加入。CLI 默认使用 deterministic mode；只有用户显式传入 `--use-llm` 时，才通过 `HelloAgentsLLM` 使用 `OPENAI_API_KEY` / `LLM_*` 配置调用 OpenAI-compatible API。
 
 ### 4.5 `core/exceptions.py`
 

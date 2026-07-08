@@ -22,11 +22,13 @@ from job_agent.jobs import (
 from job_agent.models import Job
 from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
+from hello_agents.core.llm import HelloAgentsLLM
 
 app = typer.Typer(help="Personal job application agent.")
 applications_app = typer.Typer(help="End-to-end application preparation commands.")
 forms_app = typer.Typer(help="Application form automation commands.")
 jobs_app = typer.Typer(help="Job intake and review commands.")
+llm_app = typer.Typer(help="LLM configuration and connectivity commands.")
 resumes_app = typer.Typer(help="Resume template commands.")
 
 
@@ -35,6 +37,22 @@ class DeterministicLLM:
 
     def invoke(self, messages, **kwargs):
         return ""
+
+
+def _build_llm(
+    use_llm: bool = False,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+):
+    if not use_llm:
+        return DeterministicLLM()
+    return HelloAgentsLLM(
+        model=model,
+        provider=provider,
+        base_url=base_url,
+        temperature=0.2,
+    )
 
 
 def _review_slug(index: int, job: Job) -> str:
@@ -74,13 +92,23 @@ def _write_review_packets(
     resume_source_dir: Optional[Path] = None,
     db: Optional[Path] = None,
     package_dir: Optional[Path] = None,
+    use_llm: bool = False,
+    llm_model: Optional[str] = None,
+    llm_provider: Optional[str] = None,
+    llm_base_url: Optional[str] = None,
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    llm = _build_llm(
+        use_llm=use_llm,
+        model=llm_model,
+        provider=llm_provider,
+        base_url=llm_base_url,
+    )
     for index, job in enumerate(jobs, start=1):
         slug = _review_slug(index, job)
         agent = JobApplicationAgent(
             name="job-application-agent",
-            llm=DeterministicLLM(),
+            llm=llm,
             resume_source_dir=resume_source_dir,
             database_path=db,
             package_dir=(package_dir / slug) if package_dir else None,
@@ -102,6 +130,23 @@ def index_resumes(source_dir: Path) -> None:
     for template in templates:
         typer.echo(f"{template.track}: docx={template.docx_path} pdf={template.pdf_path}")
     typer.echo(f"Indexed {len(templates)} resume templates")
+
+
+@llm_app.command("smoke")
+def smoke_llm(
+    prompt: str = typer.Option("ping", "--prompt", help="Prompt to send to the configured LLM."),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use HelloAgentsLLM instead of deterministic mode."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
+) -> None:
+    llm = _build_llm(
+        use_llm=use_llm,
+        model=llm_model,
+        provider=llm_provider,
+        base_url=llm_base_url,
+    )
+    typer.echo(llm.invoke([{"role": "user", "content": prompt}]))
 
 
 @applications_app.command("prepare")
@@ -129,6 +174,10 @@ def prepare_application(
         "--profile",
         help="Optional JSON file containing approved profile facts for form filling.",
     ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
 ) -> None:
     raw_jobs = json.loads(jobs_file.read_text())
     if index < 1 or index > len(raw_jobs):
@@ -138,7 +187,12 @@ def prepare_application(
     profile_json = profile.read_text() if profile else None
     agent = JobApplicationAgent(
         name="job-application-agent",
-        llm=DeterministicLLM(),
+        llm=_build_llm(
+            use_llm=use_llm,
+            model=llm_model,
+            provider=llm_provider,
+            base_url=llm_base_url,
+        ),
         resume_source_dir=resume_source_dir,
         database_path=db,
         package_dir=out_dir,
@@ -218,12 +272,21 @@ def review_job(
         "--profile",
         help="Optional JSON file containing approved profile facts for form filling.",
     ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
 ) -> None:
     form_snapshot_json = form_snapshot.read_text() if form_snapshot else None
     profile_json = profile.read_text() if profile else None
     agent = JobApplicationAgent(
         name="job-application-agent",
-        llm=DeterministicLLM(),
+        llm=_build_llm(
+            use_llm=use_llm,
+            model=llm_model,
+            provider=llm_provider,
+            base_url=llm_base_url,
+        ),
         resume_source_dir=resume_source_dir,
         database_path=db,
         package_dir=package_dir,
@@ -290,10 +353,24 @@ def review_greenhouse_jobs(
         "--package-dir",
         help="Optional directory root to export per-job application package artifacts.",
     ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
 ) -> None:
     url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
     jobs = parse_greenhouse_jobs(_read_json_source(payload, url), board_token=board_token, limit=limit)
-    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    _write_review_packets(
+        jobs,
+        out_dir,
+        resume_source_dir=resume_source_dir,
+        db=db,
+        package_dir=package_dir,
+        use_llm=use_llm,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+    )
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
@@ -339,10 +416,24 @@ def review_lever_jobs(
         "--package-dir",
         help="Optional directory root to export per-job application package artifacts.",
     ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
 ) -> None:
     url = f"https://api.lever.co/v0/postings/{site}?mode=json"
     jobs = parse_lever_jobs(_read_json_source(payload, url), site=site, limit=limit)
-    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    _write_review_packets(
+        jobs,
+        out_dir,
+        resume_source_dir=resume_source_dir,
+        db=db,
+        package_dir=package_dir,
+        use_llm=use_llm,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+    )
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
@@ -402,6 +493,10 @@ def review_remotive_jobs(
         "--package-dir",
         help="Optional directory root to export per-job application package artifacts.",
     ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
 ) -> None:
     query = {
         key: value
@@ -415,7 +510,17 @@ def review_remotive_jobs(
     }
     suffix = f"?{urlencode(query)}" if query else ""
     jobs = parse_remotive_jobs(_read_json_source(payload, f"https://remotive.com/api/remote-jobs{suffix}"), limit=limit)
-    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    _write_review_packets(
+        jobs,
+        out_dir,
+        resume_source_dir=resume_source_dir,
+        db=db,
+        package_dir=package_dir,
+        use_llm=use_llm,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+    )
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
@@ -440,13 +545,28 @@ def review_rss_jobs(
         "--package-dir",
         help="Optional directory root to export per-job application package artifacts.",
     ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
 ) -> None:
     jobs = parse_rss_jobs(rss_file.read_text(), source=source, limit=limit)
-    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    _write_review_packets(
+        jobs,
+        out_dir,
+        resume_source_dir=resume_source_dir,
+        db=db,
+        package_dir=package_dir,
+        use_llm=use_llm,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+    )
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
 app.add_typer(applications_app, name="applications")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(forms_app, name="forms")
+app.add_typer(llm_app, name="llm")
 app.add_typer(resumes_app, name="resumes")

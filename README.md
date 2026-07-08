@@ -53,9 +53,18 @@ Edit `.env`:
 
 ```bash
 OPENAI_API_KEY=your_key_here
+LLM_PROVIDER=openai
+LLM_MODEL_ID=gpt-4o-mini
+LLM_BASE_URL=https://api.openai.com/v1
 RESUME_SOURCE_DIR=/absolute/path/to/your/english-resumes
 OUTPUT_DIR=output
 DATABASE_PATH=job-agent.db
+```
+
+By default, CLI workflows use deterministic local logic. Add `--use-llm` to LLM-aware commands when you want the configured API key/model to be used. You can verify connectivity with:
+
+```bash
+job-agent llm smoke --use-llm --prompt "Reply with OK"
 ```
 
 ## Usage
@@ -104,19 +113,22 @@ Generate review packets directly from public Job APIs:
 job-agent jobs review-greenhouse company-board-token \
   --out-dir output/greenhouse-reviews \
   --resume-source-dir "$RESUME_SOURCE_DIR" \
-  --db job-agent.db
+  --db job-agent.db \
+  --use-llm
 
 job-agent jobs review-lever company-site-slug \
   --out-dir output/lever-reviews \
   --resume-source-dir "$RESUME_SOURCE_DIR" \
-  --db job-agent.db
+  --db job-agent.db \
+  --use-llm
 
 job-agent jobs review-remotive \
   --search "agent engineer" \
   --limit 10 \
   --out-dir output/remotive-reviews \
   --resume-source-dir "$RESUME_SOURCE_DIR" \
-  --db job-agent.db
+  --db job-agent.db \
+  --use-llm
 ```
 
 Prepare a single application package from a normalized `jobs.json` item:
@@ -128,7 +140,8 @@ job-agent applications prepare output/greenhouse-jobs.json \
   --resume-source-dir "$RESUME_SOURCE_DIR" \
   --db job-agent.db \
   --form-snapshot examples/form-snapshot.json \
-  --profile examples/profile.json
+  --profile examples/profile.json \
+  --use-llm
 ```
 
 This writes the review packet, JD analysis, resume edit plan, submit gate, and, when form data is provided, a guarded `fill-form.js` script.
@@ -183,16 +196,11 @@ Use the HelloAgents API directly:
 
 ```python
 from hello_agents.agents.job_application_agent import JobApplicationAgent
+from hello_agents.core.llm import HelloAgentsLLM
 
 
-class DeterministicLLM:
-    provider = "deterministic"
-
-    def invoke(self, messages, **kwargs):
-        return ""
-
-
-agent = JobApplicationAgent(name="career-agent", llm=DeterministicLLM())
+llm = HelloAgentsLLM(provider="openai", model="gpt-4o-mini")
+agent = JobApplicationAgent(name="career-agent", llm=llm)
 print(agent.run("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents."))
 ```
 

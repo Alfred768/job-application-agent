@@ -15,3 +15,15 @@ def test_config_defaults_output_dir_to_project_output(monkeypatch):
     config = AppConfig.from_env()
 
     assert config.output_dir.name == "output"
+
+
+def test_config_reads_llm_settings(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL_ID", "gpt-4o-mini")
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "https://api.openai.com/v1")
+
+    config = AppConfig.from_env()
+
+    assert config.llm_model_id == "gpt-4o-mini"
+    assert config.llm_provider == "openai"
+    assert config.llm_base_url == "https://api.openai.com/v1"
