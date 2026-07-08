@@ -28,6 +28,7 @@ from job_agent.models import Job
 from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
 from job_agent.resumes import index_resume_templates
 from job_agent.runners import render_batch_fill_runner
+from job_agent.scoring import classify_role
 from job_agent.shortlist import shortlisted_jobs_to_dicts, shortlist_jobs
 from job_agent.source_config import load_jobs_from_source_config
 from hello_agents.agents.job_application_agent import JobApplicationAgent
@@ -168,6 +169,25 @@ def _prepare_application_package(
         tailored_resume_path.write_text(
             render_tailored_resume_draft(resume.read_text(), resume_plan)
         )
+    elif resume_source_dir:
+        selected_track = classify_role(job)
+        selected_template = next(
+            (
+                template
+                for template in index_resume_templates(resume_source_dir)
+                if template.track == selected_track and template.parsed_text
+            ),
+            None,
+        )
+        if selected_template and selected_template.parsed_text:
+            tailored_resume_path = out_dir / "tailored-resume.md"
+            resume_plan = propose_resume_edit_plan(
+                format_job_as_jd_text(job),
+                resume_track=selected_template.track,
+            )
+            tailored_resume_path.write_text(
+                render_tailored_resume_draft(selected_template.parsed_text, resume_plan)
+            )
 
     fill_script_path = None
     if form_snapshot and profile:

@@ -83,6 +83,8 @@ Index local resume templates:
 job-agent resumes index "$RESUME_SOURCE_DIR"
 ```
 
+The indexer pairs role-specific DOCX/PDF files and extracts resume text when possible. Application preparation can use that parsed text automatically when `--resume-source-dir` is provided.
+
 Generate a grounded tailored resume draft from a JD and base resume text:
 
 ```bash
@@ -180,12 +182,11 @@ job-agent applications prepare output/greenhouse-jobs.json \
   --db job-agent.db \
   --form-snapshot examples/form-snapshot.json \
   --profile examples/profile.json \
-  --resume resume.txt \
   --upload-resume \
   --use-llm
 ```
 
-This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md`. With `--upload-resume`, the script wires `tailored-resume.md` into Resume/CV upload fields, but it still does not click Submit.
+This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md`. If `--resume` is omitted, the agent selects the closest parseable template from `--resume-source-dir`; if `--resume` is provided, that file is used as the base resume text. With `--upload-resume`, the script wires `tailored-resume.md` into Resume/CV upload fields, but it still does not click Submit.
 
 You can also prepare from a short list:
 
@@ -203,7 +204,6 @@ job-agent applications prepare-shortlist output/shortlist.json \
   --db job-agent.db \
   --form-snapshot examples/form-snapshot.json \
   --profile examples/profile.json \
-  --resume resume.txt \
   --upload-resume \
   --use-llm
 ```
@@ -300,7 +300,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 
 - Environment-based configuration.
 - SQLite schema for jobs, resume templates, fit scores, applications, and generated documents.
-- Resume template indexing for role-specific DOCX/PDF files.
+- Resume template indexing for role-specific DOCX/PDF files, including parsed resume text when available.
 - Manual JD import from text.
 - Public RSS/Atom job feed import with normalized source/apply URLs.
 - Public Greenhouse, Lever, and Remotive job API imports with normalized source/apply URLs.
@@ -310,6 +310,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Single-job application package preparation from normalized job source JSON.
 - Batch application package preparation from shortlisted job JSON.
 - Guarded batch runner generation for sequential low-risk form filling.
+- Automatic tailored resume draft generation from the selected parseable resume template.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.

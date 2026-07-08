@@ -522,6 +522,7 @@ class FitScore:
 职责：
 
 - 扫描 `RESUME_SOURCE_DIR`。
+- 从可解析 DOCX/PDF 中提取 `parsed_text`，作为后续 tailored resume draft 的基础文本。
 - 识别七类模板：
   - Agent Engineer
   - SDE
@@ -560,6 +561,7 @@ class FitScore:
 
 - `ResumeTailorTool`：生成 auditable edit plan。
 - `ResumeDraftTool`：基于 base resume text 生成 `tailored-resume.md` 草稿，只插入 supported JD keywords，并把 unsupported keywords 放入 review-required 区域。
+- `applications prepare` / `prepare-shortlist`：当用户没有显式传入 `--resume` 时，使用 `--resume-source-dir` 中与 JD role track 匹配且带 `parsed_text` 的模板生成 `tailored-resume.md`。
 - `TruthfulnessCheckTool`：阻止 unsupported keywords 被当作事实经历写入。
 
 输出：

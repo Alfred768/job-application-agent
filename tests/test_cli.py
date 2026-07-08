@@ -1,6 +1,21 @@
+from zipfile import ZIP_DEFLATED, ZipFile
+
 from typer.testing import CliRunner
 
 from job_agent.cli import app
+
+
+def write_minimal_docx(path, paragraphs):
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body>"
+        + "".join(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>" for text in paragraphs)
+        + "</w:body></w:document>"
+    )
+    with ZipFile(path, "w", ZIP_DEFLATED) as docx:
+        docx.writestr("[Content_Types].xml", "<Types></Types>")
+        docx.writestr("word/document.xml", document_xml)
 
 
 def test_cli_init_db(tmp_path):
@@ -599,6 +614,51 @@ def test_cli_applications_prepare_can_generate_tailored_resume_draft(tmp_path):
     assert "# Tailored Resume Draft" in tailored
     assert "LangChain" in tailored
     assert "Unsupported JD keywords not inserted: Rust" in tailored
+
+
+def test_cli_applications_prepare_uses_selected_resume_template_text(tmp_path):
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme AI",
+            "location": "Remote",
+            "raw_jd": "Build LLM agents with LangChain, FastAPI, and RAG.",
+            "source": "greenhouse:acme",
+            "source_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "apply_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "remote_policy": null
+          }
+        ]"""
+    )
+    resume_dir = tmp_path / "resumes"
+    resume_dir.mkdir()
+    write_minimal_docx(
+        resume_dir / "GAOYI_WU_Agent_Engineer.docx",
+        ["Gaoyi Wu", "Built FastAPI services and LLM workflow tools."],
+    )
+    out_dir = tmp_path / "application"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "applications",
+            "prepare",
+            str(jobs_path),
+            "--out-dir",
+            str(out_dir),
+            "--resume-source-dir",
+            str(resume_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    tailored = (out_dir / "tailored-resume.md").read_text()
+    assert "Gaoyi Wu" in tailored
+    assert "Built FastAPI services and LLM workflow tools." in tailored
+    assert "LangChain" in tailored
 
 
 def test_cli_applications_prepare_can_wire_tailored_resume_upload(tmp_path):
