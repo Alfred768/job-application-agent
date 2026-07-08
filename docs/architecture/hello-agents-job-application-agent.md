@@ -219,6 +219,8 @@ AUTO_SUBMIT_ALLOWLIST
 
 其中 `AUTO_SUBMIT_ALLOWLIST` 默认必须为空。只有明确允许自动提交的官方 API/ATS adapter 才能加入。CLI 默认使用 deterministic mode；只有用户显式传入 `--use-llm` 时，才通过 `HelloAgentsLLM` 使用 `OPENAI_API_KEY` / `LLM_*` 配置调用 OpenAI-compatible API。
 
+`--use-llm` 当前用于生成 `LLM Review Notes`，属于 Thought / Planning 的辅助审阅层。它不能覆盖 `TruthfulnessCheckTool`、`SensitiveFieldDetectorTool` 或 `SubmitGateTool` 的安全结论。
+
 ### 4.5 `core/exceptions.py`
 
 建议异常体系：

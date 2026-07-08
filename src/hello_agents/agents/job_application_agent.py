@@ -102,6 +102,16 @@ class JobApplicationAgent(PlanAndSolveAgent):
         )
         sections.append(f"## Truthfulness Gate\n\n{truthfulness}")
 
+        if self._should_use_llm_notes():
+            llm_notes = self._generate_llm_review_notes(
+                jd_text=input_text,
+                jd_analysis=jd_analysis,
+                edit_plan=edit_plan,
+                truthfulness=truthfulness,
+            )
+            if llm_notes.strip():
+                sections.append(f"## LLM Review Notes\n\n{llm_notes.strip()}")
+
         if self.database_path is not None:
             tracking = self.tool_registry.get_tool("application_tracker").run(
                 {"database_path": str(self.database_path), "jd_text": input_text}
@@ -137,3 +147,24 @@ class JobApplicationAgent(PlanAndSolveAgent):
         submit_gate = self.tool_registry.execute_tool("submit_gate", "")
         sections.append(f"## Submit Gate\n\n{submit_gate}")
         return "\n\n".join(sections) + "\n"
+
+    def _should_use_llm_notes(self) -> bool:
+        return getattr(self.llm, "provider", "deterministic") != "deterministic"
+
+    def _generate_llm_review_notes(
+        self,
+        jd_text: str,
+        jd_analysis: str,
+        edit_plan: str,
+        truthfulness: str,
+    ) -> str:
+        prompt = (
+            "Review this job application plan for a human applicant. "
+            "Give concise advice only. Do not invent experience, do not weaken the "
+            "truthfulness gate, and do not suggest automatic final submission.\n\n"
+            f"JD:\n{jd_text}\n\n"
+            f"JD analysis JSON:\n{jd_analysis}\n\n"
+            f"Resume edit plan JSON:\n{edit_plan}\n\n"
+            f"Truthfulness gate:\n{truthfulness}\n"
+        )
+        return self.llm.invoke([{"role": "user", "content": prompt}], max_tokens=400) or ""

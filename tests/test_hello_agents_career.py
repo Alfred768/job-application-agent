@@ -31,6 +31,17 @@ class FakeLLM:
         return "fake response"
 
 
+class RecordingLLM:
+    provider = "openai"
+
+    def __init__(self):
+        self.messages = []
+
+    def invoke(self, messages, **kwargs):
+        self.messages.append(messages)
+        return "Prioritize agent workflow achievements and keep claims truthful."
+
+
 def test_career_tools_register_with_hello_agents_registry():
     registry = ToolRegistry()
 
@@ -154,6 +165,17 @@ def test_job_application_agent_includes_form_fill_plan():
     assert "## Form Fill Plan" in result
     assert "Email=gaoyi@example.com" in result
     assert "review_required=Do you require visa sponsorship?" in result
+
+
+def test_job_application_agent_uses_llm_for_review_notes_when_enabled():
+    llm = RecordingLLM()
+    agent = JobApplicationAgent(name="career-agent", llm=llm)
+
+    result = agent.run("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents.")
+
+    assert llm.messages
+    assert "## LLM Review Notes" in result
+    assert "Prioritize agent workflow achievements" in result
 
 
 def test_job_application_state_starts_with_manual_submit_gate():

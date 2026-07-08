@@ -67,6 +67,8 @@ By default, CLI workflows use deterministic local logic. Add `--use-llm` to LLM-
 job-agent llm smoke --use-llm --prompt "Reply with OK"
 ```
 
+When `--use-llm` is enabled for review or application preparation commands, the generated packet includes an `LLM Review Notes` section. These notes are advisory only; the truthfulness gate and manual Submit gate still remain authoritative.
+
 ## Usage
 
 Initialize the local database:
