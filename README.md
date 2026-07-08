@@ -12,6 +12,9 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 - `hello_agents.tools.builtin.career.ManualJDImportTool`
 - `hello_agents.tools.builtin.career.JDParserTool`
 - `hello_agents.tools.builtin.career.FitScorerTool`
+- `hello_agents.tools.builtin.career.FormInspectorTool`
+- `hello_agents.tools.builtin.career.SensitiveFieldDetectorTool`
+- `hello_agents.tools.builtin.career.FormFillerTool`
 - `hello_agents.tools.builtin.career.ResumeIndexerTool`
 - `hello_agents.tools.builtin.career.ResumeSelectorTool`
 - `hello_agents.tools.builtin.career.ResumeTailorTool`
@@ -89,6 +92,17 @@ job-agent jobs review jd.txt \
   --package-dir output/acme-agent-engineer
 ```
 
+Create a guarded form-fill plan from a captured form snapshot and approved profile facts:
+
+```bash
+job-agent jobs review jd.txt \
+  --out output/application-review.md \
+  --form-snapshot examples/form-snapshot.json \
+  --profile examples/profile.json
+```
+
+The form-fill plan maps low-risk fields such as email/name and marks sensitive fields such as sponsorship, work authorization, salary, relocation, demographic, disability, veteran, and legal-attestation fields for review. It does not click Submit.
+
 Use the HelloAgents API directly:
 
 ```python
@@ -126,4 +140,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - HelloAgents-based resume selection and application tracking tools.
 - Auditable resume edit plan generation with unsupported keyword detection.
 - Local application package export for review artifacts.
+- Form snapshot inspection, sensitive-field detection, and guarded form-fill planning.
 - Guarded form-fill plan model with manual final-submit policy.

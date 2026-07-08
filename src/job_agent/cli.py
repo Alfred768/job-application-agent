@@ -55,13 +55,27 @@ def review_job(
         "--package-dir",
         help="Optional directory to export application package artifacts.",
     ),
+    form_snapshot: Optional[Path] = typer.Option(
+        None,
+        "--form-snapshot",
+        help="Optional JSON file containing captured application form fields.",
+    ),
+    profile: Optional[Path] = typer.Option(
+        None,
+        "--profile",
+        help="Optional JSON file containing approved profile facts for form filling.",
+    ),
 ) -> None:
+    form_snapshot_json = form_snapshot.read_text() if form_snapshot else None
+    profile_json = profile.read_text() if profile else None
     agent = JobApplicationAgent(
         name="job-application-agent",
         llm=DeterministicLLM(),
         resume_source_dir=resume_source_dir,
         database_path=db,
         package_dir=package_dir,
+        form_snapshot_json=form_snapshot_json,
+        profile_json=profile_json,
     )
     review = agent.run(jd_file.read_text())
     out.parent.mkdir(parents=True, exist_ok=True)

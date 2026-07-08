@@ -12,6 +12,8 @@ from hello_agents.tools.builtin.career import (
     ApplicationPackageTool,
     ApplicationTrackerTool,
     FitScorerTool,
+    FormFillerTool,
+    FormInspectorTool,
     JDParserTool,
     ManualJDImportTool,
     ResumeIndexerTool,
@@ -19,6 +21,7 @@ from hello_agents.tools.builtin.career import (
     ResumeTailorTool,
     ReviewPacketTool,
     SubmitGateTool,
+    SensitiveFieldDetectorTool,
     TruthfulnessCheckTool,
 )
 from hello_agents.tools.registry import ToolRegistry
@@ -42,6 +45,8 @@ class JobApplicationAgent(PlanAndSolveAgent):
         resume_source_dir: Optional[str | Path] = None,
         database_path: Optional[str | Path] = None,
         package_dir: Optional[str | Path] = None,
+        form_snapshot_json: Optional[str] = None,
+        profile_json: Optional[str] = None,
     ):
         super().__init__(
             name=name,
@@ -53,6 +58,8 @@ class JobApplicationAgent(PlanAndSolveAgent):
         self.resume_source_dir = Path(resume_source_dir) if resume_source_dir else None
         self.database_path = Path(database_path) if database_path else None
         self.package_dir = Path(package_dir) if package_dir else None
+        self.form_snapshot_json = form_snapshot_json
+        self.profile_json = profile_json
 
     @staticmethod
     def _default_registry() -> ToolRegistry:
@@ -61,12 +68,15 @@ class JobApplicationAgent(PlanAndSolveAgent):
         registry.register_tool(ApplicationTrackerTool())
         registry.register_tool(ManualJDImportTool())
         registry.register_tool(FitScorerTool())
+        registry.register_tool(FormInspectorTool())
+        registry.register_tool(FormFillerTool())
         registry.register_tool(JDParserTool())
         registry.register_tool(ResumeIndexerTool())
         registry.register_tool(ResumeSelectorTool())
         registry.register_tool(ResumeTailorTool())
         registry.register_tool(ReviewPacketTool())
         registry.register_tool(SubmitGateTool())
+        registry.register_tool(SensitiveFieldDetectorTool())
         registry.register_tool(TruthfulnessCheckTool())
         return registry
 
@@ -103,6 +113,26 @@ class JobApplicationAgent(PlanAndSolveAgent):
                 {"output_dir": str(self.package_dir), "jd_text": input_text}
             )
             sections.append(f"## Application Package\n\n{package}")
+
+        if self.form_snapshot_json is not None and self.profile_json is not None:
+            inspected = self.tool_registry.get_tool("form_inspector").run(
+                {"form_snapshot_json": self.form_snapshot_json}
+            )
+            sensitive = self.tool_registry.get_tool("sensitive_field_detector").run(
+                {"form_snapshot_json": self.form_snapshot_json}
+            )
+            form_plan = self.tool_registry.get_tool("form_filler").run(
+                {
+                    "form_snapshot_json": self.form_snapshot_json,
+                    "profile_json": self.profile_json,
+                }
+            )
+            sections.append(
+                "## Form Fill Plan\n\n"
+                f"### Form Fields\n\n```json\n{inspected}\n```\n\n"
+                f"### Sensitive Fields\n\n{sensitive}\n\n"
+                f"### Fill Plan\n\n{form_plan}"
+            )
 
         submit_gate = self.tool_registry.execute_tool("submit_gate", "")
         sections.append(f"## Submit Gate\n\n{submit_gate}")

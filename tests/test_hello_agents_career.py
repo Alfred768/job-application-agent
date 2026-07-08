@@ -5,6 +5,8 @@ from hello_agents.tools.builtin.career import (
     ApplicationTrackerTool,
     ApplicationPackageTool,
     FitScorerTool,
+    FormFillerTool,
+    FormInspectorTool,
     JDParserTool,
     ManualJDImportTool,
     ResumeIndexerTool,
@@ -12,6 +14,7 @@ from hello_agents.tools.builtin.career import (
     ResumeTailorTool,
     ReviewPacketTool,
     SubmitGateTool,
+    SensitiveFieldDetectorTool,
     TruthfulnessCheckTool,
 )
 
@@ -30,12 +33,15 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(ApplicationTrackerTool())
     registry.register_tool(ApplicationPackageTool())
     registry.register_tool(FitScorerTool())
+    registry.register_tool(FormInspectorTool())
+    registry.register_tool(FormFillerTool())
     registry.register_tool(JDParserTool())
     registry.register_tool(ResumeIndexerTool())
     registry.register_tool(ResumeSelectorTool())
     registry.register_tool(ResumeTailorTool())
     registry.register_tool(ReviewPacketTool())
     registry.register_tool(SubmitGateTool())
+    registry.register_tool(SensitiveFieldDetectorTool())
     registry.register_tool(TruthfulnessCheckTool())
 
     assert {
@@ -43,12 +49,15 @@ def test_career_tools_register_with_hello_agents_registry():
         "application_tracker",
         "application_package",
         "fit_scorer",
+        "form_inspector",
+        "form_filler",
         "jd_parser",
         "resume_indexer",
         "resume_selector",
         "resume_tailor",
         "review_packet",
         "submit_gate",
+        "sensitive_field_detector",
         "truthfulness_check",
     } <= set(registry.list_tools())
 
@@ -113,6 +122,23 @@ def test_job_application_agent_exports_application_package(tmp_path):
     assert (package_dir / "jd-analysis.json").exists()
     assert (package_dir / "resume-edit-plan.json").exists()
     assert (package_dir / "submit-gate.txt").exists()
+
+
+def test_job_application_agent_includes_form_fill_plan():
+    snapshot = '[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]'
+    profile = '{"email": "gaoyi@example.com", "sponsorship": "Needs review"}'
+    agent = JobApplicationAgent(
+        name="career-agent",
+        llm=FakeLLM(),
+        form_snapshot_json=snapshot,
+        profile_json=profile,
+    )
+
+    result = agent.run("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents.")
+
+    assert "## Form Fill Plan" in result
+    assert "Email=gaoyi@example.com" in result
+    assert "review_required=Do you require visa sponsorship?" in result
 
 
 def test_job_application_state_starts_with_manual_submit_gate():
@@ -183,6 +209,35 @@ def test_application_package_tool_writes_review_artifacts(tmp_path):
     assert '"role_track": "Agent Engineer"' in (out_dir / "jd-analysis.json").read_text()
     assert '"target_track": "Agent Engineer"' in (out_dir / "resume-edit-plan.json").read_text()
     assert "Final Submit remains manual" in (out_dir / "submit-gate.txt").read_text()
+
+
+def test_form_inspector_tool_normalizes_field_snapshot():
+    snapshot = '[{"label": "Email", "type": "email", "required": true}, {"label": "Sponsorship", "type": "radio"}]'
+
+    result = FormInspectorTool().run({"form_snapshot_json": snapshot})
+
+    assert '"label": "Email"' in result
+    assert '"required": true' in result
+    assert '"label": "Sponsorship"' in result
+
+
+def test_sensitive_field_detector_flags_sponsorship():
+    snapshot = '[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]'
+
+    result = SensitiveFieldDetectorTool().run({"form_snapshot_json": snapshot})
+
+    assert "sensitive_fields=Do you require visa sponsorship?" in result
+
+
+def test_form_filler_tool_creates_review_required_plan():
+    snapshot = '[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]'
+    profile = '{"email": "gaoyi@example.com", "sponsorship": "Needs review"}'
+
+    result = FormFillerTool().run({"form_snapshot_json": snapshot, "profile_json": profile})
+
+    assert "can_auto_submit=False" in result
+    assert "Email=gaoyi@example.com" in result
+    assert "review_required=Do you require visa sponsorship?" in result
 
 
 def test_application_tracker_tool_creates_application_record(tmp_path):

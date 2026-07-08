@@ -563,6 +563,7 @@ class ResumeEditPlan:
 
 - `FormInspectorTool`
 - `SensitiveFieldDetectorTool`
+- 当前已实现：从 JSON form snapshot 归一化字段，并识别敏感字段。
 
 职责：
 
@@ -589,6 +590,7 @@ class ResumeEditPlan:
 - `FormFillerTool`
 - `FileUploadTool`
 - `SubmitGateTool`
+- 当前已实现：根据 approved profile facts 生成安全的 fill plan，并列出 review-required 字段。
 
 策略：
 

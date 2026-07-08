@@ -87,3 +87,34 @@ def test_cli_review_job_can_export_application_package(tmp_path):
     assert "## Application Package" in text
     assert (package_dir / "review.md").exists()
     assert (package_dir / "jd-analysis.json").exists()
+
+
+def test_cli_review_job_can_include_form_fill_plan(tmp_path):
+    jd_path = tmp_path / "jd.txt"
+    jd_path.write_text("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents.")
+    form_path = tmp_path / "form.json"
+    form_path.write_text('[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]')
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text('{"email": "gaoyi@example.com", "sponsorship": "Needs review"}')
+    out_path = tmp_path / "review.md"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "jobs",
+            "review",
+            str(jd_path),
+            "--out",
+            str(out_path),
+            "--form-snapshot",
+            str(form_path),
+            "--profile",
+            str(profile_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    text = out_path.read_text()
+    assert "## Form Fill Plan" in text
+    assert "review_required=Do you require visa sponsorship?" in text

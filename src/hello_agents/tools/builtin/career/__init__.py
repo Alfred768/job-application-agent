@@ -2,6 +2,7 @@
 
 from .application_tracker import ApplicationTrackerTool
 from .document_exporter import ApplicationPackageTool
+from .form_tools import FormFillerTool, FormInspectorTool, SensitiveFieldDetectorTool
 from .job_sources import ManualJDImportTool
 from .fit_scorer import FitScorerTool
 from .jd_parser import JDParserTool
@@ -13,6 +14,8 @@ from .submit_gate import SubmitGateTool
 __all__ = [
     "ApplicationTrackerTool",
     "ApplicationPackageTool",
+    "FormFillerTool",
+    "FormInspectorTool",
     "ManualJDImportTool",
     "FitScorerTool",
     "JDParserTool",
@@ -20,6 +23,7 @@ __all__ = [
     "ResumeSelectorTool",
     "ResumeTailorTool",
     "ReviewPacketTool",
+    "SensitiveFieldDetectorTool",
     "SubmitGateTool",
     "TruthfulnessCheckTool",
 ]
