@@ -28,6 +28,7 @@ class Job:
 class FitScore:
     score: int
     role_track: str
+    reasons: list[str] = field(default_factory=list)
     matched_skills: list[str] = field(default_factory=list)
     missing_keywords: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
