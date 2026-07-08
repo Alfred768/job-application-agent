@@ -4,11 +4,20 @@ import json
 import re
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import typer
 
 from job_agent.db import connect, init_db
-from job_agent.jobs import format_job_as_jd_text, jobs_to_dicts, parse_rss_jobs
+from job_agent.jobs import (
+    format_job_as_jd_text,
+    jobs_to_dicts,
+    parse_greenhouse_jobs,
+    parse_lever_jobs,
+    parse_remotive_jobs,
+    parse_rss_jobs,
+)
 from job_agent.models import Job
 from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
@@ -29,6 +38,18 @@ def _review_slug(index: int, job: Job) -> str:
     raw = f"{index:03d}-{job.company}-{job.title}".lower()
     slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
     return slug or f"{index:03d}-job"
+
+
+def _read_json_source(payload: Optional[Path], url: str):
+    if payload:
+        return json.loads(payload.read_text())
+    with urlopen(url, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _write_jobs_json(jobs: list[Job], out: Path) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True))
 
 
 @app.command()
@@ -101,8 +122,70 @@ def import_rss_jobs(
     limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to import."),
 ) -> None:
     jobs = parse_rss_jobs(rss_file.read_text(), source=source, limit=limit)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True))
+    _write_jobs_json(jobs, out)
+    typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("import-greenhouse")
+def import_greenhouse_jobs(
+    board_token: str,
+    payload: Optional[Path] = typer.Option(
+        None,
+        "--payload",
+        help="Optional local Greenhouse JSON payload. If omitted, fetches the public API.",
+    ),
+    out: Path = typer.Option(Path("jobs.json"), "--out", help="JSON output path."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to import."),
+) -> None:
+    url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
+    jobs = parse_greenhouse_jobs(_read_json_source(payload, url), board_token=board_token, limit=limit)
+    _write_jobs_json(jobs, out)
+    typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("import-lever")
+def import_lever_jobs(
+    site: str,
+    payload: Optional[Path] = typer.Option(
+        None,
+        "--payload",
+        help="Optional local Lever JSON payload. If omitted, fetches the public API.",
+    ),
+    out: Path = typer.Option(Path("jobs.json"), "--out", help="JSON output path."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to import."),
+) -> None:
+    url = f"https://api.lever.co/v0/postings/{site}?mode=json"
+    jobs = parse_lever_jobs(_read_json_source(payload, url), site=site, limit=limit)
+    _write_jobs_json(jobs, out)
+    typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("import-remotive")
+def import_remotive_jobs(
+    payload: Optional[Path] = typer.Option(
+        None,
+        "--payload",
+        help="Optional local Remotive JSON payload. If omitted, fetches the public API.",
+    ),
+    out: Path = typer.Option(Path("jobs.json"), "--out", help="JSON output path."),
+    search: Optional[str] = typer.Option(None, "--search", help="Optional Remotive search query."),
+    category: Optional[str] = typer.Option(None, "--category", help="Optional Remotive category or slug."),
+    company_name: Optional[str] = typer.Option(None, "--company-name", help="Optional company-name filter."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to import."),
+) -> None:
+    query = {
+        key: value
+        for key, value in {
+            "search": search,
+            "category": category,
+            "company_name": company_name,
+            "limit": limit,
+        }.items()
+        if value is not None
+    }
+    suffix = f"?{urlencode(query)}" if query else ""
+    jobs = parse_remotive_jobs(_read_json_source(payload, f"https://remotive.com/api/remote-jobs{suffix}"), limit=limit)
+    _write_jobs_json(jobs, out)
     typer.echo(f"Imported {len(jobs)} jobs to {out}")
 
 

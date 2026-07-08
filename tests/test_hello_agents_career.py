@@ -7,8 +7,11 @@ from hello_agents.tools.builtin.career import (
     FitScorerTool,
     FormFillerTool,
     FormInspectorTool,
+    GreenhouseJobSourceTool,
     JDParserTool,
+    LeverJobSourceTool,
     ManualJDImportTool,
+    RemotiveJobSourceTool,
     ResumeIndexerTool,
     ResumeSelectorTool,
     ResumeTailorTool,
@@ -36,11 +39,14 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(FitScorerTool())
     registry.register_tool(FormInspectorTool())
     registry.register_tool(FormFillerTool())
+    registry.register_tool(GreenhouseJobSourceTool())
     registry.register_tool(JDParserTool())
+    registry.register_tool(LeverJobSourceTool())
     registry.register_tool(ResumeIndexerTool())
     registry.register_tool(ResumeSelectorTool())
     registry.register_tool(ResumeTailorTool())
     registry.register_tool(ReviewPacketTool())
+    registry.register_tool(RemotiveJobSourceTool())
     registry.register_tool(RSSJobSourceTool())
     registry.register_tool(SubmitGateTool())
     registry.register_tool(SensitiveFieldDetectorTool())
@@ -53,11 +59,14 @@ def test_career_tools_register_with_hello_agents_registry():
         "fit_scorer",
         "form_inspector",
         "form_filler",
+        "greenhouse_job_source",
         "jd_parser",
+        "lever_job_source",
         "resume_indexer",
         "resume_selector",
         "resume_tailor",
         "review_packet",
+        "remotive_job_source",
         "rss_job_source",
         "submit_gate",
         "sensitive_field_detector",
@@ -267,3 +276,36 @@ def test_rss_job_source_tool_returns_normalized_jobs_json():
     assert '"company": "Acme AI"' in result
     assert '"source": "example-rss"' in result
     assert '"apply_url": "https://jobs.example.com/acme-agent"' in result
+
+
+def test_greenhouse_job_source_tool_returns_normalized_jobs_json():
+    payload = '{"jobs": [{"title": "Agent Engineer", "absolute_url": "https://boards.greenhouse.io/acme/jobs/1", "location": {"name": "Remote"}, "content": "Build agents."}]}'
+
+    result = GreenhouseJobSourceTool().run({"board_token": "acme", "payload_json": payload})
+
+    assert '"title": "Agent Engineer"' in result
+    assert '"company": "acme"' in result
+    assert '"source": "greenhouse:acme"' in result
+    assert '"apply_url": "https://boards.greenhouse.io/acme/jobs/1"' in result
+
+
+def test_lever_job_source_tool_returns_normalized_jobs_json():
+    payload = '[{"text": "ML Platform Engineer", "hostedUrl": "https://jobs.lever.co/acme/1", "categories": {"location": "Remote"}, "descriptionPlain": "Build ML platforms."}]'
+
+    result = LeverJobSourceTool().run({"site": "acme", "payload_json": payload})
+
+    assert '"title": "ML Platform Engineer"' in result
+    assert '"company": "acme"' in result
+    assert '"source": "lever:acme"' in result
+    assert '"apply_url": "https://jobs.lever.co/acme/1"' in result
+
+
+def test_remotive_job_source_tool_returns_normalized_jobs_json():
+    payload = '{"jobs": [{"title": "Backend Engineer", "company_name": "RemoteCo", "url": "https://remotive.com/jobs/1", "candidate_required_location": "Worldwide", "description": "Build APIs."}]}'
+
+    result = RemotiveJobSourceTool().run({"payload_json": payload})
+
+    assert '"title": "Backend Engineer"' in result
+    assert '"company": "RemoteCo"' in result
+    assert '"source": "remotive"' in result
+    assert '"apply_url": "https://remotive.com/jobs/1"' in result

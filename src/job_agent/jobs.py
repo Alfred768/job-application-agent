@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict
 from html import unescape
+from typing import Any
 from xml.etree import ElementTree
 
 from job_agent.models import Job
@@ -88,6 +89,73 @@ def parse_rss_jobs(rss_xml: str, source: str = "rss", limit: int | None = None) 
             )
         )
 
+    return jobs
+
+
+def parse_greenhouse_jobs(payload: dict[str, Any], board_token: str, limit: int | None = None) -> list[Job]:
+    jobs: list[Job] = []
+    for item in payload.get("jobs", []):
+        if limit is not None and len(jobs) >= limit:
+            break
+        location = item.get("location") or {}
+        location_name = location.get("name") if isinstance(location, dict) else None
+        url = item.get("absolute_url")
+        jobs.append(
+            Job(
+                title=item.get("title") or "Unknown Role",
+                company=board_token,
+                location=location_name,
+                raw_jd=_clean_text(item.get("content")) or item.get("title") or "",
+                source=f"greenhouse:{board_token}",
+                source_url=url,
+                apply_url=url,
+            )
+        )
+    return jobs
+
+
+def parse_lever_jobs(payload: list[dict[str, Any]], site: str, limit: int | None = None) -> list[Job]:
+    jobs: list[Job] = []
+    for item in payload:
+        if limit is not None and len(jobs) >= limit:
+            break
+        categories = item.get("categories") or {}
+        location = categories.get("location") if isinstance(categories, dict) else None
+        url = item.get("hostedUrl") or item.get("applyUrl")
+        description = item.get("descriptionPlain") or item.get("description") or item.get("additionalPlain")
+        jobs.append(
+            Job(
+                title=item.get("text") or item.get("title") or "Unknown Role",
+                company=site,
+                location=location,
+                raw_jd=_clean_text(description) or item.get("text") or "",
+                source=f"lever:{site}",
+                source_url=url,
+                apply_url=url,
+                remote_policy=item.get("workplaceType"),
+            )
+        )
+    return jobs
+
+
+def parse_remotive_jobs(payload: dict[str, Any], limit: int | None = None) -> list[Job]:
+    jobs: list[Job] = []
+    for item in payload.get("jobs", []):
+        if limit is not None and len(jobs) >= limit:
+            break
+        url = item.get("url")
+        jobs.append(
+            Job(
+                title=item.get("title") or "Unknown Role",
+                company=item.get("company_name") or "Unknown Company",
+                location=item.get("candidate_required_location"),
+                raw_jd=_clean_text(item.get("description")) or item.get("title") or "",
+                source="remotive",
+                source_url=url,
+                apply_url=url,
+                remote_policy="remote",
+            )
+        )
     return jobs
 
 

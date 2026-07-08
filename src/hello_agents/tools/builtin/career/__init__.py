@@ -3,7 +3,13 @@
 from .application_tracker import ApplicationTrackerTool
 from .document_exporter import ApplicationPackageTool
 from .form_tools import FormFillerTool, FormInspectorTool, SensitiveFieldDetectorTool
-from .job_sources import ManualJDImportTool, RSSJobSourceTool
+from .job_sources import (
+    GreenhouseJobSourceTool,
+    LeverJobSourceTool,
+    ManualJDImportTool,
+    RemotiveJobSourceTool,
+    RSSJobSourceTool,
+)
 from .fit_scorer import FitScorerTool
 from .jd_parser import JDParserTool
 from .resume_tools import ResumeIndexerTool, ResumeSelectorTool
@@ -16,7 +22,10 @@ __all__ = [
     "ApplicationPackageTool",
     "FormFillerTool",
     "FormInspectorTool",
+    "GreenhouseJobSourceTool",
+    "LeverJobSourceTool",
     "ManualJDImportTool",
+    "RemotiveJobSourceTool",
     "RSSJobSourceTool",
     "FitScorerTool",
     "JDParserTool",

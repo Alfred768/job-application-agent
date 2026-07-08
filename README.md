@@ -11,6 +11,9 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 - `hello_agents.agents.job_application_agent.JobApplicationAgent`
 - `hello_agents.tools.builtin.career.ManualJDImportTool`
 - `hello_agents.tools.builtin.career.RSSJobSourceTool`
+- `hello_agents.tools.builtin.career.GreenhouseJobSourceTool`
+- `hello_agents.tools.builtin.career.LeverJobSourceTool`
+- `hello_agents.tools.builtin.career.RemotiveJobSourceTool`
 - `hello_agents.tools.builtin.career.JDParserTool`
 - `hello_agents.tools.builtin.career.FitScorerTool`
 - `hello_agents.tools.builtin.career.FormInspectorTool`
@@ -73,6 +76,16 @@ Import jobs from a compliant public RSS or Atom feed saved as XML:
 ```bash
 job-agent jobs import-rss jobs.xml --out output/jobs.json --source company-careers-rss
 ```
+
+Import jobs from public Job APIs:
+
+```bash
+job-agent jobs import-greenhouse company-board-token --out output/greenhouse-jobs.json
+job-agent jobs import-lever company-site-slug --out output/lever-jobs.json
+job-agent jobs import-remotive --search "agent engineer" --limit 10 --out output/remotive-jobs.json
+```
+
+For offline testing or reproducible runs, each API import command also accepts `--payload path/to/response.json`.
 
 Generate review packets directly from a compliant public RSS or Atom feed:
 
@@ -152,6 +165,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Resume template indexing for role-specific DOCX/PDF files.
 - Manual JD import from text.
 - Public RSS/Atom job feed import with normalized source/apply URLs.
+- Public Greenhouse, Lever, and Remotive job API imports with normalized source/apply URLs.
 - Batch review-packet generation from imported RSS/Atom job feed items.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
