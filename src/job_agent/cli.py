@@ -27,6 +27,7 @@ from job_agent.jobs import (
 from job_agent.models import Job
 from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
 from job_agent.resumes import index_resume_templates
+from job_agent.source_config import load_jobs_from_source_config
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.core.llm import HelloAgentsLLM
 
@@ -381,6 +382,55 @@ def import_rss_jobs(
     jobs = parse_rss_jobs(rss_file.read_text(), source=source, limit=limit)
     _write_jobs_json(jobs, out)
     typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("import-sources")
+def import_configured_sources(
+    config_file: Path,
+    out: Path = typer.Option(Path("jobs.json"), "--out", help="JSON output path."),
+) -> None:
+    jobs = load_jobs_from_source_config(config_file)
+    _write_jobs_json(jobs, out)
+    typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("review-sources")
+def review_configured_sources(
+    config_file: Path,
+    out_dir: Path = typer.Option(Path("reviews"), "--out-dir", help="Directory for markdown review packets."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    package_dir: Optional[Path] = typer.Option(
+        None,
+        "--package-dir",
+        help="Optional directory root to export per-job application package artifacts.",
+    ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
+) -> None:
+    jobs = load_jobs_from_source_config(config_file)
+    _write_review_packets(
+        jobs,
+        out_dir,
+        resume_source_dir=resume_source_dir,
+        db=db,
+        package_dir=package_dir,
+        use_llm=use_llm,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
+    )
+    typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
 @jobs_app.command("import-greenhouse")

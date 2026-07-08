@@ -277,6 +277,79 @@ def test_cli_import_remotive_jobs_writes_normalized_json(tmp_path):
     assert '"source": "remotive"' in out_path.read_text()
 
 
+def test_cli_import_sources_combines_configured_sources(tmp_path):
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build LLM agents with FastAPI.</description>
+        </item></channel></rss>"""
+    )
+    lever_path = tmp_path / "lever.json"
+    lever_path.write_text(
+        '[{"text": "ML Platform Engineer", "hostedUrl": "https://jobs.lever.co/acme/1", "categories": {"location": "Remote"}, "descriptionPlain": "Build ML platforms."}]'
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        """
+        {
+          "sources": [
+            {"type": "rss", "source": "example-rss", "rss_file": "jobs.xml"},
+            {"type": "lever", "site": "acme", "payload_file": "lever.json"}
+          ]
+        }
+        """
+    )
+    out_path = tmp_path / "jobs.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "import-sources", str(config_path), "--out", str(out_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Imported 2 jobs" in result.output
+    text = out_path.read_text()
+    assert '"source": "example-rss"' in text
+    assert '"source": "lever:acme"' in text
+
+
+def test_cli_review_sources_writes_review_packets(tmp_path):
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build LLM agents with FastAPI.</description>
+        </item></channel></rss>"""
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        """
+        {
+          "sources": [
+            {"type": "rss", "source": "example-rss", "rss_file": "jobs.xml"}
+          ]
+        }
+        """
+    )
+    out_dir = tmp_path / "reviews"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "review-sources", str(config_path), "--out-dir", str(out_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Reviewed 1 jobs" in result.output
+    review_files = list(out_dir.glob("*.md"))
+    assert len(review_files) == 1
+    assert "# Application Review" in review_files[0].read_text()
+
+
 def test_cli_review_remotive_jobs_writes_review_packets(tmp_path):
     payload_path = tmp_path / "remotive.json"
     payload_path.write_text(

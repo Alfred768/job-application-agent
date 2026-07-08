@@ -109,6 +109,27 @@ job-agent jobs import-remotive --search "agent engineer" --limit 10 --out output
 
 For offline testing or reproducible runs, each API import command also accepts `--payload path/to/response.json`.
 
+Import or review jobs from a reusable source config:
+
+```json
+{
+  "sources": [
+    {"type": "rss", "source": "company-rss", "rss_file": "jobs.xml"},
+    {"type": "greenhouse", "board_token": "company", "limit": 10},
+    {"type": "lever", "site": "company", "limit": 10},
+    {"type": "remotive", "search": "agent engineer", "limit": 10}
+  ]
+}
+```
+
+```bash
+job-agent jobs import-sources sources.json --out output/jobs.json
+job-agent jobs review-sources sources.json \
+  --out-dir output/source-reviews \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db
+```
+
 Generate review packets directly from a compliant public RSS or Atom feed:
 
 ```bash
@@ -244,6 +265,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Manual JD import from text.
 - Public RSS/Atom job feed import with normalized source/apply URLs.
 - Public Greenhouse, Lever, and Remotive job API imports with normalized source/apply URLs.
+- Configurable multi-source job import and batch review from `sources.json`.
 - Batch review-packet generation from RSS/Atom, Greenhouse, Lever, and Remotive job source items.
 - Single-job application package preparation from normalized job source JSON.
 - Structured JD analysis with role track, skills, responsibilities, and risks.

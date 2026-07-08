@@ -432,10 +432,12 @@ ApplicationFormChain:
 - `job-agent jobs import-greenhouse`：把 Greenhouse 公开 Job Board API 响应标准化为 JSON 岗位池。
 - `job-agent jobs import-lever`：把 Lever 公开 Postings API 响应标准化为 JSON 岗位池。
 - `job-agent jobs import-remotive`：把 Remotive 公开 Remote Jobs API 响应标准化为 JSON 岗位池。
+- `job-agent jobs import-sources`：从 `sources.json` 合并多个公开 source，生成统一 JSON 岗位池。
 - `job-agent jobs review-rss`：把 feed 中每个岗位转换为 JD 文本，交给 `JobApplicationAgent` 生成 review packet。
 - `job-agent jobs review-greenhouse`：把 Greenhouse 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
 - `job-agent jobs review-lever`：把 Lever 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
 - `job-agent jobs review-remotive`：把 Remotive 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
+- `job-agent jobs review-sources`：从 `sources.json` 获取多个来源岗位，并批量交给 `JobApplicationAgent` 生成 review packet。
 - `job-agent applications prepare`：从标准化 `jobs.json` 中选择一个岗位，生成 application package，并在提供表单 snapshot/profile 时生成 guarded form-fill script。
 
 输入：
