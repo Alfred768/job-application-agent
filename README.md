@@ -98,6 +98,27 @@ job-agent jobs review-rss jobs.xml \
   --db job-agent.db
 ```
 
+Generate review packets directly from public Job APIs:
+
+```bash
+job-agent jobs review-greenhouse company-board-token \
+  --out-dir output/greenhouse-reviews \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db
+
+job-agent jobs review-lever company-site-slug \
+  --out-dir output/lever-reviews \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db
+
+job-agent jobs review-remotive \
+  --search "agent engineer" \
+  --limit 10 \
+  --out-dir output/remotive-reviews \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db
+```
+
 Create a review packet from a pasted JD saved as a text file:
 
 ```bash
@@ -177,7 +198,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Manual JD import from text.
 - Public RSS/Atom job feed import with normalized source/apply URLs.
 - Public Greenhouse, Lever, and Remotive job API imports with normalized source/apply URLs.
-- Batch review-packet generation from imported RSS/Atom job feed items.
+- Batch review-packet generation from RSS/Atom, Greenhouse, Lever, and Remotive job source items.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.

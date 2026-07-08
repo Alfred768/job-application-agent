@@ -54,6 +54,27 @@ def _write_jobs_json(jobs: list[Job], out: Path) -> None:
     out.write_text(json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True))
 
 
+def _write_review_packets(
+    jobs: list[Job],
+    out_dir: Path,
+    resume_source_dir: Optional[Path] = None,
+    db: Optional[Path] = None,
+    package_dir: Optional[Path] = None,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for index, job in enumerate(jobs, start=1):
+        slug = _review_slug(index, job)
+        agent = JobApplicationAgent(
+            name="job-application-agent",
+            llm=DeterministicLLM(),
+            resume_source_dir=resume_source_dir,
+            database_path=db,
+            package_dir=(package_dir / slug) if package_dir else None,
+        )
+        review = agent.run(format_job_as_jd_text(job))
+        (out_dir / f"{slug}.md").write_text(review)
+
+
 @app.command()
 def init(db: Path = typer.Option(Path("job-agent.db"), "--db", help="SQLite database path.")) -> None:
     conn = connect(db)
@@ -173,6 +194,38 @@ def import_greenhouse_jobs(
     typer.echo(f"Imported {len(jobs)} jobs to {out}")
 
 
+@jobs_app.command("review-greenhouse")
+def review_greenhouse_jobs(
+    board_token: str,
+    payload: Optional[Path] = typer.Option(
+        None,
+        "--payload",
+        help="Optional local Greenhouse JSON payload. If omitted, fetches the public API.",
+    ),
+    out_dir: Path = typer.Option(Path("reviews"), "--out-dir", help="Directory for markdown review packets."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to review."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    package_dir: Optional[Path] = typer.Option(
+        None,
+        "--package-dir",
+        help="Optional directory root to export per-job application package artifacts.",
+    ),
+) -> None:
+    url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
+    jobs = parse_greenhouse_jobs(_read_json_source(payload, url), board_token=board_token, limit=limit)
+    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
+
+
 @jobs_app.command("import-lever")
 def import_lever_jobs(
     site: str,
@@ -188,6 +241,38 @@ def import_lever_jobs(
     jobs = parse_lever_jobs(_read_json_source(payload, url), site=site, limit=limit)
     _write_jobs_json(jobs, out)
     typer.echo(f"Imported {len(jobs)} jobs to {out}")
+
+
+@jobs_app.command("review-lever")
+def review_lever_jobs(
+    site: str,
+    payload: Optional[Path] = typer.Option(
+        None,
+        "--payload",
+        help="Optional local Lever JSON payload. If omitted, fetches the public API.",
+    ),
+    out_dir: Path = typer.Option(Path("reviews"), "--out-dir", help="Directory for markdown review packets."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to review."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    package_dir: Optional[Path] = typer.Option(
+        None,
+        "--package-dir",
+        help="Optional directory root to export per-job application package artifacts.",
+    ),
+) -> None:
+    url = f"https://api.lever.co/v0/postings/{site}?mode=json"
+    jobs = parse_lever_jobs(_read_json_source(payload, url), site=site, limit=limit)
+    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
 @jobs_app.command("import-remotive")
@@ -219,6 +304,50 @@ def import_remotive_jobs(
     typer.echo(f"Imported {len(jobs)} jobs to {out}")
 
 
+@jobs_app.command("review-remotive")
+def review_remotive_jobs(
+    payload: Optional[Path] = typer.Option(
+        None,
+        "--payload",
+        help="Optional local Remotive JSON payload. If omitted, fetches the public API.",
+    ),
+    out_dir: Path = typer.Option(Path("reviews"), "--out-dir", help="Directory for markdown review packets."),
+    search: Optional[str] = typer.Option(None, "--search", help="Optional Remotive search query."),
+    category: Optional[str] = typer.Option(None, "--category", help="Optional Remotive category or slug."),
+    company_name: Optional[str] = typer.Option(None, "--company-name", help="Optional company-name filter."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to review."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    package_dir: Optional[Path] = typer.Option(
+        None,
+        "--package-dir",
+        help="Optional directory root to export per-job application package artifacts.",
+    ),
+) -> None:
+    query = {
+        key: value
+        for key, value in {
+            "search": search,
+            "category": category,
+            "company_name": company_name,
+            "limit": limit,
+        }.items()
+        if value is not None
+    }
+    suffix = f"?{urlencode(query)}" if query else ""
+    jobs = parse_remotive_jobs(_read_json_source(payload, f"https://remotive.com/api/remote-jobs{suffix}"), limit=limit)
+    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
+    typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
+
+
 @jobs_app.command("review-rss")
 def review_rss_jobs(
     rss_file: Path,
@@ -242,20 +371,7 @@ def review_rss_jobs(
     ),
 ) -> None:
     jobs = parse_rss_jobs(rss_file.read_text(), source=source, limit=limit)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    for index, job in enumerate(jobs, start=1):
-        slug = _review_slug(index, job)
-        agent = JobApplicationAgent(
-            name="job-application-agent",
-            llm=DeterministicLLM(),
-            resume_source_dir=resume_source_dir,
-            database_path=db,
-            package_dir=(package_dir / slug) if package_dir else None,
-        )
-        review = agent.run(format_job_as_jd_text(job))
-        (out_dir / f"{slug}.md").write_text(review)
-
+    _write_review_packets(jobs, out_dir, resume_source_dir=resume_source_dir, db=db, package_dir=package_dir)
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 

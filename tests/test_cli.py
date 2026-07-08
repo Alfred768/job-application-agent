@@ -193,6 +193,30 @@ def test_cli_import_greenhouse_jobs_writes_normalized_json(tmp_path):
     assert '"source": "greenhouse:acme"' in out_path.read_text()
 
 
+def test_cli_review_greenhouse_jobs_writes_review_packets(tmp_path):
+    payload_path = tmp_path / "greenhouse.json"
+    payload_path.write_text(
+        '{"jobs": [{"title": "Agent Engineer", "absolute_url": "https://boards.greenhouse.io/acme/jobs/1", "location": {"name": "Remote"}, "content": "Build LLM agents with LangChain."}]}'
+    )
+    out_dir = tmp_path / "reviews"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "review-greenhouse", "acme", "--payload", str(payload_path), "--out-dir", str(out_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Reviewed 1 jobs" in result.output
+    review_files = list(out_dir.glob("*.md"))
+    assert len(review_files) == 1
+    text = review_files[0].read_text()
+    assert "# Application Review" in text
+    assert "Agent Engineer" in text
+    assert "acme" in text
+    assert "## Submit Gate" in text
+
+
 def test_cli_import_lever_jobs_writes_normalized_json(tmp_path):
     payload_path = tmp_path / "lever.json"
     payload_path.write_text(
@@ -211,6 +235,30 @@ def test_cli_import_lever_jobs_writes_normalized_json(tmp_path):
     assert '"source": "lever:acme"' in out_path.read_text()
 
 
+def test_cli_review_lever_jobs_writes_review_packets(tmp_path):
+    payload_path = tmp_path / "lever.json"
+    payload_path.write_text(
+        '[{"text": "ML Platform Engineer", "hostedUrl": "https://jobs.lever.co/acme/1", "categories": {"location": "Remote"}, "descriptionPlain": "Build ML platforms with Python."}]'
+    )
+    out_dir = tmp_path / "reviews"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "review-lever", "acme", "--payload", str(payload_path), "--out-dir", str(out_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Reviewed 1 jobs" in result.output
+    review_files = list(out_dir.glob("*.md"))
+    assert len(review_files) == 1
+    text = review_files[0].read_text()
+    assert "# Application Review" in text
+    assert "ML Platform Engineer" in text
+    assert "acme" in text
+    assert "## Submit Gate" in text
+
+
 def test_cli_import_remotive_jobs_writes_normalized_json(tmp_path):
     payload_path = tmp_path / "remotive.json"
     payload_path.write_text(
@@ -227,6 +275,30 @@ def test_cli_import_remotive_jobs_writes_normalized_json(tmp_path):
     assert result.exit_code == 0
     assert "Imported 1 jobs" in result.output
     assert '"source": "remotive"' in out_path.read_text()
+
+
+def test_cli_review_remotive_jobs_writes_review_packets(tmp_path):
+    payload_path = tmp_path / "remotive.json"
+    payload_path.write_text(
+        '{"jobs": [{"title": "Backend Engineer", "company_name": "RemoteCo", "url": "https://remotive.com/jobs/1", "candidate_required_location": "Worldwide", "description": "Build APIs with FastAPI."}]}'
+    )
+    out_dir = tmp_path / "reviews"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "review-remotive", "--payload", str(payload_path), "--out-dir", str(out_dir)],
+    )
+
+    assert result.exit_code == 0
+    assert "Reviewed 1 jobs" in result.output
+    review_files = list(out_dir.glob("*.md"))
+    assert len(review_files) == 1
+    text = review_files[0].read_text()
+    assert "# Application Review" in text
+    assert "Backend Engineer" in text
+    assert "RemoteCo" in text
+    assert "## Submit Gate" in text
 
 
 def test_cli_forms_build_script_writes_guarded_playwright_script(tmp_path):
