@@ -24,6 +24,7 @@ from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 
 app = typer.Typer(help="Personal job application agent.")
+applications_app = typer.Typer(help="End-to-end application preparation commands.")
 forms_app = typer.Typer(help="Application form automation commands.")
 jobs_app = typer.Typer(help="Job intake and review commands.")
 resumes_app = typer.Typer(help="Resume template commands.")
@@ -52,6 +53,19 @@ def _read_json_source(payload: Optional[Path], url: str):
 def _write_jobs_json(jobs: list[Job], out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True))
+
+
+def _job_from_dict(raw: dict) -> Job:
+    return Job(
+        title=raw.get("title") or "Unknown Role",
+        company=raw.get("company") or "Unknown Company",
+        raw_jd=raw.get("raw_jd") or "",
+        location=raw.get("location"),
+        source=raw.get("source") or "json",
+        source_url=raw.get("source_url"),
+        apply_url=raw.get("apply_url"),
+        remote_policy=raw.get("remote_policy"),
+    )
 
 
 def _write_review_packets(
@@ -88,6 +102,63 @@ def index_resumes(source_dir: Path) -> None:
     for template in templates:
         typer.echo(f"{template.track}: docx={template.docx_path} pdf={template.pdf_path}")
     typer.echo(f"Indexed {len(templates)} resume templates")
+
+
+@applications_app.command("prepare")
+def prepare_application(
+    jobs_file: Path,
+    index: int = typer.Option(1, "--index", help="1-based job index in the normalized jobs JSON file."),
+    out_dir: Path = typer.Option(Path("application-package"), "--out-dir", help="Application package output directory."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    form_snapshot: Optional[Path] = typer.Option(
+        None,
+        "--form-snapshot",
+        help="Optional JSON file containing captured application form fields.",
+    ),
+    profile: Optional[Path] = typer.Option(
+        None,
+        "--profile",
+        help="Optional JSON file containing approved profile facts for form filling.",
+    ),
+) -> None:
+    raw_jobs = json.loads(jobs_file.read_text())
+    if index < 1 or index > len(raw_jobs):
+        raise typer.BadParameter(f"--index must be between 1 and {len(raw_jobs)}")
+    job = _job_from_dict(raw_jobs[index - 1])
+    form_snapshot_json = form_snapshot.read_text() if form_snapshot else None
+    profile_json = profile.read_text() if profile else None
+    agent = JobApplicationAgent(
+        name="job-application-agent",
+        llm=DeterministicLLM(),
+        resume_source_dir=resume_source_dir,
+        database_path=db,
+        package_dir=out_dir,
+        form_snapshot_json=form_snapshot_json,
+        profile_json=profile_json,
+    )
+    review = agent.run(format_job_as_jd_text(job))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "review.md").write_text(review)
+
+    if form_snapshot and profile:
+        plan = build_form_fill_plan(
+            inspect_form_snapshot(form_snapshot.read_text()),
+            json.loads(profile.read_text()),
+        )
+        (out_dir / "fill-form.js").write_text(
+            render_playwright_fill_script(plan, application_url=job.apply_url or job.source_url)
+        )
+
+    typer.echo(f"Prepared application package at {out_dir}")
 
 
 @forms_app.command("build-script")
@@ -375,6 +446,7 @@ def review_rss_jobs(
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
 
 
+app.add_typer(applications_app, name="applications")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(forms_app, name="forms")
 app.add_typer(resumes_app, name="resumes")

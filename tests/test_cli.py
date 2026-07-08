@@ -332,3 +332,54 @@ def test_cli_forms_build_script_writes_guarded_playwright_script(tmp_path):
     assert 'await page.getByLabel("Email").fill("gaoyi@example.com");' in text
     assert "Do you require visa sponsorship?" in text
     assert ".click(" not in text
+
+
+def test_cli_applications_prepare_generates_package_and_fill_script(tmp_path):
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme AI",
+            "location": "Remote",
+            "raw_jd": "Build LLM agents with LangChain and FastAPI.",
+            "source": "greenhouse:acme",
+            "source_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "apply_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "remote_policy": null
+          }
+        ]"""
+    )
+    form_path = tmp_path / "form.json"
+    form_path.write_text('[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]')
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text('{"email": "gaoyi@example.com", "sponsorship": "Needs review"}')
+    out_dir = tmp_path / "application"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "applications",
+            "prepare",
+            str(jobs_path),
+            "--index",
+            "1",
+            "--out-dir",
+            str(out_dir),
+            "--form-snapshot",
+            str(form_path),
+            "--profile",
+            str(profile_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Prepared application package" in result.output
+    assert (out_dir / "review.md").exists()
+    assert (out_dir / "jd-analysis.json").exists()
+    assert (out_dir / "resume-edit-plan.json").exists()
+    script = (out_dir / "fill-form.js").read_text()
+    assert 'await page.goto("https://boards.greenhouse.io/acme/jobs/1");' in script
+    assert 'await page.getByLabel("Email").fill("gaoyi@example.com");' in script
+    assert ".click(" not in script

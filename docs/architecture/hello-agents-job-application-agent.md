@@ -431,6 +431,7 @@ ApplicationFormChain:
 - `job-agent jobs review-greenhouse`：把 Greenhouse 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
 - `job-agent jobs review-lever`：把 Lever 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
 - `job-agent jobs review-remotive`：把 Remotive 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
+- `job-agent applications prepare`：从标准化 `jobs.json` 中选择一个岗位，生成 application package，并在提供表单 snapshot/profile 时生成 guarded form-fill script。
 
 输入：
 

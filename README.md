@@ -119,6 +119,20 @@ job-agent jobs review-remotive \
   --db job-agent.db
 ```
 
+Prepare a single application package from a normalized `jobs.json` item:
+
+```bash
+job-agent applications prepare output/greenhouse-jobs.json \
+  --index 1 \
+  --out-dir output/acme-agent-engineer \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db \
+  --form-snapshot examples/form-snapshot.json \
+  --profile examples/profile.json
+```
+
+This writes the review packet, JD analysis, resume edit plan, submit gate, and, when form data is provided, a guarded `fill-form.js` script.
+
 Create a review packet from a pasted JD saved as a text file:
 
 ```bash
@@ -199,6 +213,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Public RSS/Atom job feed import with normalized source/apply URLs.
 - Public Greenhouse, Lever, and Remotive job API imports with normalized source/apply URLs.
 - Batch review-packet generation from RSS/Atom, Greenhouse, Lever, and Remotive job source items.
+- Single-job application package preparation from normalized job source JSON.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.
