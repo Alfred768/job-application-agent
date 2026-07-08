@@ -50,12 +50,18 @@ def review_job(
         "--db",
         help="Optional SQLite database path for application tracking.",
     ),
+    package_dir: Optional[Path] = typer.Option(
+        None,
+        "--package-dir",
+        help="Optional directory to export application package artifacts.",
+    ),
 ) -> None:
     agent = JobApplicationAgent(
         name="job-application-agent",
         llm=DeterministicLLM(),
         resume_source_dir=resume_source_dir,
         database_path=db,
+        package_dir=package_dir,
     )
     review = agent.run(jd_file.read_text())
     out.parent.mkdir(parents=True, exist_ok=True)

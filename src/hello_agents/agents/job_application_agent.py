@@ -9,6 +9,7 @@ from hello_agents.agents.plan_solve_agent import PlanAndSolveAgent
 from hello_agents.core.config import Config
 from hello_agents.core.llm import HelloAgentsLLM
 from hello_agents.tools.builtin.career import (
+    ApplicationPackageTool,
     ApplicationTrackerTool,
     FitScorerTool,
     JDParserTool,
@@ -40,6 +41,7 @@ class JobApplicationAgent(PlanAndSolveAgent):
         config: Optional[Config] = None,
         resume_source_dir: Optional[str | Path] = None,
         database_path: Optional[str | Path] = None,
+        package_dir: Optional[str | Path] = None,
     ):
         super().__init__(
             name=name,
@@ -50,10 +52,12 @@ class JobApplicationAgent(PlanAndSolveAgent):
         self.tool_registry = tool_registry or self._default_registry()
         self.resume_source_dir = Path(resume_source_dir) if resume_source_dir else None
         self.database_path = Path(database_path) if database_path else None
+        self.package_dir = Path(package_dir) if package_dir else None
 
     @staticmethod
     def _default_registry() -> ToolRegistry:
         registry = ToolRegistry()
+        registry.register_tool(ApplicationPackageTool())
         registry.register_tool(ApplicationTrackerTool())
         registry.register_tool(ManualJDImportTool())
         registry.register_tool(FitScorerTool())
@@ -93,6 +97,12 @@ class JobApplicationAgent(PlanAndSolveAgent):
                 {"database_path": str(self.database_path), "jd_text": input_text}
             )
             sections.append(f"## Tracking\n\n{tracking}")
+
+        if self.package_dir is not None:
+            package = self.tool_registry.get_tool("application_package").run(
+                {"output_dir": str(self.package_dir), "jd_text": input_text}
+            )
+            sections.append(f"## Application Package\n\n{package}")
 
         submit_gate = self.tool_registry.execute_tool("submit_gate", "")
         sections.append(f"## Submit Gate\n\n{submit_gate}")

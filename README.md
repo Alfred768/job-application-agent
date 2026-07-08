@@ -18,6 +18,7 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 - `hello_agents.tools.builtin.career.TruthfulnessCheckTool`
 - `hello_agents.tools.builtin.career.ReviewPacketTool`
 - `hello_agents.tools.builtin.career.ApplicationTrackerTool`
+- `hello_agents.tools.builtin.career.ApplicationPackageTool`
 - `hello_agents.tools.builtin.career.SubmitGateTool`
 
 The existing CLI calls the HelloAgents-based `JobApplicationAgent` for JD review.
@@ -78,6 +79,16 @@ job-agent jobs review jd.txt \
   --db job-agent.db
 ```
 
+Create a full local application package with separate review, JD analysis, resume edit plan, and submit-gate files:
+
+```bash
+job-agent jobs review jd.txt \
+  --out output/application-review.md \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db \
+  --package-dir output/acme-agent-engineer
+```
+
 Use the HelloAgents API directly:
 
 ```python
@@ -114,4 +125,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Markdown application review packet generation.
 - HelloAgents-based resume selection and application tracking tools.
 - Auditable resume edit plan generation with unsupported keyword detection.
+- Local application package export for review artifacts.
 - Guarded form-fill plan model with manual final-submit policy.

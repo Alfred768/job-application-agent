@@ -3,6 +3,7 @@ from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.career.models import JobApplicationState
 from hello_agents.tools.builtin.career import (
     ApplicationTrackerTool,
+    ApplicationPackageTool,
     FitScorerTool,
     JDParserTool,
     ManualJDImportTool,
@@ -27,6 +28,7 @@ def test_career_tools_register_with_hello_agents_registry():
 
     registry.register_tool(ManualJDImportTool())
     registry.register_tool(ApplicationTrackerTool())
+    registry.register_tool(ApplicationPackageTool())
     registry.register_tool(FitScorerTool())
     registry.register_tool(JDParserTool())
     registry.register_tool(ResumeIndexerTool())
@@ -39,6 +41,7 @@ def test_career_tools_register_with_hello_agents_registry():
     assert {
         "manual_jd_import",
         "application_tracker",
+        "application_package",
         "fit_scorer",
         "jd_parser",
         "resume_indexer",
@@ -97,6 +100,21 @@ def test_job_application_agent_selects_resume_and_tracks_application(tmp_path):
     assert "application_id=1" in result
 
 
+def test_job_application_agent_exports_application_package(tmp_path):
+    package_dir = tmp_path / "package"
+    agent = JobApplicationAgent(name="career-agent", llm=FakeLLM(), package_dir=package_dir)
+    jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents with LangChain."
+
+    result = agent.run(jd)
+
+    assert "## Application Package" in result
+    assert "package_dir=" in result
+    assert (package_dir / "review.md").exists()
+    assert (package_dir / "jd-analysis.json").exists()
+    assert (package_dir / "resume-edit-plan.json").exists()
+    assert (package_dir / "submit-gate.txt").exists()
+
+
 def test_job_application_state_starts_with_manual_submit_gate():
     state = JobApplicationState()
 
@@ -152,6 +170,19 @@ def test_truthfulness_check_tool_blocks_unsupported_claims():
 
     assert "truthfulness_status=needs_review" in result
     assert "Rust" in result
+
+
+def test_application_package_tool_writes_review_artifacts(tmp_path):
+    jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents with LangChain."
+    out_dir = tmp_path / "application-package"
+
+    result = ApplicationPackageTool().run({"jd_text": jd, "output_dir": str(out_dir)})
+
+    assert "package_dir=" in result
+    assert (out_dir / "review.md").read_text().startswith("# Application Review")
+    assert '"role_track": "Agent Engineer"' in (out_dir / "jd-analysis.json").read_text()
+    assert '"target_track": "Agent Engineer"' in (out_dir / "resume-edit-plan.json").read_text()
+    assert "Final Submit remains manual" in (out_dir / "submit-gate.txt").read_text()
 
 
 def test_application_tracker_tool_creates_application_record(tmp_path):

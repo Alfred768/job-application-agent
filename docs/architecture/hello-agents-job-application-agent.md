@@ -539,16 +539,23 @@ class ResumeEditPlan:
 
 工具：
 
+- `ApplicationPackageTool`
 - `DocxRenderTool`
 - `PDFExportTool`
 - `ResumeQualityCheckTool`
 
 职责：
 
+- 当前已实现：生成本地 application package，包含 `review.md`、`jd-analysis.json`、`resume-edit-plan.json`、`submit-gate.txt`。
 - 从模板生成定制 DOCX。
 - 导出 PDF。
 - 检查页数是否为 1 页。
 - 检查是否存在明显空文件、缺失文本、渲染失败。
+
+阶段边界：
+
+- 当前 package exporter 只生成安全的 review artifacts，不直接改写原始简历。
+- DOCX/PDF 真正改写属于下一阶段，需要在 `TruthfulnessCheckTool` 通过或用户确认后执行。
 
 ### 7.7 `form_inspector.py`
 

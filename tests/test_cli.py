@@ -60,3 +60,30 @@ def test_cli_review_job_can_select_resume_and_track_application(tmp_path):
     assert "## Resume Edit Plan" in text
     assert "## Tracking" in text
     assert "application_id=1" in text
+
+
+def test_cli_review_job_can_export_application_package(tmp_path):
+    jd_path = tmp_path / "jd.txt"
+    jd_path.write_text("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents.")
+    out_path = tmp_path / "review.md"
+    package_dir = tmp_path / "package"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "jobs",
+            "review",
+            str(jd_path),
+            "--out",
+            str(out_path),
+            "--package-dir",
+            str(package_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    text = out_path.read_text()
+    assert "## Application Package" in text
+    assert (package_dir / "review.md").exists()
+    assert (package_dir / "jd-analysis.json").exists()
