@@ -440,6 +440,7 @@ ApplicationFormChain:
 - `job-agent jobs review-remotive`：把 Remotive 岗位列表交给 `JobApplicationAgent` 批量生成 review packet。
 - `job-agent jobs review-sources`：从 `sources.json` 获取多个来源岗位，并批量交给 `JobApplicationAgent` 生成 review packet。
 - `job-agent applications prepare`：从标准化 `jobs.json` 中选择一个岗位，生成 application package，并在提供表单 snapshot/profile 时生成 guarded form-fill script。
+- `job-agent applications prepare-shortlist`：从短名单或标准化岗位 JSON 批量生成 application package，每个岗位一个目录，并输出 `batch-summary.json` 作为审计索引。
 
 输入：
 

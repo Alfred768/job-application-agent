@@ -193,6 +193,23 @@ You can also prepare from a short list:
 job-agent applications prepare output/shortlist.json --index 1 --out-dir output/top-choice
 ```
 
+Or prepare packages for multiple shortlisted jobs in one batch:
+
+```bash
+job-agent applications prepare-shortlist output/shortlist.json \
+  --limit 5 \
+  --out-dir output/application-batch \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db \
+  --form-snapshot examples/form-snapshot.json \
+  --profile examples/profile.json \
+  --resume resume.txt \
+  --upload-resume \
+  --use-llm
+```
+
+This creates one subdirectory per job plus `batch-summary.json`, so the user can audit every generated review packet, tailored resume draft, and guarded fill script before opening the application pages.
+
 Create a review packet from a pasted JD saved as a text file:
 
 ```bash
@@ -281,6 +298,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Fit-score shortlisting for normalized job pools before resume tailoring or application preparation.
 - Batch review-packet generation from RSS/Atom, Greenhouse, Lever, and Remotive job source items.
 - Single-job application package preparation from normalized job source JSON.
+- Batch application package preparation from shortlisted job JSON.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.

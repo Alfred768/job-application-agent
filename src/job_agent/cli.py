@@ -125,6 +125,74 @@ def _write_review_packets(
         (out_dir / f"{slug}.md").write_text(review)
 
 
+def _prepare_application_package(
+    job: Job,
+    out_dir: Path,
+    resume_source_dir: Optional[Path] = None,
+    db: Optional[Path] = None,
+    form_snapshot: Optional[Path] = None,
+    profile: Optional[Path] = None,
+    resume: Optional[Path] = None,
+    upload_resume: bool = False,
+    use_llm: bool = False,
+    llm_model: Optional[str] = None,
+    llm_provider: Optional[str] = None,
+    llm_base_url: Optional[str] = None,
+) -> dict[str, str | None]:
+    form_snapshot_json = form_snapshot.read_text() if form_snapshot else None
+    profile_json = profile.read_text() if profile else None
+    agent = JobApplicationAgent(
+        name="job-application-agent",
+        llm=_build_llm(
+            use_llm=use_llm,
+            model=llm_model,
+            provider=llm_provider,
+            base_url=llm_base_url,
+        ),
+        resume_source_dir=resume_source_dir,
+        database_path=db,
+        package_dir=out_dir,
+        form_snapshot_json=form_snapshot_json,
+        profile_json=profile_json,
+    )
+    review = agent.run(format_job_as_jd_text(job))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    review_path = out_dir / "review.md"
+    review_path.write_text(review)
+
+    tailored_resume_path = None
+    if resume:
+        tailored_resume_path = out_dir / "tailored-resume.md"
+        resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
+        tailored_resume_path.write_text(
+            render_tailored_resume_draft(resume.read_text(), resume_plan)
+        )
+
+    fill_script_path = None
+    if form_snapshot and profile:
+        profile_facts = json.loads(profile.read_text())
+        if upload_resume and tailored_resume_path:
+            profile_facts["resume_file"] = str(tailored_resume_path)
+        plan = build_form_fill_plan(
+            inspect_form_snapshot(form_snapshot.read_text()),
+            profile_facts,
+        )
+        fill_script_path = out_dir / "fill-form.js"
+        fill_script_path.write_text(
+            render_playwright_fill_script(plan, application_url=job.apply_url or job.source_url)
+        )
+
+    return {
+        "company": job.company,
+        "title": job.title,
+        "apply_url": job.apply_url or job.source_url,
+        "package_dir": str(out_dir),
+        "review_path": str(review_path),
+        "tailored_resume_path": str(tailored_resume_path) if tailored_resume_path else None,
+        "fill_script_path": str(fill_script_path) if fill_script_path else None,
+    }
+
+
 @app.command()
 def init(db: Path = typer.Option(Path("job-agent.db"), "--db", help="SQLite database path.")) -> None:
     conn = connect(db)
@@ -214,47 +282,92 @@ def prepare_application(
     if index < 1 or index > len(raw_jobs):
         raise typer.BadParameter(f"--index must be between 1 and {len(raw_jobs)}")
     job = _job_from_dict(raw_jobs[index - 1])
-    form_snapshot_json = form_snapshot.read_text() if form_snapshot else None
-    profile_json = profile.read_text() if profile else None
-    agent = JobApplicationAgent(
-        name="job-application-agent",
-        llm=_build_llm(
-            use_llm=use_llm,
-            model=llm_model,
-            provider=llm_provider,
-            base_url=llm_base_url,
-        ),
+    _prepare_application_package(
+        job,
+        out_dir,
         resume_source_dir=resume_source_dir,
-        database_path=db,
-        package_dir=out_dir,
-        form_snapshot_json=form_snapshot_json,
-        profile_json=profile_json,
+        db=db,
+        form_snapshot=form_snapshot,
+        profile=profile,
+        resume=resume,
+        upload_resume=upload_resume,
+        use_llm=use_llm,
+        llm_model=llm_model,
+        llm_provider=llm_provider,
+        llm_base_url=llm_base_url,
     )
-    review = agent.run(format_job_as_jd_text(job))
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "review.md").write_text(review)
-
-    tailored_resume_path = None
-    if resume:
-        tailored_resume_path = out_dir / "tailored-resume.md"
-        resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
-        tailored_resume_path.write_text(
-            render_tailored_resume_draft(resume.read_text(), resume_plan)
-        )
-
-    if form_snapshot and profile:
-        profile_facts = json.loads(profile.read_text())
-        if upload_resume and tailored_resume_path:
-            profile_facts["resume_file"] = str(tailored_resume_path)
-        plan = build_form_fill_plan(
-            inspect_form_snapshot(form_snapshot.read_text()),
-            profile_facts,
-        )
-        (out_dir / "fill-form.js").write_text(
-            render_playwright_fill_script(plan, application_url=job.apply_url or job.source_url)
-        )
-
     typer.echo(f"Prepared application package at {out_dir}")
+
+
+@applications_app.command("prepare-shortlist")
+def prepare_shortlisted_applications(
+    jobs_file: Path,
+    out_dir: Path = typer.Option(Path("application-batch"), "--out-dir", help="Batch application package output directory."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to prepare."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
+    form_snapshot: Optional[Path] = typer.Option(
+        None,
+        "--form-snapshot",
+        help="Optional JSON file containing captured application form fields.",
+    ),
+    profile: Optional[Path] = typer.Option(
+        None,
+        "--profile",
+        help="Optional JSON file containing approved profile facts for form filling.",
+    ),
+    resume: Optional[Path] = typer.Option(
+        None,
+        "--resume",
+        help="Optional base resume text/markdown file for tailored resume draft generation.",
+    ),
+    upload_resume: bool = typer.Option(
+        False,
+        "--upload-resume",
+        help="When --resume and form data are provided, wire tailored-resume.md into Resume/CV upload fields.",
+    ),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url", help="Optional OpenAI-compatible base URL."),
+) -> None:
+    if limit is not None and limit < 1:
+        raise typer.BadParameter("--limit must be greater than 0")
+    raw_jobs = json.loads(jobs_file.read_text())
+    selected_raw_jobs = raw_jobs[:limit] if limit is not None else raw_jobs
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summaries = []
+    for index, raw_job in enumerate(selected_raw_jobs, start=1):
+        job = _job_from_dict(raw_job)
+        package_dir = out_dir / _review_slug(index, job)
+        summary = _prepare_application_package(
+            job,
+            package_dir,
+            resume_source_dir=resume_source_dir,
+            db=db,
+            form_snapshot=form_snapshot,
+            profile=profile,
+            resume=resume,
+            upload_resume=upload_resume,
+            use_llm=use_llm,
+            llm_model=llm_model,
+            llm_provider=llm_provider,
+            llm_base_url=llm_base_url,
+        )
+        summary["index"] = str(index)
+        summaries.append(summary)
+
+    summary_path = out_dir / "batch-summary.json"
+    summary_path.write_text(json.dumps(summaries, indent=2, ensure_ascii=True))
+    typer.echo(f"Prepared {len(summaries)} application packages at {out_dir}")
 
 
 @forms_app.command("build-snapshot-script")

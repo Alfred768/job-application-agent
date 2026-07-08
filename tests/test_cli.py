@@ -651,6 +651,77 @@ def test_cli_applications_prepare_can_wire_tailored_resume_upload(tmp_path):
     assert ".click(" not in script
 
 
+def test_cli_applications_prepare_shortlist_generates_batch_packages(tmp_path):
+    jobs_path = tmp_path / "shortlist.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme AI",
+            "location": "Remote",
+            "raw_jd": "Build LLM agents with LangChain and FastAPI.",
+            "source": "greenhouse:acme",
+            "source_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "apply_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "remote_policy": null,
+            "fit_score": 88
+          },
+          {
+            "title": "Backend Engineer",
+            "company": "WebCo",
+            "location": "Remote",
+            "raw_jd": "Build backend APIs with Postgres and Redis.",
+            "source": "lever:webco",
+            "source_url": "https://jobs.lever.co/webco/1",
+            "apply_url": "https://jobs.lever.co/webco/1",
+            "remote_policy": null,
+            "fit_score": 76
+          }
+        ]"""
+    )
+    form_path = tmp_path / "form.json"
+    form_path.write_text('[{"label": "Email"}, {"label": "Resume", "type": "file"}]')
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text('{"email": "gaoyi@example.com"}')
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text("Gaoyi Wu\n\nBuilt FastAPI and Postgres services.")
+    out_dir = tmp_path / "batch"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "applications",
+            "prepare-shortlist",
+            str(jobs_path),
+            "--out-dir",
+            str(out_dir),
+            "--limit",
+            "2",
+            "--form-snapshot",
+            str(form_path),
+            "--profile",
+            str(profile_path),
+            "--resume",
+            str(resume_path),
+            "--upload-resume",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Prepared 2 application packages" in result.output
+    first = out_dir / "001-acme-ai-agent-engineer"
+    second = out_dir / "002-webco-backend-engineer"
+    assert (first / "review.md").exists()
+    assert (first / "tailored-resume.md").exists()
+    assert 'await page.goto("https://boards.greenhouse.io/acme/jobs/1");' in (first / "fill-form.js").read_text()
+    assert (second / "review.md").exists()
+    summary = (out_dir / "batch-summary.json").read_text()
+    assert '"package_dir":' in summary
+    assert "001-acme-ai-agent-engineer" in summary
+    assert "002-webco-backend-engineer" in summary
+
+
 def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
     jd_path = tmp_path / "jd.txt"
     jd_path.write_text("Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust.")
