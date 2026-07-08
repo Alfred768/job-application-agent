@@ -3,7 +3,7 @@
 from .application_tracker import ApplicationTrackerTool
 from .document_exporter import ApplicationPackageTool
 from .form_tools import FormFillerTool, FormInspectorTool, SensitiveFieldDetectorTool
-from .job_sources import ManualJDImportTool
+from .job_sources import ManualJDImportTool, RSSJobSourceTool
 from .fit_scorer import FitScorerTool
 from .jd_parser import JDParserTool
 from .resume_tools import ResumeIndexerTool, ResumeSelectorTool
@@ -17,6 +17,7 @@ __all__ = [
     "FormFillerTool",
     "FormInspectorTool",
     "ManualJDImportTool",
+    "RSSJobSourceTool",
     "FitScorerTool",
     "JDParserTool",
     "ResumeIndexerTool",

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from job_agent.db import connect, init_db
+from job_agent.jobs import jobs_to_dicts, parse_rss_jobs
 from job_agent.resumes import index_resume_templates
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 
@@ -81,6 +83,19 @@ def review_job(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(review)
     typer.echo(f"Wrote review packet to {out}")
+
+
+@jobs_app.command("import-rss")
+def import_rss_jobs(
+    rss_file: Path,
+    out: Path = typer.Option(Path("jobs.json"), "--out", help="JSON output path."),
+    source: str = typer.Option("rss", "--source", help="Source label for provenance."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to import."),
+) -> None:
+    jobs = parse_rss_jobs(rss_file.read_text(), source=source, limit=limit)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True))
+    typer.echo(f"Imported {len(jobs)} jobs to {out}")
 
 
 app.add_typer(jobs_app, name="jobs")

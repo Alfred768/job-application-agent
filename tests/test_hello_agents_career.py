@@ -13,6 +13,7 @@ from hello_agents.tools.builtin.career import (
     ResumeSelectorTool,
     ResumeTailorTool,
     ReviewPacketTool,
+    RSSJobSourceTool,
     SubmitGateTool,
     SensitiveFieldDetectorTool,
     TruthfulnessCheckTool,
@@ -40,6 +41,7 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(ResumeSelectorTool())
     registry.register_tool(ResumeTailorTool())
     registry.register_tool(ReviewPacketTool())
+    registry.register_tool(RSSJobSourceTool())
     registry.register_tool(SubmitGateTool())
     registry.register_tool(SensitiveFieldDetectorTool())
     registry.register_tool(TruthfulnessCheckTool())
@@ -56,6 +58,7 @@ def test_career_tools_register_with_hello_agents_registry():
         "resume_selector",
         "resume_tailor",
         "review_packet",
+        "rss_job_source",
         "submit_gate",
         "sensitive_field_detector",
         "truthfulness_check",
@@ -249,3 +252,18 @@ def test_application_tracker_tool_creates_application_record(tmp_path):
     assert "application_id=1" in result
     assert "status=needs_review" in result
     assert db_path.exists()
+
+
+def test_rss_job_source_tool_returns_normalized_jobs_json():
+    rss = """<rss><channel><item>
+    <title>Agent Engineer at Acme AI</title>
+    <link>https://jobs.example.com/acme-agent</link>
+    <description>Build LLM agents with FastAPI.</description>
+    </item></channel></rss>"""
+
+    result = RSSJobSourceTool().run({"rss_xml": rss, "source": "example-rss"})
+
+    assert '"title": "Agent Engineer"' in result
+    assert '"company": "Acme AI"' in result
+    assert '"source": "example-rss"' in result
+    assert '"apply_url": "https://jobs.example.com/acme-agent"' in result

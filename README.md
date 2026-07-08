@@ -10,6 +10,7 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 
 - `hello_agents.agents.job_application_agent.JobApplicationAgent`
 - `hello_agents.tools.builtin.career.ManualJDImportTool`
+- `hello_agents.tools.builtin.career.RSSJobSourceTool`
 - `hello_agents.tools.builtin.career.JDParserTool`
 - `hello_agents.tools.builtin.career.FitScorerTool`
 - `hello_agents.tools.builtin.career.FormInspectorTool`
@@ -65,6 +66,12 @@ Index local resume templates:
 
 ```bash
 job-agent resumes index "$RESUME_SOURCE_DIR"
+```
+
+Import jobs from a compliant public RSS or Atom feed saved as XML:
+
+```bash
+job-agent jobs import-rss jobs.xml --out output/jobs.json --source company-careers-rss
 ```
 
 Create a review packet from a pasted JD saved as a text file:
@@ -134,6 +141,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - SQLite schema for jobs, resume templates, fit scores, applications, and generated documents.
 - Resume template indexing for role-specific DOCX/PDF files.
 - Manual JD import from text.
+- Public RSS/Atom job feed import with normalized source/apply URLs.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.

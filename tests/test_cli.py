@@ -118,3 +118,29 @@ def test_cli_review_job_can_include_form_fill_plan(tmp_path):
     text = out_path.read_text()
     assert "## Form Fill Plan" in text
     assert "review_required=Do you require visa sponsorship?" in text
+
+
+def test_cli_import_rss_jobs_writes_normalized_json(tmp_path):
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build LLM agents with FastAPI.</description>
+        <category>Remote</category>
+        </item></channel></rss>"""
+    )
+    out_path = tmp_path / "jobs.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "import-rss", str(rss_path), "--out", str(out_path), "--source", "example-rss"],
+    )
+
+    assert result.exit_code == 0
+    assert "Imported 1 jobs" in result.output
+    text = out_path.read_text()
+    assert '"title": "Agent Engineer"' in text
+    assert '"company": "Acme AI"' in text
+    assert '"location": "Remote"' in text

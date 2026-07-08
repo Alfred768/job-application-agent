@@ -411,6 +411,13 @@ ApplicationFormChain:
 - `LeverJobSourceTool`
 - `RemotiveJobSourceTool`
 
+当前已实现：
+
+- `ManualJDImportTool`：接收用户提供的 JD 文本，标准化为 `Job`。
+- `RSSJobSourceTool`：接收公开 RSS/Atom XML 或 URL，标准化为 `Job` 列表，并保留 `source_url` / `apply_url` 作为出处和后续申请入口。
+
+`RSSJobSourceTool` 属于 Sensors / Perception 层的合规岗位感知工具。它只读取公开 feed，不做 LinkedIn scraping，也不绕过招聘网站访问规则。
+
 输入：
 
 ```python
@@ -747,6 +754,7 @@ NEW_JOB
 MVP v1 不需要一次做完所有工具。第一版 HelloAgents 求职 Agent 应该包含：
 
 - `ManualJDImportTool`
+- `RSSJobSourceTool`
 - `FitScorerTool`
 - `ResumeIndexerTool`
 - `ResumeSelectorTool`
