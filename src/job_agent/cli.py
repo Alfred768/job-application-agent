@@ -27,6 +27,7 @@ from job_agent.jobs import (
 from job_agent.models import Job
 from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
 from job_agent.resumes import index_resume_templates
+from job_agent.shortlist import shortlisted_jobs_to_dicts, shortlist_jobs
 from job_agent.source_config import load_jobs_from_source_config
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.core.llm import HelloAgentsLLM
@@ -431,6 +432,21 @@ def review_configured_sources(
         llm_base_url=llm_base_url,
     )
     typer.echo(f"Reviewed {len(jobs)} jobs into {out_dir}")
+
+
+@jobs_app.command("shortlist")
+def shortlist_job_pool(
+    jobs_file: Path,
+    out: Path = typer.Option(Path("shortlist.json"), "--out", help="JSON output path."),
+    min_score: int = typer.Option(70, "--min-score", help="Minimum fit score to keep."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of jobs to keep."),
+) -> None:
+    raw_jobs = json.loads(jobs_file.read_text())
+    jobs = [_job_from_dict(raw) for raw in raw_jobs]
+    shortlisted = shortlist_jobs(jobs, min_score=min_score, limit=limit)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(shortlisted_jobs_to_dicts(shortlisted), indent=2, ensure_ascii=True))
+    typer.echo(f"Shortlisted {len(shortlisted)} jobs to {out}")
 
 
 @jobs_app.command("import-greenhouse")

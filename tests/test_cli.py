@@ -316,6 +316,48 @@ def test_cli_import_sources_combines_configured_sources(tmp_path):
     assert '"source": "lever:acme"' in text
 
 
+def test_cli_jobs_shortlist_filters_and_scores_jobs(tmp_path):
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme",
+            "location": "Remote",
+            "raw_jd": "Build LangChain agents, RAG workflows, tools, and LLM systems.",
+            "source": "test",
+            "source_url": "https://jobs.example.com/agent",
+            "apply_url": "https://jobs.example.com/agent",
+            "remote_policy": null
+          },
+          {
+            "title": "Store Manager",
+            "company": "RetailCo",
+            "location": "NYC",
+            "raw_jd": "Manage retail operations and staffing.",
+            "source": "test",
+            "source_url": "https://jobs.example.com/store",
+            "apply_url": "https://jobs.example.com/store",
+            "remote_policy": null
+          }
+        ]"""
+    )
+    out_path = tmp_path / "shortlist.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["jobs", "shortlist", str(jobs_path), "--min-score", "60", "--out", str(out_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "Shortlisted 1 jobs" in result.output
+    text = out_path.read_text()
+    assert '"title": "Agent Engineer"' in text
+    assert '"fit_score":' in text
+    assert "Store Manager" not in text
+
+
 def test_cli_review_sources_writes_review_packets(tmp_path):
     rss_path = tmp_path / "jobs.xml"
     rss_path.write_text(
