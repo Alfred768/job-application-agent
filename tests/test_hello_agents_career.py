@@ -4,11 +4,14 @@ from hello_agents.career.models import JobApplicationState
 from hello_agents.tools.builtin.career import (
     ApplicationTrackerTool,
     FitScorerTool,
+    JDParserTool,
     ManualJDImportTool,
     ResumeIndexerTool,
     ResumeSelectorTool,
+    ResumeTailorTool,
     ReviewPacketTool,
     SubmitGateTool,
+    TruthfulnessCheckTool,
 )
 
 
@@ -25,19 +28,25 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(ManualJDImportTool())
     registry.register_tool(ApplicationTrackerTool())
     registry.register_tool(FitScorerTool())
+    registry.register_tool(JDParserTool())
     registry.register_tool(ResumeIndexerTool())
     registry.register_tool(ResumeSelectorTool())
+    registry.register_tool(ResumeTailorTool())
     registry.register_tool(ReviewPacketTool())
     registry.register_tool(SubmitGateTool())
+    registry.register_tool(TruthfulnessCheckTool())
 
     assert {
         "manual_jd_import",
         "application_tracker",
         "fit_scorer",
+        "jd_parser",
         "resume_indexer",
         "resume_selector",
+        "resume_tailor",
         "review_packet",
         "submit_gate",
+        "truthfulness_check",
     } <= set(registry.list_tools())
 
 
@@ -50,6 +59,22 @@ def test_job_application_agent_reviews_manual_jd():
     assert "# Application Review" in result
     assert "Agent Engineer" in result
     assert "Final Submit remains manual" in result
+
+
+def test_job_application_agent_includes_jd_analysis_and_resume_plan(tmp_path):
+    (tmp_path / "GAOYI_WU_Agent_Engineer.docx").write_text("docx")
+    agent = JobApplicationAgent(name="career-agent", llm=FakeLLM(), resume_source_dir=tmp_path)
+    jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents with LangChain, RAG, FastAPI, and Rust."
+
+    result = agent.run(jd)
+
+    assert "## JD Analysis" in result
+    assert '"role_track": "Agent Engineer"' in result
+    assert "## Resume Edit Plan" in result
+    assert "LangChain" in result
+    assert "unsupported_keywords" in result
+    assert "Rust" in result
+    assert "## Truthfulness Gate" in result
 
 
 def test_job_application_agent_selects_resume_and_tracks_application(tmp_path):
@@ -97,6 +122,36 @@ def test_resume_selector_tool_selects_track_from_jd(tmp_path):
 
     assert "selected_track=ML Infra" in result
     assert "GAOYI_WU_ML_Infra.docx" in result
+
+
+def test_jd_parser_tool_returns_structured_analysis():
+    jd = "Title: Agent Engineer\n\nBuild LangChain tools, RAG workflows, and FastAPI services."
+
+    result = JDParserTool().run({"jd_text": jd})
+
+    assert '"role_track": "Agent Engineer"' in result
+    assert '"LangChain"' in result
+    assert '"FastAPI"' in result
+
+
+def test_resume_tailor_tool_flags_unsupported_keywords():
+    jd = "Title: Agent Engineer\n\nBuild LangChain agents with Rust and RAG."
+
+    result = ResumeTailorTool().run({"jd_text": jd, "resume_track": "Agent Engineer"})
+
+    assert '"target_track": "Agent Engineer"' in result
+    assert '"LangChain"' in result
+    assert '"unsupported_keywords": [' in result
+    assert '"Rust"' in result
+
+
+def test_truthfulness_check_tool_blocks_unsupported_claims():
+    plan_json = '{"unsupported_keywords": ["Rust"]}'
+
+    result = TruthfulnessCheckTool().run({"plan_json": plan_json})
+
+    assert "truthfulness_status=needs_review" in result
+    assert "Rust" in result
 
 
 def test_application_tracker_tool_creates_application_record(tmp_path):

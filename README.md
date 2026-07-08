@@ -10,8 +10,14 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 
 - `hello_agents.agents.job_application_agent.JobApplicationAgent`
 - `hello_agents.tools.builtin.career.ManualJDImportTool`
+- `hello_agents.tools.builtin.career.JDParserTool`
 - `hello_agents.tools.builtin.career.FitScorerTool`
+- `hello_agents.tools.builtin.career.ResumeIndexerTool`
+- `hello_agents.tools.builtin.career.ResumeSelectorTool`
+- `hello_agents.tools.builtin.career.ResumeTailorTool`
+- `hello_agents.tools.builtin.career.TruthfulnessCheckTool`
 - `hello_agents.tools.builtin.career.ReviewPacketTool`
+- `hello_agents.tools.builtin.career.ApplicationTrackerTool`
 - `hello_agents.tools.builtin.career.SubmitGateTool`
 
 The existing CLI calls the HelloAgents-based `JobApplicationAgent` for JD review.
@@ -103,7 +109,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - SQLite schema for jobs, resume templates, fit scores, applications, and generated documents.
 - Resume template indexing for role-specific DOCX/PDF files.
 - Manual JD import from text.
+- Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.
 - HelloAgents-based resume selection and application tracking tools.
+- Auditable resume edit plan generation with unsupported keyword detection.
 - Guarded form-fill plan model with manual final-submit policy.

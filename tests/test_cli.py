@@ -22,7 +22,11 @@ def test_cli_review_job_from_text_file(tmp_path):
 
     assert result.exit_code == 0
     assert out_path.exists()
-    assert "Application Review" in out_path.read_text()
+    text = out_path.read_text()
+    assert "Application Review" in text
+    assert "## JD Analysis" in text
+    assert "## Resume Edit Plan" in text
+    assert "## Truthfulness Gate" in text
 
 
 def test_cli_review_job_can_select_resume_and_track_application(tmp_path):
@@ -53,5 +57,6 @@ def test_cli_review_job_can_select_resume_and_track_application(tmp_path):
     assert result.exit_code == 0
     text = out_path.read_text()
     assert "## Recommended Resume" in text
+    assert "## Resume Edit Plan" in text
     assert "## Tracking" in text
     assert "application_id=1" in text

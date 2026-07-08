@@ -11,11 +11,14 @@ from hello_agents.core.llm import HelloAgentsLLM
 from hello_agents.tools.builtin.career import (
     ApplicationTrackerTool,
     FitScorerTool,
+    JDParserTool,
     ManualJDImportTool,
     ResumeIndexerTool,
     ResumeSelectorTool,
+    ResumeTailorTool,
     ReviewPacketTool,
     SubmitGateTool,
+    TruthfulnessCheckTool,
 )
 from hello_agents.tools.registry import ToolRegistry
 
@@ -54,10 +57,13 @@ class JobApplicationAgent(PlanAndSolveAgent):
         registry.register_tool(ApplicationTrackerTool())
         registry.register_tool(ManualJDImportTool())
         registry.register_tool(FitScorerTool())
+        registry.register_tool(JDParserTool())
         registry.register_tool(ResumeIndexerTool())
         registry.register_tool(ResumeSelectorTool())
+        registry.register_tool(ResumeTailorTool())
         registry.register_tool(ReviewPacketTool())
         registry.register_tool(SubmitGateTool())
+        registry.register_tool(TruthfulnessCheckTool())
         return registry
 
     def run(self, input_text: str, **kwargs) -> str:
@@ -65,11 +71,22 @@ class JobApplicationAgent(PlanAndSolveAgent):
         review = self.tool_registry.execute_tool("review_packet", input_text)
         sections = [review]
 
+        jd_analysis = self.tool_registry.get_tool("jd_parser").run({"jd_text": input_text})
+        sections.append(f"## JD Analysis\n\n```json\n{jd_analysis}\n```")
+
         if self.resume_source_dir is not None:
             selected_resume = self.tool_registry.get_tool("resume_selector").run(
                 {"source_dir": str(self.resume_source_dir), "jd_text": input_text}
             )
             sections.append(f"## Recommended Resume\n\n{selected_resume}")
+
+        edit_plan = self.tool_registry.get_tool("resume_tailor").run({"jd_text": input_text})
+        sections.append(f"## Resume Edit Plan\n\n```json\n{edit_plan}\n```")
+
+        truthfulness = self.tool_registry.get_tool("truthfulness_check").run(
+            {"plan_json": edit_plan}
+        )
+        sections.append(f"## Truthfulness Gate\n\n{truthfulness}")
 
         if self.database_path is not None:
             tracking = self.tool_registry.get_tool("application_tracker").run(
