@@ -193,6 +193,11 @@ def prepare_application(
         "--resume",
         help="Optional base resume text/markdown file for tailored resume draft generation.",
     ),
+    upload_resume: bool = typer.Option(
+        False,
+        "--upload-resume",
+        help="When --resume and form data are provided, wire tailored-resume.md into Resume/CV upload fields.",
+    ),
     use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for LLM-backed steps."),
     llm_model: Optional[str] = typer.Option(None, "--llm-model", help="LLM model id. Defaults to LLM_MODEL_ID or provider default."),
     llm_provider: Optional[str] = typer.Option(None, "--llm-provider", help="Optional provider name, such as openai."),
@@ -222,19 +227,24 @@ def prepare_application(
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "review.md").write_text(review)
 
+    tailored_resume_path = None
+    if resume:
+        tailored_resume_path = out_dir / "tailored-resume.md"
+        resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
+        tailored_resume_path.write_text(
+            render_tailored_resume_draft(resume.read_text(), resume_plan)
+        )
+
     if form_snapshot and profile:
+        profile_facts = json.loads(profile.read_text())
+        if upload_resume and tailored_resume_path:
+            profile_facts["resume_file"] = str(tailored_resume_path)
         plan = build_form_fill_plan(
             inspect_form_snapshot(form_snapshot.read_text()),
-            json.loads(profile.read_text()),
+            profile_facts,
         )
         (out_dir / "fill-form.js").write_text(
             render_playwright_fill_script(plan, application_url=job.apply_url or job.source_url)
-        )
-
-    if resume:
-        resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
-        (out_dir / "tailored-resume.md").write_text(
-            render_tailored_resume_draft(resume.read_text(), resume_plan)
         )
 
     typer.echo(f"Prepared application package at {out_dir}")
@@ -258,10 +268,18 @@ def build_form_script(
         "--application-url",
         help="Optional application page URL to open before filling fields.",
     ),
+    resume_file: Optional[Path] = typer.Option(
+        None,
+        "--resume-file",
+        help="Optional approved resume file path for Resume/CV upload fields.",
+    ),
 ) -> None:
+    profile_facts = json.loads(profile.read_text())
+    if resume_file:
+        profile_facts["resume_file"] = str(resume_file)
     plan = build_form_fill_plan(
         inspect_form_snapshot(form_snapshot.read_text()),
-        json.loads(profile.read_text()),
+        profile_facts,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_playwright_fill_script(plan, application_url=application_url))

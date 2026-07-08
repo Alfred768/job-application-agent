@@ -118,7 +118,10 @@ class FormFillScriptTool(Tool):
         snapshot = parameters.get("form_snapshot_json") or parameters.get("input") or "[]"
         profile_json = parameters.get("profile_json") or "{}"
         application_url = parameters.get("application_url")
+        resume_file = parameters.get("resume_file")
         profile = json.loads(profile_json)
+        if resume_file:
+            profile["resume_file"] = str(resume_file)
         plan = build_form_fill_plan(inspect_form_snapshot(snapshot), profile)
         return render_playwright_fill_script(plan, application_url=application_url)
 
@@ -138,6 +141,12 @@ class FormFillScriptTool(Tool):
                 name="application_url",
                 type="string",
                 description="Optional application page URL to open before filling fields.",
+                required=False,
+            ),
+            ToolParameter(
+                name="resume_file",
+                type="string",
+                description="Optional approved resume file path for Resume/CV upload fields.",
                 required=False,
             ),
         ]

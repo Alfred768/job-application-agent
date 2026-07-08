@@ -334,6 +334,36 @@ def test_cli_forms_build_script_writes_guarded_playwright_script(tmp_path):
     assert ".click(" not in text
 
 
+def test_cli_forms_build_script_can_upload_resume_file(tmp_path):
+    form_path = tmp_path / "form.json"
+    form_path.write_text('[{"label": "Resume", "type": "file", "required": true}]')
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text("{}")
+    resume_path = tmp_path / "tailored-resume.pdf"
+    resume_path.write_text("pdf")
+    out_path = tmp_path / "fill-form.js"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "forms",
+            "build-script",
+            "--form-snapshot",
+            str(form_path),
+            "--profile",
+            str(profile_path),
+            "--resume-file",
+            str(resume_path),
+            "--out",
+            str(out_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert f'await page.getByLabel("Resume").setInputFiles("{resume_path}");' in out_path.read_text()
+
+
 def test_cli_applications_prepare_generates_package_and_fill_script(tmp_path):
     jobs_path = tmp_path / "jobs.json"
     jobs_path.write_text(
@@ -426,6 +456,56 @@ def test_cli_applications_prepare_can_generate_tailored_resume_draft(tmp_path):
     assert "# Tailored Resume Draft" in tailored
     assert "LangChain" in tailored
     assert "Unsupported JD keywords not inserted: Rust" in tailored
+
+
+def test_cli_applications_prepare_can_wire_tailored_resume_upload(tmp_path):
+    jobs_path = tmp_path / "jobs.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme AI",
+            "location": "Remote",
+            "raw_jd": "Build LLM agents with LangChain and FastAPI.",
+            "source": "greenhouse:acme",
+            "source_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "apply_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "remote_policy": null
+          }
+        ]"""
+    )
+    form_path = tmp_path / "form.json"
+    form_path.write_text('[{"label": "Resume", "type": "file", "required": true}]')
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text("{}")
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text("Gaoyi Wu\n\nBuilt FastAPI services.")
+    out_dir = tmp_path / "application"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "applications",
+            "prepare",
+            str(jobs_path),
+            "--out-dir",
+            str(out_dir),
+            "--form-snapshot",
+            str(form_path),
+            "--profile",
+            str(profile_path),
+            "--resume",
+            str(resume_path),
+            "--upload-resume",
+        ],
+    )
+
+    assert result.exit_code == 0
+    script = (out_dir / "fill-form.js").read_text()
+    assert 'await page.getByLabel("Resume").setInputFiles(' in script
+    assert "tailored-resume.md" in script
+    assert ".click(" not in script
 
 
 def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):

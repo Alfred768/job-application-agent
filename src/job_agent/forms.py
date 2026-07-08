@@ -29,6 +29,7 @@ class FieldPlan:
     value: str
     sensitive: bool = False
     confidence: float = 1.0
+    action: str = "fill"
 
 
 @dataclass(frozen=True)
@@ -83,7 +84,13 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
         label_lower = field_item.label.lower()
         value = ""
         confidence = 0.0
-        if "email" in label_lower:
+        action = "fill"
+        if field_item.field_type.lower() == "file":
+            action = "upload"
+            if "resume" in label_lower or "cv" in label_lower:
+                value = profile.get("resume_file", "")
+                confidence = 1.0 if value else 0.0
+        elif "email" in label_lower:
             value = profile.get("email", "")
             confidence = 1.0 if value else 0.0
         elif "name" in label_lower:
@@ -107,6 +114,7 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
                 value=value,
                 sensitive=is_sensitive_field(field_item.label),
                 confidence=confidence,
+                action=action,
             )
         )
     return FormFillPlan(fields=plans)
@@ -126,9 +134,14 @@ def render_playwright_fill_script(plan: FormFillPlan, application_url: str | Non
     for field_item in plan.fields:
         if field_item.sensitive or field_item.confidence < 0.9 or not field_item.value:
             continue
-        lines.append(
-            f"  await page.getByLabel({json.dumps(field_item.label)}).fill({json.dumps(field_item.value)});"
-        )
+        if field_item.action == "upload":
+            lines.append(
+                f"  await page.getByLabel({json.dumps(field_item.label)}).setInputFiles({json.dumps(field_item.value)});"
+            )
+        else:
+            lines.append(
+                f"  await page.getByLabel({json.dumps(field_item.label)}).fill({json.dumps(field_item.value)});"
+            )
 
     lines.extend(
         [

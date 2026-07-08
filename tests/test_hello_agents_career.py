@@ -311,6 +311,23 @@ def test_form_fill_script_tool_generates_guarded_playwright_script():
     assert ".click(" not in result
 
 
+def test_form_fill_script_tool_can_upload_resume_file():
+    snapshot = '[{"label": "Resume", "type": "file", "required": true}]'
+    profile = '{"email": "gaoyi@example.com"}'
+
+    result = FormFillScriptTool().run(
+        {
+            "form_snapshot_json": snapshot,
+            "profile_json": profile,
+            "application_url": "https://jobs.example.com/apply",
+            "resume_file": "/tmp/tailored-resume.pdf",
+        }
+    )
+
+    assert 'await page.getByLabel("Resume").setInputFiles("/tmp/tailored-resume.pdf");' in result
+    assert ".click(" not in result
+
+
 def test_application_tracker_tool_creates_application_record(tmp_path):
     db_path = tmp_path / "agent.db"
     jd = "Company: Acme AI\nTitle: Agent Engineer\nLocation: Remote\n\nBuild LLM agents."

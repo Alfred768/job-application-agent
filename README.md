@@ -154,10 +154,11 @@ job-agent applications prepare output/greenhouse-jobs.json \
   --form-snapshot examples/form-snapshot.json \
   --profile examples/profile.json \
   --resume resume.txt \
+  --upload-resume \
   --use-llm
 ```
 
-This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md`.
+This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md`. With `--upload-resume`, the script wires `tailored-resume.md` into Resume/CV upload fields, but it still does not click Submit.
 
 Create a review packet from a pasted JD saved as a text file:
 
@@ -201,6 +202,7 @@ Generate a guarded Playwright script that fills only low-risk fields and pauses 
 job-agent forms build-script \
   --form-snapshot examples/form-snapshot.json \
   --profile examples/profile.json \
+  --resume-file output/tailored-resume.pdf \
   --application-url "https://example.com/apply" \
   --out output/fill-form.js
 ```
@@ -243,5 +245,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Grounded tailored resume draft generation that does not overwrite source resumes.
 - Local application package export for review artifacts.
 - Form snapshot inspection, sensitive-field detection, and guarded form-fill planning.
-- Guarded Playwright script generation for low-risk browser form filling.
+- Guarded Playwright script generation for low-risk browser form filling and approved Resume/CV file upload.
 - Guarded form-fill plan model with manual final-submit policy.
