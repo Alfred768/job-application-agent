@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -39,8 +40,23 @@ def index_resumes(source_dir: Path) -> None:
 def review_job(
     jd_file: Path,
     out: Path = typer.Option(Path("application-review.md"), "--out", help="Markdown output path."),
+    resume_source_dir: Optional[Path] = typer.Option(
+        None,
+        "--resume-source-dir",
+        help="Optional local directory containing role-specific resume templates.",
+    ),
+    db: Optional[Path] = typer.Option(
+        None,
+        "--db",
+        help="Optional SQLite database path for application tracking.",
+    ),
 ) -> None:
-    agent = JobApplicationAgent(name="job-application-agent", llm=DeterministicLLM())
+    agent = JobApplicationAgent(
+        name="job-application-agent",
+        llm=DeterministicLLM(),
+        resume_source_dir=resume_source_dir,
+        database_path=db,
+    )
     review = agent.run(jd_file.read_text())
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(review)

@@ -63,6 +63,15 @@ Create a review packet from a pasted JD saved as a text file:
 job-agent jobs review jd.txt --out output/application-review.md
 ```
 
+Create a review packet, select the closest resume template, and write an application tracking record:
+
+```bash
+job-agent jobs review jd.txt \
+  --out output/application-review.md \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --db job-agent.db
+```
+
 Use the HelloAgents API directly:
 
 ```python
@@ -96,4 +105,5 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Manual JD import from text.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.
+- HelloAgents-based resume selection and application tracking tools.
 - Guarded form-fill plan model with manual final-submit policy.

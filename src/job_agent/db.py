@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from job_agent.models import Job
+
 
 def connect(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(Path(path))
@@ -84,3 +86,51 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
     conn.commit()
+
+
+def create_job(conn: sqlite3.Connection, job: Job) -> int:
+    cursor = conn.execute(
+        """
+        insert into jobs (
+            source,
+            source_url,
+            apply_url,
+            title,
+            company,
+            location,
+            remote_policy,
+            raw_jd
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job.source,
+            job.source_url,
+            job.apply_url,
+            job.title,
+            job.company,
+            job.location,
+            job.remote_policy,
+            job.raw_jd,
+        ),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def create_application(conn: sqlite3.Connection, job_id: int, job: Job) -> int:
+    cursor = conn.execute(
+        """
+        insert into applications (
+            job_id,
+            company,
+            title,
+            apply_url,
+            status
+        )
+        values (?, ?, ?, ?, ?)
+        """,
+        (job_id, job.company, job.title, job.apply_url, "needs_review"),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
