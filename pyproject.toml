@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-application-agent"
+version = "0.1.0"
+description = "Local-first personal job application agent with PEAS-designed safety gates."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "jinja2>=3.1",
+  "pydantic>=2.0",
+  "python-docx>=1.1",
+  "pypdf>=4.0",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+job-agent = "job_agent.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
