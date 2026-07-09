@@ -10,5 +10,9 @@
   "cover_letter": "I am excited to apply because my experience building reliable AI agent workflows matches this role.",
   "sponsorship": "Needs review",
   "work_authorization": "Needs review",
-  "salary": "Needs review"
+  "salary": "Needs review",
+  "answers": {
+    "Have you built production AI agents?": "Yes, I have built guarded AI agent workflows with tool selection, review gates, and traceable outputs.",
+    "How did you hear about us?": "Company website"
+  }
 }

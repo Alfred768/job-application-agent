@@ -25,6 +25,17 @@
     "required": false
   },
   {
+    "label": "Have you built production AI agents?",
+    "type": "textarea",
+    "required": false
+  },
+  {
+    "label": "How did you hear about us?",
+    "type": "select",
+    "required": false,
+    "options": ["LinkedIn", "Company website", "Referral"]
+  },
+  {
     "label": "Resume",
     "type": "file",
     "required": true

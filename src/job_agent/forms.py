@@ -78,7 +78,15 @@ def detect_sensitive_fields(fields: list[FormField]) -> list[str]:
     return [field.label for field in fields if is_sensitive_field(field.label)]
 
 
-def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> FormFillPlan:
+def _approved_answers(profile: dict) -> dict[str, str]:
+    raw_answers = profile.get("answers", {})
+    if not isinstance(raw_answers, dict):
+        return {}
+    return {str(key).strip().lower(): str(value) for key, value in raw_answers.items()}
+
+
+def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan:
+    approved_answers = _approved_answers(profile)
     plans = []
     for field_item in fields:
         label_lower = field_item.label.lower()
@@ -86,11 +94,16 @@ def build_form_fill_plan(fields: list[FormField], profile: dict[str, str]) -> Fo
         confidence = 0.0
         action = "fill"
         sensitive = is_sensitive_field(field_item.label)
+        exact_answer = approved_answers.get(label_lower)
         if field_item.field_type.lower() == "file":
             action = "upload"
             if "resume" in label_lower or "cv" in label_lower:
                 value = profile.get("resume_file", "")
                 confidence = 1.0 if value else 0.0
+        elif exact_answer is not None:
+            action = "select" if field_item.field_type.lower() == "select" else "fill"
+            value = exact_answer
+            confidence = 0.5 if sensitive else 1.0
         elif "email" in label_lower:
             value = profile.get("email", "")
             confidence = 1.0 if value else 0.0
@@ -156,6 +169,10 @@ def render_playwright_fill_script(plan: FormFillPlan, application_url: str | Non
         if field_item.action == "upload":
             lines.append(
                 f"  await page.getByLabel({json.dumps(field_item.label)}).setInputFiles({json.dumps(field_item.value)});"
+            )
+        elif field_item.action == "select":
+            lines.append(
+                f"  await page.getByLabel({json.dumps(field_item.label)}).selectOption({{ label: {json.dumps(field_item.value)} }});"
             )
         else:
             lines.append(

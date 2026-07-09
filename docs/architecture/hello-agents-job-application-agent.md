@@ -634,7 +634,7 @@ class ResumeEditPlan:
 - `FormFillScriptTool`
 - `FileUploadTool`
 - `SubmitGateTool`
-- 当前已实现：根据 approved profile facts 生成安全的 fill plan，支持 email/name/phone/LinkedIn/GitHub/portfolio/website/location/cover letter/resume upload 等低风险字段，并列出 review-required 字段。
+- 当前已实现：根据 approved profile facts 生成安全的 fill plan，支持 email/name/phone/LinkedIn/GitHub/portfolio/website/location/cover letter/resume upload 等低风险字段，也支持 `answers` 中的 exact-label 自定义问题答案，并列出 review-required 字段。
 - 当前已实现：生成 guarded Playwright form-fill script，只填写低风险且高置信字段，可上传 approved Resume/CV file，不生成点击提交动作。
 
 策略：

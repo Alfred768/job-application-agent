@@ -263,7 +263,7 @@ job-agent jobs review jd.txt \
   --profile examples/profile.json
 ```
 
-The form-fill plan maps low-risk fields such as email, name, phone, LinkedIn, GitHub, portfolio, website, location, cover letter, and approved resume uploads. It marks sensitive fields such as sponsorship, work authorization, salary, relocation, demographic, disability, veteran, and legal-attestation fields for review. It does not click Submit.
+The form-fill plan maps low-risk fields such as email, name, phone, LinkedIn, GitHub, portfolio, website, location, cover letter, and approved resume uploads. For company-specific questions, add exact label matches under `answers` in `examples/profile.json`; select fields use the approved answer as the visible option label. Sensitive fields such as sponsorship, work authorization, salary, relocation, demographic, disability, veteran, and legal-attestation fields stay review-required even when an answer is present. It does not click Submit.
 
 Generate a guarded Playwright script that fills only low-risk fields and pauses before final submission:
 
@@ -311,6 +311,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Batch application package preparation from shortlisted job JSON.
 - Guarded batch runner generation for sequential low-risk form filling.
 - Expanded low-risk profile mapping for portfolio, website, location, and cover-letter fields.
+- Approved exact-label answers for custom ATS questions and select fields.
 - Automatic tailored resume draft generation from the selected parseable resume template.
 - DOCX export for tailored resume uploads while keeping Markdown review drafts.
 - Structured JD analysis with role track, skills, responsibilities, and risks.

@@ -93,6 +93,42 @@ def test_form_plan_fills_common_low_risk_profile_fields():
     assert by_label["Are you authorized to work in the United States?"].sensitive is True
 
 
+def test_form_plan_uses_approved_exact_label_answers_without_bypassing_sensitive_fields():
+    fields = inspect_form_snapshot(
+        """[
+          {"label": "Have you built production AI agents?"},
+          {"label": "How did you hear about us?", "type": "select", "options": ["LinkedIn", "Company website"]},
+          {"label": "Desired Salary"}
+        ]"""
+    )
+
+    plan = build_form_fill_plan(
+        fields,
+        {
+            "answers": {
+                "Have you built production AI agents?": "Yes, I built agent workflows with guarded tools.",
+                "How did you hear about us?": "Company website",
+                "Desired Salary": "Needs review",
+            }
+        },
+    )
+
+    by_label = {field.label: field for field in plan.fields}
+    assert by_label["Have you built production AI agents?"].value.startswith("Yes")
+    assert by_label["Have you built production AI agents?"].confidence == 1.0
+    assert by_label["How did you hear about us?"].action == "select"
+    assert by_label["How did you hear about us?"].value == "Company website"
+    assert by_label["Desired Salary"].value == "Needs review"
+    assert by_label["Desired Salary"].sensitive is True
+    assert by_label["Desired Salary"].confidence < 0.9
+
+    script = render_playwright_fill_script(plan)
+    assert 'await page.getByLabel("Have you built production AI agents?").fill("Yes, I built agent workflows with guarded tools.");' in script
+    assert 'await page.getByLabel("How did you hear about us?").selectOption({ label: "Company website" });' in script
+    assert "Desired Salary" in script
+    assert "Needs review" not in script
+
+
 def test_render_playwright_form_snapshot_script_only_inspects_fields():
     script = render_playwright_form_snapshot_script(
         application_url="https://jobs.example.com/apply",
