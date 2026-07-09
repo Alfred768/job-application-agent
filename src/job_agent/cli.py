@@ -10,6 +10,7 @@ from urllib.request import urlopen
 import typer
 
 from job_agent.db import connect, init_db
+from job_agent.document_export import markdown_to_docx_bytes
 from job_agent.forms import (
     build_form_fill_plan,
     inspect_form_snapshot,
@@ -163,12 +164,15 @@ def _prepare_application_package(
     review_path.write_text(review)
 
     tailored_resume_path = None
+    upload_resume_path = None
     if resume:
         tailored_resume_path = out_dir / "tailored-resume.md"
         resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
         tailored_resume_path.write_text(
             render_tailored_resume_draft(resume.read_text(), resume_plan)
         )
+        upload_resume_path = out_dir / "tailored-resume.docx"
+        upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
     elif resume_source_dir:
         selected_track = classify_role(job)
         selected_template = next(
@@ -188,12 +192,14 @@ def _prepare_application_package(
             tailored_resume_path.write_text(
                 render_tailored_resume_draft(selected_template.parsed_text, resume_plan)
             )
+            upload_resume_path = out_dir / "tailored-resume.docx"
+            upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
 
     fill_script_path = None
     if form_snapshot and profile:
         profile_facts = json.loads(profile.read_text())
-        if upload_resume and tailored_resume_path:
-            profile_facts["resume_file"] = str(tailored_resume_path)
+        if upload_resume and upload_resume_path:
+            profile_facts["resume_file"] = str(upload_resume_path)
         plan = build_form_fill_plan(
             inspect_form_snapshot(form_snapshot.read_text()),
             profile_facts,
@@ -210,6 +216,7 @@ def _prepare_application_package(
         "package_dir": str(out_dir),
         "review_path": str(review_path),
         "tailored_resume_path": str(tailored_resume_path) if tailored_resume_path else None,
+        "upload_resume_path": str(upload_resume_path) if upload_resume_path else None,
         "fill_script_path": str(fill_script_path) if fill_script_path else None,
     }
 

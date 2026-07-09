@@ -707,7 +707,9 @@ def test_cli_applications_prepare_can_wire_tailored_resume_upload(tmp_path):
     assert result.exit_code == 0
     script = (out_dir / "fill-form.js").read_text()
     assert 'await page.getByLabel("Resume").setInputFiles(' in script
-    assert "tailored-resume.md" in script
+    assert (out_dir / "tailored-resume.docx").exists()
+    assert "tailored-resume.docx" in script
+    assert "tailored-resume.md" not in script
     assert ".click(" not in script
 
 

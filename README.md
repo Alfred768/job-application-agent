@@ -186,7 +186,7 @@ job-agent applications prepare output/greenhouse-jobs.json \
   --use-llm
 ```
 
-This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md`. If `--resume` is omitted, the agent selects the closest parseable template from `--resume-source-dir`; if `--resume` is provided, that file is used as the base resume text. With `--upload-resume`, the script wires `tailored-resume.md` into Resume/CV upload fields, but it still does not click Submit.
+This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md` and `tailored-resume.docx`. If `--resume` is omitted, the agent selects the closest parseable template from `--resume-source-dir`; if `--resume` is provided, that file is used as the base resume text. With `--upload-resume`, the script wires the DOCX version into Resume/CV upload fields, but it still does not click Submit.
 
 You can also prepare from a short list:
 
@@ -312,6 +312,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -v
 - Guarded batch runner generation for sequential low-risk form filling.
 - Expanded low-risk profile mapping for portfolio, website, location, and cover-letter fields.
 - Automatic tailored resume draft generation from the selected parseable resume template.
+- DOCX export for tailored resume uploads while keeping Markdown review drafts.
 - Structured JD analysis with role track, skills, responsibilities, and risks.
 - Deterministic role classification and explainable fit scoring.
 - Markdown application review packet generation.
