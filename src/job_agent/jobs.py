@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from html import unescape
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from xml.etree import ElementTree
 
 from job_agent.models import Job
+
+
+_TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "ref",
+    "referrer",
+    "source",
+}
 
 
 def _field_from_text(text: str, label: str) -> str | None:
@@ -157,6 +167,76 @@ def parse_remotive_jobs(payload: dict[str, Any], limit: int | None = None) -> li
             )
         )
     return jobs
+
+
+def _normalized_text(value: str | None) -> str:
+    return " ".join((value or "").casefold().split())
+
+
+def _canonical_job_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parts = urlsplit(value.strip())
+    if not parts.netloc:
+        return value.strip().rstrip("/")
+    query = urlencode(
+        sorted(
+            (key, item_value)
+            for key, item_value in parse_qsl(parts.query, keep_blank_values=True)
+            if not key.casefold().startswith("utm_")
+            and key.casefold() not in _TRACKING_QUERY_KEYS
+        )
+    )
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((parts.scheme.casefold(), parts.netloc.casefold(), path, query, ""))
+
+
+def _job_identity(job: Job) -> tuple[str, ...]:
+    canonical_url = _canonical_job_url(job.apply_url or job.source_url)
+    if canonical_url:
+        return ("url", canonical_url)
+    return (
+        "role",
+        _normalized_text(job.company),
+        _normalized_text(job.title),
+        _normalized_text(job.location),
+    )
+
+
+def _merge_sources(first: str, second: str) -> str:
+    sources = []
+    for source in [*first.split(" | "), *second.split(" | ")]:
+        if source and source not in sources:
+            sources.append(source)
+    return " | ".join(sources)
+
+
+def _merge_duplicate_jobs(first: Job, second: Job) -> Job:
+    richer_jd = second.raw_jd if len(second.raw_jd.strip()) > len(first.raw_jd.strip()) else first.raw_jd
+    return replace(
+        first,
+        raw_jd=richer_jd,
+        location=first.location or second.location,
+        source=_merge_sources(first.source, second.source),
+        source_url=first.source_url or second.source_url,
+        apply_url=first.apply_url or second.apply_url,
+        remote_policy=first.remote_policy or second.remote_policy,
+    )
+
+
+def deduplicate_jobs(jobs: list[Job]) -> list[Job]:
+    """Collapse jobs found through multiple public sources while preserving order."""
+    unique: list[Job] = []
+    positions: dict[tuple[str, ...], int] = {}
+    for job in jobs:
+        identity = _job_identity(job)
+        position = positions.get(identity)
+        if position is None:
+            positions[identity] = len(unique)
+            unique.append(job)
+            continue
+        unique[position] = _merge_duplicate_jobs(unique[position], job)
+    return unique
 
 
 def jobs_to_dicts(jobs: list[Job]) -> list[dict[str, str | None]]:

@@ -136,6 +136,8 @@ job-agent jobs review-sources sources.json \
   --db job-agent.db
 ```
 
+多来源导入会自动按规范化申请 URL 去重（忽略常见追踪参数）；缺少 URL 时按公司、职位和地点识别重复项。重复岗位会合并来源标记并保留更完整的 JD，避免进入重复定制和投递队列。
+
 `jobs shortlist` scores the normalized job pool, filters low-fit roles, and writes a ranked JSON file that still contains the standard job fields required by `applications prepare`.
 
 Generate review packets directly from a compliant public RSS or Atom feed:

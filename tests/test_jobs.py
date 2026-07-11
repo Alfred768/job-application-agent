@@ -1,5 +1,6 @@
-from job_agent.jobs import format_job_as_jd_text, import_job_from_text, parse_rss_jobs
+from job_agent.jobs import deduplicate_jobs, format_job_as_jd_text, import_job_from_text, parse_rss_jobs
 from job_agent.jobs import parse_greenhouse_jobs, parse_lever_jobs, parse_remotive_jobs
+from job_agent.models import Job
 
 
 def test_import_job_from_text_extracts_basic_fields():
@@ -152,3 +153,47 @@ def test_parse_remotive_jobs_normalizes_public_api_response():
     assert jobs[0].source == "remotive"
     assert jobs[0].apply_url == "https://remotive.com/remote-jobs/software-dev/backend-engineer-456"
     assert "distributed systems" in jobs[0].raw_jd
+
+
+def test_deduplicate_jobs_collapses_tracking_variants_and_merges_provenance():
+    jobs = [
+        Job(
+            title="Agent Engineer",
+            company="Acme AI",
+            location="Remote",
+            raw_jd="Build agents.",
+            source="company-rss",
+            source_url="https://jobs.acme.example/roles/123?utm_source=rss",
+            apply_url="https://jobs.acme.example/roles/123?utm_source=rss",
+        ),
+        Job(
+            title="Agent Engineer",
+            company="Acme AI",
+            location="Remote",
+            raw_jd="Build production LLM agents with Python, RAG, and FastAPI.",
+            source="greenhouse:acme",
+            source_url="https://jobs.acme.example/roles/123/",
+            apply_url="https://jobs.acme.example/roles/123/",
+        ),
+    ]
+
+    unique = deduplicate_jobs(jobs)
+
+    assert len(unique) == 1
+    assert unique[0].source == "company-rss | greenhouse:acme"
+    assert "FastAPI" in unique[0].raw_jd
+    assert unique[0].apply_url == "https://jobs.acme.example/roles/123?utm_source=rss"
+
+
+def test_deduplicate_jobs_uses_role_identity_when_urls_are_missing():
+    jobs = [
+        Job(title="ML Engineer", company="Data Forge", location="New York, NY", raw_jd="First", source="rss-a"),
+        Job(title=" ml engineer ", company="DATA  FORGE", location="new york, ny", raw_jd="More complete JD", source="rss-b"),
+        Job(title="ML Engineer", company="Data Forge", location="Remote", raw_jd="Remote role", source="rss-c"),
+    ]
+
+    unique = deduplicate_jobs(jobs)
+
+    assert len(unique) == 2
+    assert unique[0].source == "rss-a | rss-b"
+    assert unique[0].raw_jd == "More complete JD"

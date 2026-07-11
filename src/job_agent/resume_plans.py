@@ -110,3 +110,94 @@ def render_tailored_resume_draft(base_resume_text: str, plan: ResumeEditPlan) ->
         lines.append("Unsupported JD keywords not inserted: None")
     lines.append("No new experience claims were added automatically.")
     return "\n".join(lines).strip() + "\n"
+
+
+_LLM_RESUME_SYSTEM_PROMPT = (
+    "You are a careful resume tailoring assistant for a human job applicant. "
+    "Rewrite the candidate's existing resume to target the given job description.\n"
+    "Rules:\n"
+    "- Emphasize and surface JD keywords that are ALREADY supported by the resume.\n"
+    "- Reorder skills so supported JD keywords come first.\n"
+    "- Rephrase existing bullets to surface supported JD keywords already backed by real work.\n"
+    "- NEVER invent employers, job titles, degrees, schools, dates, publications, "
+    "certifications, metrics, or skills that are not in the original resume.\n"
+    "- NEVER add unsupported JD keywords as if they were real experience.\n"
+    "- Keep every factual claim from the original; only rewrite wording, ordering, and emphasis.\n"
+    "- Keep it concise and ATS-readable. Output clean Markdown only, no preamble."
+)
+
+
+def _llm_resume_user_prompt(base_resume_text: str, jd_text: str, plan: ResumeEditPlan) -> str:
+    supported = plan.summary_keywords + [
+        k for k in plan.skill_order if k not in plan.summary_keywords
+    ]
+    return (
+        f"BASE RESUME (original, must preserve all facts):\n```\n{base_resume_text.strip()}\n```\n\n"
+        f"JOB DESCRIPTION:\n```\n{jd_text.strip()}\n```\n\n"
+        f"Supported JD keywords already backed by the resume (emphasize these): "
+        f"{supported or 'None'}\n"
+        f"Unsupported JD keywords NOT in the resume (do NOT add as claims): "
+        f"{plan.unsupported_keywords or 'None'}\n\n"
+        "Return the full tailored resume as Markdown."
+    )
+
+
+def render_llm_tailored_resume_draft(
+    base_resume_text: str,
+    jd_text: str,
+    llm,
+    plan: ResumeEditPlan | None = None,
+) -> str:
+    """LLM-powered tailored resume draft, grounded in the base resume.
+
+    Uses the configured LLM to rewrite wording/ordering/emphasis and embed
+    supported JD keywords, then runs a deterministic truthfulness gate that
+    flags any unsupported JD keyword that leaked into the output as a
+    potential invented claim. Falls back to the deterministic draft if the
+    LLM call fails or returns empty output.
+    """
+    plan = plan or propose_resume_edit_plan(jd_text)
+    try:
+        content = llm.invoke(
+            [
+                {"role": "system", "content": _LLM_RESUME_SYSTEM_PROMPT},
+                {"role": "user", "content": _llm_resume_user_prompt(base_resume_text, jd_text, plan)},
+            ],
+            temperature=0.3,
+            max_tokens=1400,
+        ) or ""
+    except Exception:
+        content = ""
+
+    if not content.strip():
+        return render_tailored_resume_draft(base_resume_text, plan)
+
+    # Truthfulness gate: flag unsupported JD keywords the LLM may have inserted.
+    content_lower = content.lower()
+    leaked = [k for k in plan.unsupported_keywords if k and k.lower() in content_lower]
+
+    review_lines = [
+        "",
+        "---",
+        "",
+        "## Truthfulness Review (LLM draft)",
+        "",
+        f"- Target track: {plan.target_track}",
+        f"- Unsupported JD keywords detected in LLM output: "
+        + (", ".join(leaked) if leaked else "None"),
+    ]
+    if leaked:
+        review_lines.append(
+            "- WARNING: the above keywords are NOT in your base resume. Remove them "
+            "or back them with real evidence before submitting."
+        )
+    review_lines.append(
+        "- Always review LLM-rewritten bullets against the original resume for invented claims."
+    )
+
+    header = (
+        "# Tailored Resume Draft (LLM)\n\n"
+        "> LLM-rewritten from the base resume to target this JD. "
+        "> Verify every claim against the original before submitting.\n"
+    )
+    return header + content.strip() + "\n" + "\n".join(review_lines) + "\n"

@@ -24,6 +24,11 @@ from hello_agents.tools.builtin.career import (
     SensitiveFieldDetectorTool,
     TruthfulnessCheckTool,
 )
+from hello_agents.tools.chain import (
+    build_application_form_chain,
+    build_jd_review_chain,
+    build_resume_preparation_chain,
+)
 from hello_agents.tools.registry import ToolRegistry
 
 JOB_APPLICATION_SYSTEM_PROMPT = """
@@ -81,25 +86,32 @@ class JobApplicationAgent(PlanAndSolveAgent):
         return registry
 
     def run(self, input_text: str, **kwargs) -> str:
-        """Run a deterministic MVP career review flow using HelloAgents tools."""
-        review = self.tool_registry.execute_tool("review_packet", input_text)
-        sections = [review]
+        """Run a deterministic MVP career review flow using HelloAgents tools.
 
-        jd_analysis = self.tool_registry.get_tool("jd_parser").run({"jd_text": input_text})
+        The flow is orchestrated through ToolChains (the HelloAgents tool-chain
+        base): a JD-review chain, a resume-preparation chain, and (when form
+        data is supplied) an application-form chain. Outputs are assembled into
+        the review packet; the submit gate always stays manual.
+        """
+        resume_source = str(self.resume_source_dir) if self.resume_source_dir else None
+        review_chain = build_jd_review_chain(
+            self.tool_registry, input_text, resume_source_dir=resume_source
+        )
+        review_res = review_chain.run()
+
+        sections: list[str] = [review_res.outputs["review_packet"]]
+        jd_analysis = review_res.outputs["jd_parser"]
         sections.append(f"## JD Analysis\n\n```json\n{jd_analysis}\n```")
 
         if self.resume_source_dir is not None:
-            selected_resume = self.tool_registry.get_tool("resume_selector").run(
-                {"source_dir": str(self.resume_source_dir), "jd_text": input_text}
-            )
-            sections.append(f"## Recommended Resume\n\n{selected_resume}")
+            sections.append(f"## Recommended Resume\n\n{review_res.outputs['resume_selector']}")
 
-        edit_plan = self.tool_registry.get_tool("resume_tailor").run({"jd_text": input_text})
+        prep_chain = build_resume_preparation_chain(self.tool_registry, input_text)
+        prep_res = prep_chain.run()
+        edit_plan = prep_res.outputs["resume_tailor"]
         sections.append(f"## Resume Edit Plan\n\n```json\n{edit_plan}\n```")
 
-        truthfulness = self.tool_registry.get_tool("truthfulness_check").run(
-            {"plan_json": edit_plan}
-        )
+        truthfulness = prep_res.outputs["truthfulness_check"]
         sections.append(f"## Truthfulness Gate\n\n{truthfulness}")
 
         if self._should_use_llm_notes():
@@ -125,23 +137,15 @@ class JobApplicationAgent(PlanAndSolveAgent):
             sections.append(f"## Application Package\n\n{package}")
 
         if self.form_snapshot_json is not None and self.profile_json is not None:
-            inspected = self.tool_registry.get_tool("form_inspector").run(
-                {"form_snapshot_json": self.form_snapshot_json}
+            form_chain = build_application_form_chain(
+                self.tool_registry, self.form_snapshot_json, self.profile_json
             )
-            sensitive = self.tool_registry.get_tool("sensitive_field_detector").run(
-                {"form_snapshot_json": self.form_snapshot_json}
-            )
-            form_plan = self.tool_registry.get_tool("form_filler").run(
-                {
-                    "form_snapshot_json": self.form_snapshot_json,
-                    "profile_json": self.profile_json,
-                }
-            )
+            form_res = form_chain.run()
             sections.append(
                 "## Form Fill Plan\n\n"
-                f"### Form Fields\n\n```json\n{inspected}\n```\n\n"
-                f"### Sensitive Fields\n\n{sensitive}\n\n"
-                f"### Fill Plan\n\n{form_plan}"
+                f"### Form Fields\n\n```json\n{form_res.outputs['form_inspector']}\n```\n\n"
+                f"### Sensitive Fields\n\n{form_res.outputs['sensitive_field_detector']}\n\n"
+                f"### Fill Plan\n\n{form_res.outputs['form_filler']}"
             )
 
         submit_gate = self.tool_registry.execute_tool("submit_gate", "")
@@ -167,4 +171,9 @@ class JobApplicationAgent(PlanAndSolveAgent):
             f"Resume edit plan JSON:\n{edit_plan}\n\n"
             f"Truthfulness gate:\n{truthfulness}\n"
         )
-        return self.llm.invoke([{"role": "user", "content": prompt}], max_tokens=400) or ""
+        try:
+            return self.llm.invoke([{"role": "user", "content": prompt}], max_tokens=400) or ""
+        except Exception:
+            # Degrade gracefully: a failing/miss-configured LLM must not crash
+            # the whole application preparation flow.
+            return ""

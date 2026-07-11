@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 
+from job_agent.sensitive_kb import resolve_sensitive_answer
+
 
 SENSITIVE_FIELD_KEYWORDS = [
     "sponsor",
@@ -30,6 +32,7 @@ class FieldPlan:
     sensitive: bool = False
     confidence: float = 1.0
     action: str = "fill"
+    approved: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,7 +46,11 @@ class FormFillPlan:
 
     @property
     def review_required_fields(self) -> list[str]:
-        return [field.label for field in self.fields if field.sensitive or field.confidence < 0.9]
+        return [
+            field.label
+            for field in self.fields
+            if field.confidence < 0.9 or (field.sensitive and not field.approved)
+        ]
 
 
 @dataclass(frozen=True)
@@ -90,20 +97,40 @@ def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan
     plans = []
     for field_item in fields:
         label_lower = field_item.label.lower()
+        ftype = field_item.field_type.lower()
         value = ""
         confidence = 0.0
         action = "fill"
+        approved = False
         sensitive = is_sensitive_field(field_item.label)
         exact_answer = approved_answers.get(label_lower)
-        if field_item.field_type.lower() == "file":
+        if ftype == "file":
             action = "upload"
             if "resume" in label_lower or "cv" in label_lower:
                 value = profile.get("resume_file", "")
                 confidence = 1.0 if value else 0.0
+                approved = True if value else False
+        elif sensitive:
+            # Sensitive fields auto-fill ONLY from the approved knowledge base
+            # (sensitive_answers KB with approved=true, or legacy profile fields
+            # with a real, non-placeholder value). An answers-bank entry is
+            # stored but kept for review (confidence 0.5) so "Needs review" and
+            # other placeholders are never auto-submitted.
+            kb_answer = resolve_sensitive_answer(field_item.label, profile)
+            if kb_answer:
+                value = kb_answer
+                confidence = 1.0
+                approved = True
+                action = "select" if ftype == "select" else "fill"
+            elif exact_answer is not None:
+                value = exact_answer
+                confidence = 0.5
+                action = "select" if ftype == "select" else "fill"
         elif exact_answer is not None:
-            action = "select" if field_item.field_type.lower() == "select" else "fill"
+            action = "select" if ftype == "select" else "fill"
             value = exact_answer
-            confidence = 0.5 if sensitive else 1.0
+            confidence = 1.0
+            approved = True
         elif "email" in label_lower:
             value = profile.get("email", "")
             confidence = 1.0 if value else 0.0
@@ -131,15 +158,6 @@ def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan
         elif "cover letter" in label_lower:
             value = profile.get("cover_letter", "")
             confidence = 1.0 if value else 0.0
-        elif "work authorization" in label_lower or "authorized to work" in label_lower:
-            value = profile.get("work_authorization", "")
-            confidence = 0.5 if value else 0.0
-        elif "salary" in label_lower:
-            value = profile.get("salary", "")
-            confidence = 0.5 if value else 0.0
-        elif "sponsor" in label_lower or "visa" in label_lower:
-            value = profile.get("sponsorship", "")
-            confidence = 0.5 if value else 0.0
         plans.append(
             FieldPlan(
                 label=field_item.label,
@@ -147,6 +165,7 @@ def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan
                 sensitive=sensitive,
                 confidence=confidence,
                 action=action,
+                approved=approved,
             )
         )
     return FormFillPlan(fields=plans)
@@ -164,7 +183,12 @@ def render_playwright_fill_script(plan: FormFillPlan, application_url: str | Non
         lines.append(f"  await page.goto({json.dumps(application_url)});")
 
     for field_item in plan.fields:
-        if field_item.sensitive or field_item.confidence < 0.9 or not field_item.value:
+        # Fill any field with a confident approved value. Sensitive fields are
+        # filled only when explicitly approved (knowledge-base answer); all
+        # other sensitive/low-confidence fields stay for manual review.
+        if not field_item.value or field_item.confidence < 0.9 or (
+            field_item.sensitive and not field_item.approved
+        ):
             continue
         if field_item.action == "upload":
             lines.append(

@@ -1,5 +1,7 @@
 # Job Application Agent MVP Implementation Plan
 
+Status: Superseded as an execution baseline after the 2026-07-09 readiness audit. Do not execute this file as-is against the current repository state.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a local-first MVP job application agent that imports compliant jobs/JDs, indexes existing resume templates, scores role fit, prepares review packets, and provides a guarded browser form-fill entrypoint that stops before final submission.
@@ -416,4 +418,3 @@ Expected: public repository created and `main` pushed.
 
 Run: `git remote -v && gh repo view --web=false`
 Expected: `origin` points to the new public GitHub repo.
-

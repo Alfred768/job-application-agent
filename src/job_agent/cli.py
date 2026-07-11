@@ -5,12 +5,21 @@ import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
+
+# Some public job APIs (e.g. Remotive) reject the default Python-urllib
+# User-Agent with HTTP 403. A browser-like UA keeps the agent's autonomous
+# source fetching working against compliant public endpoints.
+_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
 import typer
 
 from job_agent.db import connect, init_db
 from job_agent.document_export import markdown_to_docx_bytes
+from job_agent.config import load_env
 from job_agent.forms import (
     build_form_fill_plan,
     inspect_form_snapshot,
@@ -26,10 +35,17 @@ from job_agent.jobs import (
     parse_rss_jobs,
 )
 from job_agent.models import Job
-from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
+from job_agent.resume_plans import (
+    propose_resume_edit_plan,
+    render_llm_tailored_resume_draft,
+    render_tailored_resume_draft,
+)
 from job_agent.resumes import index_resume_templates
 from job_agent.runners import render_batch_fill_runner
+from job_agent.profile import parse_resume_to_profile, render_profile_template
+from job_agent.runtime_filler import render_runtime_autofill_script
 from job_agent.scoring import classify_role
+from job_agent.sensitive_kb import load_sensitive_kb, render_sensitive_kb_template
 from job_agent.shortlist import shortlisted_jobs_to_dicts, shortlist_jobs
 from job_agent.source_config import load_jobs_from_source_config
 from hello_agents.agents.job_application_agent import JobApplicationAgent
@@ -41,6 +57,14 @@ forms_app = typer.Typer(help="Application form automation commands.")
 jobs_app = typer.Typer(help="Job intake and review commands.")
 llm_app = typer.Typer(help="LLM configuration and connectivity commands.")
 resumes_app = typer.Typer(help="Resume template commands.")
+
+
+@app.callback()
+def _load_env_before_commands() -> None:
+    """Load a local .env (gitignored) before any command runs, so
+    OPENAI_API_KEY / LLM_* take effect for `--use-llm` without exporting
+    shell variables. Runs on CLI invocation only, not at import."""
+    load_env()
 
 
 class DeterministicLLM:
@@ -66,6 +90,24 @@ def _build_llm(
     )
 
 
+def _is_real_llm(llm) -> bool:
+    return getattr(llm, "provider", "deterministic") != "deterministic"
+
+
+def _render_tailored_resume(
+    base_resume_text: str,
+    jd_text: str,
+    llm,
+    use_llm: bool,
+    plan=None,
+) -> str:
+    """Pick the LLM rewrite when a real LLM is configured, else the deterministic draft."""
+    plan = plan or propose_resume_edit_plan(jd_text)
+    if use_llm and _is_real_llm(llm):
+        return render_llm_tailored_resume_draft(base_resume_text, jd_text, llm, plan)
+    return render_tailored_resume_draft(base_resume_text, plan)
+
+
 def _review_slug(index: int, job: Job) -> str:
     raw = f"{index:03d}-{job.company}-{job.title}".lower()
     slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
@@ -75,7 +117,8 @@ def _review_slug(index: int, job: Job) -> str:
 def _read_json_source(payload: Optional[Path], url: str):
     if payload:
         return json.loads(payload.read_text())
-    with urlopen(url, timeout=20) as response:
+    request = Request(url, headers={"User-Agent": _HTTP_USER_AGENT})
+    with urlopen(request, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -144,14 +187,15 @@ def _prepare_application_package(
 ) -> dict[str, str | None]:
     form_snapshot_json = form_snapshot.read_text() if form_snapshot else None
     profile_json = profile.read_text() if profile else None
+    llm = _build_llm(
+        use_llm=use_llm,
+        model=llm_model,
+        provider=llm_provider,
+        base_url=llm_base_url,
+    )
     agent = JobApplicationAgent(
         name="job-application-agent",
-        llm=_build_llm(
-            use_llm=use_llm,
-            model=llm_model,
-            provider=llm_provider,
-            base_url=llm_base_url,
-        ),
+        llm=llm,
         resume_source_dir=resume_source_dir,
         database_path=db,
         package_dir=out_dir,
@@ -163,13 +207,14 @@ def _prepare_application_package(
     review_path = out_dir / "review.md"
     review_path.write_text(review)
 
+    jd_text = format_job_as_jd_text(job)
     tailored_resume_path = None
     upload_resume_path = None
     if resume:
         tailored_resume_path = out_dir / "tailored-resume.md"
-        resume_plan = propose_resume_edit_plan(format_job_as_jd_text(job))
+        resume_plan = propose_resume_edit_plan(jd_text)
         tailored_resume_path.write_text(
-            render_tailored_resume_draft(resume.read_text(), resume_plan)
+            _render_tailored_resume(resume.read_text(), jd_text, llm, use_llm, resume_plan)
         )
         upload_resume_path = out_dir / "tailored-resume.docx"
         upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
@@ -186,11 +231,13 @@ def _prepare_application_package(
         if selected_template and selected_template.parsed_text:
             tailored_resume_path = out_dir / "tailored-resume.md"
             resume_plan = propose_resume_edit_plan(
-                format_job_as_jd_text(job),
+                jd_text,
                 resume_track=selected_template.track,
             )
             tailored_resume_path.write_text(
-                render_tailored_resume_draft(selected_template.parsed_text, resume_plan)
+                _render_tailored_resume(
+                    selected_template.parsed_text, jd_text, llm, use_llm, resume_plan
+                )
             )
             upload_resume_path = out_dir / "tailored-resume.docx"
             upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
@@ -455,8 +502,15 @@ def build_form_script(
         "--resume-file",
         help="Optional approved resume file path for Resume/CV upload fields.",
     ),
+    sensitive_kb: Optional[Path] = typer.Option(
+        None,
+        "--sensitive-kb",
+        help="Optional sensitive-answer knowledge base JSON (pre-approved answers).",
+    ),
 ) -> None:
     profile_facts = json.loads(profile.read_text())
+    if sensitive_kb:
+        profile_facts["sensitive_answers"] = load_sensitive_kb(sensitive_kb)
     if resume_file:
         profile_facts["resume_file"] = str(resume_file)
     plan = build_form_fill_plan(
@@ -466,6 +520,111 @@ def build_form_script(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_playwright_fill_script(plan, application_url=application_url))
     typer.echo(f"Wrote guarded form-fill script to {out}")
+
+
+@forms_app.command("init-profile")
+def forms_init_profile(
+    out: Path = typer.Option(Path("profile.json"), "--out", help="Rich profile output path."),
+) -> None:
+    """Generate a Simplify-style rich profile template.
+
+    Fill in contact, work_history (multiple entries), education, links,
+    demographics/EEO, and an answers bank. Then pass it to ``forms autofill
+    --profile`` so the runtime engine can fill multi-entry work/education
+    sections, screening questions, and sensitive fields.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(render_profile_template(), indent=2, ensure_ascii=False) + "\n")
+    typer.echo(f"Wrote rich profile template to {out}")
+
+
+@forms_app.command("build-profile-from-resume")
+def forms_build_profile_from_resume(
+    resume: Path = typer.Option(..., "--resume", help="Resume text/markdown file to parse into a profile."),
+    out: Path = typer.Option(Path("profile.json"), "--out", help="Rich profile output path."),
+) -> None:
+    """Parse a resume's text into a structured rich profile (Simplify imports
+    your resume at sign-up). Edit the result before using it to autofill."""
+    profile = parse_resume_to_profile(resume.read_text())
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(profile.to_dict(), indent=2, ensure_ascii=False) + "\n")
+    typer.echo(f"Wrote parsed profile to {out}")
+    typer.echo(f"work_history entries: {len(profile.work_history)} | education entries: {len(profile.education)}")
+
+
+@forms_app.command("init-sensitive-kb")
+def forms_init_sensitive_kb(
+    out: Path = typer.Option(Path("sensitive-answers.json"), "--out", help="Sensitive answer knowledge base output path."),
+) -> None:
+    """Generate a fill-in template for the sensitive-answer knowledge base.
+
+    Fill in each ``answer`` and set ``approved: true`` for the entries you want
+    auto-filled (work authorization, sponsorship, salary, relocation, etc.).
+    Then pass the file to ``forms autofill --sensitive-kb`` /
+    ``forms build-script --sensitive-kb`` so those fields are filled
+    automatically instead of left for manual review.
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(render_sensitive_kb_template(), indent=2, ensure_ascii=False) + "\n")
+    typer.echo(f"Wrote sensitive-answer knowledge base template to {out}")
+    typer.echo("Fill each 'answer' and set 'approved: true' for entries to auto-fill.")
+
+
+@forms_app.command("autofill")
+def forms_autofill(
+    profile: Path = typer.Option(
+        ...,
+        "--profile",
+        help="JSON file containing approved profile facts and an `answers` bank.",
+    ),
+    out: Path = typer.Option(Path("autofill.js"), "--out", help="Runtime autofill script output path."),
+    application_url: Optional[str] = typer.Option(
+        None,
+        "--application-url",
+        help="Application page URL to open and autofill at runtime.",
+    ),
+    resume_file: Optional[Path] = typer.Option(
+        None,
+        "--resume-file",
+        help="Approved resume file path for Resume/CV upload fields.",
+    ),
+    sensitive_kb: Optional[Path] = typer.Option(
+        None,
+        "--sensitive-kb",
+        help="Optional sensitive-answer knowledge base JSON (pre-approved answers).",
+    ),
+    headless: bool = typer.Option(
+        True,
+        "--headless/--headed",
+        help="Run the browser headless (default) or with a visible window.",
+    ),
+    max_pages: int = typer.Option(
+        12,
+        "--max-pages",
+        help="Safety cap for multi-page application navigation.",
+    ),
+) -> None:
+    """Generate a Simplify-style generic runtime autofill script.
+
+    Unlike the per-snapshot fill script, this emits a single generic Playwright
+    script that live-scrapes the application page DOM, maps fields to the
+    profile, answers screening questions from the `answers` bank and the
+    sensitive-answer knowledge base, advances through multi-page forms, uploads
+    the resume, and stops before Submit.
+    """
+    profile_facts = json.loads(profile.read_text())
+    if sensitive_kb:
+        profile_facts["sensitive_answers"] = load_sensitive_kb(sensitive_kb)
+    script = render_runtime_autofill_script(
+        profile=profile_facts,
+        resume_file=str(resume_file) if resume_file else None,
+        application_url=application_url,
+        max_pages=max_pages,
+        headless=headless,
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(script)
+    typer.echo(f"Wrote Simplify-style runtime autofill script to {out}")
 
 
 @jobs_app.command("review")

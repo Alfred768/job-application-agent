@@ -1,7 +1,7 @@
 # Personal Job Application Agent PEAS Design
 
 Date: 2026-07-08
-Status: Ready for user review
+Status: Needs alignment review after 2026-07-09 execution-readiness audit
 Project root: configurable local checkout
 Resume source: configured through `RESUME_SOURCE_DIR`
 

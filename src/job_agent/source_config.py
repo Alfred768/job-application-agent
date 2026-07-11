@@ -4,15 +4,26 @@ import json
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from job_agent.jobs import (
+    deduplicate_jobs,
     parse_greenhouse_jobs,
     parse_lever_jobs,
     parse_remotive_jobs,
     parse_rss_jobs,
 )
 from job_agent.models import Job
+
+# Public job APIs (e.g. Remotive) reject the default Python-urllib User-Agent.
+_HTTP_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def _read_url(url: str, timeout: int = 20):
+    return urlopen(Request(url, headers={"User-Agent": _HTTP_USER_AGENT}), timeout=timeout)
 
 
 def _resolve_path(base_dir: Path, value: str | None) -> Path | None:
@@ -29,7 +40,7 @@ def _read_text(base_dir: Path, file_key: str, item: dict[str, Any], url_key: str
     url = item.get(url_key)
     if not url:
         raise ValueError(f"Source item requires {file_key} or {url_key}.")
-    with urlopen(url, timeout=20) as response:
+    with _read_url(url) as response:
         return response.read().decode("utf-8")
 
 
@@ -37,7 +48,7 @@ def _read_json(base_dir: Path, item: dict[str, Any], default_url: str) -> Any:
     payload_file = _resolve_path(base_dir, item.get("payload_file"))
     if payload_file:
         return json.loads(payload_file.read_text())
-    with urlopen(default_url, timeout=20) as response:
+    with _read_url(default_url) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -95,4 +106,4 @@ def load_jobs_from_source_config(config_path: Path | str) -> list[Job]:
         else:
             raise ValueError(f"Unsupported source type: {source_type}")
 
-    return jobs
+    return deduplicate_jobs(jobs)

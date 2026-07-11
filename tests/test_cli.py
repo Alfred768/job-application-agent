@@ -822,6 +822,131 @@ def test_cli_applications_build_batch_runner_writes_guarded_runner(tmp_path):
     assert ".submit(" not in script
 
 
+def test_cli_forms_autofill_writes_simplify_style_runtime_script(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(
+        '{"name": "Gaoyi Wu", "email": "gaoyi@example.com", '
+        '"answers": {"Are you authorized to work in the United States?": "Yes"}}'
+    )
+    resume_path = tmp_path / "tailored-resume.docx"
+    resume_path.write_bytes(b"docx")
+    out_path = tmp_path / "autofill.js"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "forms",
+            "autofill",
+            "--profile",
+            str(profile_path),
+            "--out",
+            str(out_path),
+            "--application-url",
+            "https://boards.greenhouse.io/acme/jobs/1",
+            "--resume-file",
+            str(resume_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Simplify-style runtime autofill script" in result.output
+    text = out_path.read_text()
+    assert 'require("playwright")' in text
+    assert "https://boards.greenhouse.io/acme/jobs/1" in text
+    assert "Gaoyi Wu" in text
+    assert str(resume_path) in text
+    # never auto-submits
+    assert "STOPPED before final Submit" in text
+
+
+def test_cli_forms_init_sensitive_kb_writes_template(tmp_path):
+    out_path = tmp_path / "sensitive-answers.json"
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["forms", "init-sensitive-kb", "--out", str(out_path)])
+
+    assert result.exit_code == 0
+    assert "knowledge base template" in result.output
+    import json as _json
+
+    kb = _json.loads(out_path.read_text())
+    assert "salary" in kb
+    assert "work_authorization" in kb
+    assert kb["salary"]["approved"] is False
+
+
+def test_cli_forms_autofill_merges_sensitive_kb(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text('{"name": "Gaoyi Wu", "email": "gaoyi@example.com"}')
+    kb_path = tmp_path / "sensitive-answers.json"
+    kb_path.write_text(
+        '{"salary": {"patterns": ["salary"], "answer": "120000", "approved": true}}'
+    )
+    out_path = tmp_path / "autofill.js"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "forms",
+            "autofill",
+            "--profile",
+            str(profile_path),
+            "--sensitive-kb",
+            str(kb_path),
+            "--out",
+            str(out_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    text = out_path.read_text()
+    # the approved KB answer is embedded so the runtime engine can use it
+    assert "120000" in text
+    assert "sensitive_answers" in text
+
+
+def test_cli_forms_init_profile_writes_rich_template(tmp_path):
+    out_path = tmp_path / "profile.json"
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["forms", "init-profile", "--out", str(out_path)])
+
+    assert result.exit_code == 0
+    assert "rich profile template" in result.output
+    import json as _json
+
+    profile = _json.loads(out_path.read_text())
+    assert "work_history" in profile
+    assert "education" in profile
+    assert "demographics" in profile
+    assert "answers" in profile
+
+
+def test_cli_forms_build_profile_from_resume(tmp_path):
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "Gaoyi Wu\nNew York, NY  |  gaoyi@example.com\n\n"
+        "Experience\nAI Engineer — Acme\nBuilt agents.\n\n"
+        "Education\nB.S. CS — State U\n"
+    )
+    out_path = tmp_path / "profile.json"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app, ["forms", "build-profile-from-resume", "--resume", str(resume_path), "--out", str(out_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "work_history entries: 1" in result.output
+    import json as _json
+
+    profile = _json.loads(out_path.read_text())
+    assert profile["name"] == "Gaoyi Wu"
+    assert profile["work_history"][0]["title"] == "AI Engineer"
+
+
 def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
     jd_path = tmp_path / "jd.txt"
     jd_path.write_text("Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust.")
@@ -849,3 +974,36 @@ def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
     assert "# Tailored Resume Draft" in text
     assert "LangChain" in text
     assert "Unsupported JD keywords not inserted: Rust" in text
+
+
+def test_cli_read_json_source_sends_browser_user_agent(monkeypatch):
+    """Regression guard: live job APIs (Remotive) 403 the default Python-urllib UA.
+
+    The CLI's autonomous source fetcher must attach a browser-like User-Agent
+    so `jobs import-remotive` / `import-greenhouse` / `import-lever` keep working
+    against live public endpoints.
+    """
+    import job_agent.cli as cli
+
+    captured = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"jobs": []}'
+
+    def fake_urlopen(request, timeout=20):
+        captured["user_agent"] = request.get_header("User-agent")
+        return _FakeResponse()
+
+    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
+    cli._read_json_source(None, "https://remotive.com/api/remote-jobs")
+
+    assert captured["user_agent"]
+    assert "Python-urllib" not in captured["user_agent"]
+    assert "Mozilla" in captured["user_agent"]

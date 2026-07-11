@@ -5,6 +5,30 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def load_env(env_path: str | Path | None = None) -> dict[str, str]:
+    """Load a ``.env`` file into ``os.environ`` without overriding existing vars.
+
+    Keeps secrets out of git (``.env`` is gitignored) while letting the agent
+    pick up ``OPENAI_API_KEY`` / ``LLM_*`` / ``RESUME_SOURCE_DIR`` etc. from a
+    local file. Returns the variables it loaded.
+    """
+    path = Path(env_path) if env_path else Path.cwd() / ".env"
+    if not path.is_file():
+        return {}
+    loaded: dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ and value:
+            os.environ[key] = value
+            loaded[key] = value
+    return loaded
+
+
 @dataclass(frozen=True)
 class AppConfig:
     resume_source_dir: Path
