@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from typer.testing import CliRunner
@@ -1007,3 +1009,57 @@ def test_cli_read_json_source_sends_browser_user_agent(monkeypatch):
     assert captured["user_agent"]
     assert "Python-urllib" not in captured["user_agent"]
     assert "Mozilla" in captured["user_agent"]
+
+
+def test_cli_pipeline_run_builds_auditable_application_batch(tmp_path):
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build production LLM agents with Python, RAG, FastAPI, and Docker.</description>
+        <category>Remote</category>
+        </item></channel></rss>"""
+    )
+    sources_path = tmp_path / "sources.json"
+    sources_path.write_text(
+        json.dumps({"sources": [{"type": "rss", "source": "company-rss", "rss_file": str(rss_path)}]})
+    )
+    resume_path = tmp_path / "resume.md"
+    resume_path.write_text("# Candidate\n\n## Skills\nPython, FastAPI, Docker\n\n## Experience\nBuilt production APIs.")
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"name": "Candidate", "email": "candidate@example.com"}))
+    out_dir = tmp_path / "pipeline-run"
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "pipeline",
+            "run",
+            str(sources_path),
+            "--out-dir",
+            str(out_dir),
+            "--resume",
+            str(resume_path),
+            "--profile",
+            str(profile_path),
+            "--min-score",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((out_dir / "pipeline-manifest.json").read_text())
+    assert manifest["counts"] == {"imported": 1, "shortlisted": 1, "prepared": 1}
+    assert manifest["submit_gate"] == "blocked_pending_human_confirmation"
+    assert (out_dir / "jobs.json").exists()
+    assert (out_dir / "shortlist.json").exists()
+    summary = json.loads((out_dir / "applications" / "batch-summary.json").read_text())
+    package_dir = Path(summary[0]["package_dir"])
+    assert (package_dir / "tailored-resume.docx").exists()
+    runtime_script = package_dir / "autofill-runtime.js"
+    assert runtime_script.exists()
+    script = runtime_script.read_text()
+    assert "https://jobs.example.com/acme-agent" in script
+    assert ".click('submit')" not in script

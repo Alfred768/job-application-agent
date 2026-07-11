@@ -442,6 +442,7 @@ ApplicationFormChain:
 - `job-agent applications prepare`：从标准化 `jobs.json` 中选择一个岗位，生成 application package，并在提供表单 snapshot/profile 时生成 guarded form-fill script。
 - `job-agent applications prepare-shortlist`：从短名单或标准化岗位 JSON 批量生成 application package，每个岗位一个目录，并输出 `batch-summary.json` 作为审计索引。
 - `job-agent applications build-batch-runner`：从 `batch-summary.json` 生成 guarded Playwright runner，顺序执行每个 `fill-form.js`，但不生成任何最终提交动作。
+- `job-agent pipeline run`：执行公开来源导入与去重、fit shortlist、逐岗简历定制、application package 和运行时 ATS autofill 脚本生成，并写入 `pipeline-manifest.json`；最终 submit gate 固定为等待人工确认。
 
 输入：
 
@@ -562,6 +563,7 @@ class FitScore:
 - `ResumeTailorTool`：生成 auditable edit plan。
 - `ResumeDraftTool`：基于 base resume text 生成 `tailored-resume.md` 草稿，只插入 supported JD keywords，并把 unsupported keywords 放入 review-required 区域。
 - `applications prepare` / `prepare-shortlist`：当用户没有显式传入 `--resume` 时，使用 `--resume-source-dir` 中与 JD role track 匹配且带 `parsed_text` 的模板生成 `tailored-resume.md` 和可上传的 `tailored-resume.docx`。
+- `pipeline run`：把岗位感知、去重、评分、简历准备和表单执行器编排为单次可恢复、可审计运行；每个岗位保留独立目录，顶层 manifest 记录阶段计数、产物路径与提交门状态。
 - `TruthfulnessCheckTool`：阻止 unsupported keywords 被当作事实经历写入。
 
 输出：

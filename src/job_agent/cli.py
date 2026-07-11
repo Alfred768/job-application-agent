@@ -56,6 +56,7 @@ applications_app = typer.Typer(help="End-to-end application preparation commands
 forms_app = typer.Typer(help="Application form automation commands.")
 jobs_app = typer.Typer(help="Job intake and review commands.")
 llm_app = typer.Typer(help="LLM configuration and connectivity commands.")
+pipeline_app = typer.Typer(help="Auditable end-to-end job application workflows.")
 resumes_app = typer.Typer(help="Resume template commands.")
 
 
@@ -243,6 +244,7 @@ def _prepare_application_package(
             upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
 
     fill_script_path = None
+    runtime_script_path = None
     if form_snapshot and profile:
         profile_facts = json.loads(profile.read_text())
         if upload_resume and upload_resume_path:
@@ -255,6 +257,17 @@ def _prepare_application_package(
         fill_script_path.write_text(
             render_playwright_fill_script(plan, application_url=job.apply_url or job.source_url)
         )
+    if profile:
+        profile_facts = json.loads(profile.read_text())
+        runtime_script_path = out_dir / "autofill-runtime.js"
+        runtime_script_path.write_text(
+            render_runtime_autofill_script(
+                profile=profile_facts,
+                resume_file=str(upload_resume_path) if upload_resume and upload_resume_path else None,
+                application_url=job.apply_url or job.source_url,
+                headless=False,
+            )
+        )
 
     return {
         "company": job.company,
@@ -265,6 +278,7 @@ def _prepare_application_package(
         "tailored_resume_path": str(tailored_resume_path) if tailored_resume_path else None,
         "upload_resume_path": str(upload_resume_path) if upload_resume_path else None,
         "fill_script_path": str(fill_script_path) if fill_script_path else None,
+        "runtime_script_path": str(runtime_script_path) if runtime_script_path else None,
     }
 
 
@@ -453,6 +467,83 @@ def build_batch_runner(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_batch_fill_runner(json.loads(summary.read_text())))
     typer.echo(f"Wrote guarded batch runner to {out}")
+
+
+@pipeline_app.command("run")
+def run_application_pipeline(
+    config_file: Path,
+    out_dir: Path = typer.Option(Path("pipeline-run"), "--out-dir", help="Root directory for all pipeline artifacts."),
+    min_score: int = typer.Option(70, "--min-score", help="Minimum fit score to prepare."),
+    limit: Optional[int] = typer.Option(None, "--limit", help="Optional maximum number of applications to prepare."),
+    resume_source_dir: Optional[Path] = typer.Option(None, "--resume-source-dir", help="Directory containing role-specific resume templates."),
+    resume: Optional[Path] = typer.Option(None, "--resume", help="Base resume text/Markdown file."),
+    profile: Optional[Path] = typer.Option(None, "--profile", help="Approved application profile JSON."),
+    db: Optional[Path] = typer.Option(None, "--db", help="Optional SQLite application tracking database."),
+    use_llm: bool = typer.Option(False, "--use-llm", help="Use configured HelloAgentsLLM for resume rewriting."),
+    llm_model: Optional[str] = typer.Option(None, "--llm-model"),
+    llm_provider: Optional[str] = typer.Option(None, "--llm-provider"),
+    llm_base_url: Optional[str] = typer.Option(None, "--llm-base-url"),
+) -> None:
+    """Import, deduplicate, rank, tailor, and package jobs in one guarded run."""
+    if min_score < 0 or min_score > 100:
+        raise typer.BadParameter("--min-score must be between 0 and 100")
+    if limit is not None and limit < 1:
+        raise typer.BadParameter("--limit must be greater than 0")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    jobs_path = out_dir / "jobs.json"
+    shortlist_path = out_dir / "shortlist.json"
+    applications_dir = out_dir / "applications"
+
+    jobs = load_jobs_from_source_config(config_file)
+    _write_jobs_json(jobs, jobs_path)
+    shortlisted = shortlist_jobs(jobs, min_score=min_score, limit=limit)
+    shortlist_rows = shortlisted_jobs_to_dicts(shortlisted)
+    shortlist_path.write_text(json.dumps(shortlist_rows, indent=2, ensure_ascii=True))
+
+    applications_dir.mkdir(parents=True, exist_ok=True)
+    summaries = []
+    for index, item in enumerate(shortlisted, start=1):
+        package_dir = applications_dir / _review_slug(index, item.job)
+        summary = _prepare_application_package(
+            item.job,
+            package_dir,
+            resume_source_dir=resume_source_dir,
+            db=db,
+            profile=profile,
+            resume=resume,
+            upload_resume=True,
+            use_llm=use_llm,
+            llm_model=llm_model,
+            llm_provider=llm_provider,
+            llm_base_url=llm_base_url,
+        )
+        summary["index"] = str(index)
+        summary["fit_score"] = str(item.fit.score)
+        summaries.append(summary)
+
+    summary_path = applications_dir / "batch-summary.json"
+    summary_path.write_text(json.dumps(summaries, indent=2, ensure_ascii=True))
+    manifest = {
+        "schema_version": 1,
+        "counts": {
+            "imported": len(jobs),
+            "shortlisted": len(shortlisted),
+            "prepared": len(summaries),
+        },
+        "artifacts": {
+            "jobs": str(jobs_path),
+            "shortlist": str(shortlist_path),
+            "batch_summary": str(summary_path),
+        },
+        "submit_gate": "blocked_pending_human_confirmation",
+    }
+    manifest_path = out_dir / "pipeline-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True))
+    typer.echo(
+        f"Pipeline imported {len(jobs)}, shortlisted {len(shortlisted)}, "
+        f"and prepared {len(summaries)} applications at {out_dir}"
+    )
 
 
 @forms_app.command("build-snapshot-script")
@@ -1017,4 +1108,5 @@ app.add_typer(applications_app, name="applications")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(forms_app, name="forms")
 app.add_typer(llm_app, name="llm")
+app.add_typer(pipeline_app, name="pipeline")
 app.add_typer(resumes_app, name="resumes")

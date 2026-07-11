@@ -174,6 +174,21 @@ job-agent jobs review-remotive \
   --use-llm
 ```
 
+Run the complete guarded pipeline from compliant sources to prepared application packages:
+
+```bash
+job-agent pipeline run sources.json \
+  --out-dir output/pipeline-run \
+  --min-score 70 \
+  --limit 5 \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --profile examples/profile.json \
+  --db job-agent.db \
+  --use-llm
+```
+
+The pipeline imports and deduplicates jobs, ranks them, prepares a tailored DOCX resume and review packet for each shortlisted role, and emits a headed `autofill-runtime.js` that inspects each ATS page at runtime. `pipeline-manifest.json` records stage counts and artifact paths; its submit gate remains `blocked_pending_human_confirmation`.
+
 Prepare a single application package from a normalized `jobs.json` item:
 
 ```bash
@@ -188,7 +203,7 @@ job-agent applications prepare output/greenhouse-jobs.json \
   --use-llm
 ```
 
-This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md` and `tailored-resume.docx`. If `--resume` is omitted, the agent selects the closest parseable template from `--resume-source-dir`; if `--resume` is provided, that file is used as the base resume text. With `--upload-resume`, the script wires the DOCX version into Resume/CV upload fields, but it still does not click Submit.
+This writes the review packet, JD analysis, resume edit plan, submit gate, and, when source data is provided, a guarded `fill-form.js` script plus `tailored-resume.md` and `tailored-resume.docx`. Providing `--profile` also emits `autofill-runtime.js` for live multi-page ATS inspection and filling. If `--resume` is omitted, the agent selects the closest parseable template from `--resume-source-dir`; if `--resume` is provided, that file is used as the base resume text. With `--upload-resume`, the scripts wire the DOCX version into Resume/CV upload fields, but they still do not click Submit.
 
 You can also prepare from a short list:
 
