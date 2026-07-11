@@ -19,6 +19,7 @@ import typer
 
 from job_agent.db import connect, init_db
 from job_agent.document_export import markdown_to_docx_bytes
+from job_agent.execution import SUBMIT_GATE, execute_application_batch, summarize_execution
 from job_agent.config import load_env
 from job_agent.forms import (
     build_form_fill_plan,
@@ -467,6 +468,37 @@ def build_batch_runner(
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_batch_fill_runner(json.loads(summary.read_text())))
     typer.echo(f"Wrote guarded batch runner to {out}")
+
+
+@applications_app.command("execute-batch")
+def execute_batch(
+    summary: Path,
+    audit_out: Path = typer.Option(Path("execution-audit.json"), "--audit-out", help="Privacy-safe execution audit JSON path."),
+    node_binary: str = typer.Option("node", "--node-binary", help="Node.js executable used to run Playwright scripts."),
+    timeout_seconds: int = typer.Option(300, "--timeout-seconds", help="Per-application execution timeout."),
+) -> None:
+    """Execute runtime autofill scripts while preserving the final submit gate."""
+    if timeout_seconds < 1:
+        raise typer.BadParameter("--timeout-seconds must be greater than 0")
+    summary_items = json.loads(summary.read_text())
+    records = execute_application_batch(
+        summary_items,
+        node_binary=node_binary,
+        timeout_seconds=timeout_seconds,
+    )
+    audit = {
+        "schema_version": 1,
+        "counts": summarize_execution(records),
+        "submit_gate": SUBMIT_GATE,
+        "applications": records,
+    }
+    audit_out.parent.mkdir(parents=True, exist_ok=True)
+    audit_out.write_text(json.dumps(audit, indent=2, ensure_ascii=True))
+    typer.echo(
+        f"Executed {audit['counts']['total']} application scripts: "
+        f"{audit['counts']['completed']} completed, {audit['counts']['failed']} failed, "
+        f"{audit['counts']['skipped']} skipped. Audit: {audit_out}"
+    )
 
 
 @pipeline_app.command("run")

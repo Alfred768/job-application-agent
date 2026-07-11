@@ -31,6 +31,12 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 
 The existing CLI calls the HelloAgents-based `JobApplicationAgent` for JD review.
 
+PEAS 任务环境、HelloAgents 映射和完整 Tool 清单见：
+
+- `docs/superpowers/specs/2026-07-08-job-application-agent-peas-design.md`
+- `docs/architecture/hello-agents-job-application-agent.md`
+- `docs/TOOLS.md`
+
 ## Safety Boundaries
 
 - No LinkedIn scraping.
