@@ -31,6 +31,12 @@ This project now includes a `hello_agents` package adapted from the public Dataw
 
 The existing CLI calls the HelloAgents-based `JobApplicationAgent` for JD review.
 
+PEAS 任务环境、HelloAgents 映射和完整 Tool 清单见：
+
+- `docs/superpowers/specs/2026-07-08-job-application-agent-peas-design.md`
+- `docs/architecture/hello-agents-job-application-agent.md`
+- `docs/TOOLS.md`
+
 ## Safety Boundaries
 
 - No LinkedIn scraping.
@@ -188,6 +194,19 @@ job-agent pipeline run sources.json \
 ```
 
 The pipeline imports and deduplicates jobs, ranks them, prepares a tailored DOCX resume and review packet for each shortlisted role, and emits a headed `autofill-runtime.js` that inspects each ATS page at runtime. `pipeline-manifest.json` records stage counts and artifact paths; its submit gate remains `blocked_pending_human_confirmation`.
+
+Run the same flow offline with the included public-data fixture:
+
+```bash
+job-agent pipeline run examples/offline-sources.json \
+  --out-dir output/offline-pipeline \
+  --min-score 0 \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --profile examples/profile.json \
+  --db output/offline-pipeline/job-agent.db
+```
+
+This fixture is fictional and exists only to verify the full import -> shortlist -> resume package -> guarded autofill path without calling a live job API.
 
 Prepare a single application package from a normalized `jobs.json` item:
 

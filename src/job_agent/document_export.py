@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
+import re
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -54,4 +56,54 @@ def markdown_to_docx_bytes(markdown_text: str) -> bytes:
         docx.writestr("[Content_Types].xml", content_types)
         docx.writestr("_rels/.rels", relationships)
         docx.writestr("word/document.xml", document_xml)
+    return output.getvalue()
+
+
+def tailor_docx_bytes(source_path: str | Path, supported_keywords: list[str]) -> bytes:
+    """Copy a source DOCX and safely promote existing skills in its skills section.
+
+    The source file is never modified. Only comma/semicolon-delimited skill
+    entries that already exist in the source are reordered; no new factual
+    claim is inserted. Callers can fall back to ``markdown_to_docx_bytes`` for
+    malformed or unsupported documents.
+    """
+    from docx import Document
+
+    document = Document(str(source_path))
+    keywords = [keyword.lower() for keyword in supported_keywords if keyword]
+    paragraphs = document.paragraphs
+    heading_indexes = {
+        index
+        for index, paragraph in enumerate(paragraphs)
+        if paragraph.text.strip().lower() in {"skills", "technical skills"}
+    }
+
+    for heading_index in heading_indexes:
+        for paragraph in paragraphs[heading_index + 1 :]:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            if text.upper() in {
+                "SUMMARY",
+                "EDUCATION",
+                "PROFESSIONAL EXPERIENCE",
+                "EXPERIENCE",
+                "PROJECTS",
+                "TECHNICAL SKILLS",
+            }:
+                break
+            if ":" not in text and "：" not in text:
+                continue
+            separator = ":" if ":" in text else "："
+            prefix, values = text.split(separator, 1)
+            chunks = [chunk.strip() for chunk in re.split(r"[,;|]", values) if chunk.strip()]
+            if len(chunks) < 2:
+                continue
+            chunks.sort(
+                key=lambda chunk: not any(keyword in chunk.lower() for keyword in keywords)
+            )
+            paragraph.text = f"{prefix}{separator} {', '.join(chunks)}"
+
+    output = BytesIO()
+    document.save(output)
     return output.getvalue()

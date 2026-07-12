@@ -40,11 +40,20 @@ class ResumeEditPlan:
         return asdict(self)
 
 
-def propose_resume_edit_plan(jd_text: str, resume_track: str | None = None) -> ResumeEditPlan:
+def propose_resume_edit_plan(
+    jd_text: str,
+    resume_track: str | None = None,
+    evidence_text: str | None = None,
+) -> ResumeEditPlan:
     analysis = parse_jd(jd_text)
     target_track = resume_track or analysis.role_track
-    supported = [skill for skill in analysis.required_skills if skill in SUPPORTED_KEYWORDS]
-    unsupported = [skill for skill in analysis.required_skills if skill not in SUPPORTED_KEYWORDS]
+    supported = [
+        skill
+        for skill in analysis.required_skills
+        if skill in SUPPORTED_KEYWORDS
+        and (evidence_text is None or skill.lower() in evidence_text.lower())
+    ]
+    unsupported = [skill for skill in analysis.required_skills if skill not in supported]
     return ResumeEditPlan(
         target_track=target_track,
         summary_keywords=supported[:4],

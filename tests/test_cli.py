@@ -615,7 +615,7 @@ def test_cli_applications_prepare_can_generate_tailored_resume_draft(tmp_path):
     tailored = (out_dir / "tailored-resume.md").read_text()
     assert "# Tailored Resume Draft" in tailored
     assert "LangChain" in tailored
-    assert "Unsupported JD keywords not inserted: Rust" in tailored
+    assert "Unsupported JD keywords not inserted: LangChain, Rust" in tailored
 
 
 def test_cli_applications_prepare_uses_selected_resume_template_text(tmp_path):
@@ -660,7 +660,8 @@ def test_cli_applications_prepare_uses_selected_resume_template_text(tmp_path):
     tailored = (out_dir / "tailored-resume.md").read_text()
     assert "Gaoyi Wu" in tailored
     assert "Built FastAPI services and LLM workflow tools." in tailored
-    assert "LangChain" in tailored
+    assert "Supported keyword emphasis: FastAPI" in tailored
+    assert "Unsupported JD keywords not inserted: LangChain" in tailored
 
 
 def test_cli_applications_prepare_can_wire_tailored_resume_upload(tmp_path):
@@ -975,7 +976,7 @@ def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
     text = out_path.read_text()
     assert "# Tailored Resume Draft" in text
     assert "LangChain" in text
-    assert "Unsupported JD keywords not inserted: Rust" in text
+    assert "Unsupported JD keywords not inserted: LangChain, Rust" in text
 
 
 def test_cli_read_json_source_sends_browser_user_agent(monkeypatch):
@@ -1063,3 +1064,39 @@ def test_cli_pipeline_run_builds_auditable_application_batch(tmp_path):
     script = runtime_script.read_text()
     assert "https://jobs.example.com/acme-agent" in script
     assert ".click('submit')" not in script
+
+
+def test_cli_applications_execute_batch_writes_privacy_safe_audit(tmp_path, monkeypatch):
+    script_path = tmp_path / "autofill-runtime.js"
+    script_path.write_text("console.log('candidate@example.com')")
+    summary_path = tmp_path / "batch-summary.json"
+    summary_path.write_text(
+        json.dumps(
+            [{"company": "Acme", "title": "Agent Engineer", "runtime_script_path": str(script_path)}]
+        )
+    )
+    audit_path = tmp_path / "execution-audit.json"
+
+    def fake_run(command, **kwargs):
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(command, 0, stdout="candidate@example.com", stderr="")
+
+    monkeypatch.setattr("job_agent.execution.subprocess.run", fake_run)
+    result = CliRunner().invoke(
+        app,
+        [
+            "applications",
+            "execute-batch",
+            str(summary_path),
+            "--audit-out",
+            str(audit_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    audit = json.loads(audit_path.read_text())
+    assert audit["counts"] == {"total": 1, "completed": 1, "failed": 0, "skipped": 0}
+    assert audit["submit_gate"] == "blocked_pending_human_confirmation"
+    assert audit["applications"][0]["status"] == "autofill_completed_pending_human_confirmation"
+    assert "candidate@example.com" not in audit_path.read_text()

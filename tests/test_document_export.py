@@ -1,7 +1,9 @@
 from io import BytesIO
 from zipfile import ZipFile
 
-from job_agent.document_export import markdown_to_docx_bytes
+from docx import Document
+
+from job_agent.document_export import markdown_to_docx_bytes, tailor_docx_bytes
 
 
 def test_markdown_to_docx_bytes_writes_basic_word_document():
@@ -19,3 +21,22 @@ def test_markdown_to_docx_bytes_writes_basic_word_document():
     assert "Base Resume" in document_xml
     assert "Gaoyi Wu" in document_xml
     assert "Built FastAPI services." in document_xml
+
+
+def test_tailor_docx_preserves_source_and_reorders_existing_skills(tmp_path):
+    source = tmp_path / "source.docx"
+    document = Document()
+    document.add_paragraph("GAOYI WU")
+    document.add_paragraph("TECHNICAL SKILLS")
+    document.add_paragraph("Backend: Redis, Python, FastAPI")
+    document.add_paragraph("PROJECTS")
+    document.save(source)
+
+    tailored = tailor_docx_bytes(source, ["Python", "FastAPI"])
+    output = tmp_path / "tailored.docx"
+    output.write_bytes(tailored)
+
+    source_doc = Document(source)
+    tailored_doc = Document(output)
+    assert source_doc.paragraphs[2].text == "Backend: Redis, Python, FastAPI"
+    assert tailored_doc.paragraphs[2].text == "Backend: Python, FastAPI, Redis"
