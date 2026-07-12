@@ -1,3 +1,5 @@
+import json
+
 from hello_agents import ToolRegistry
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.career.models import JobApplicationState
@@ -232,6 +234,20 @@ def test_resume_tailor_tool_flags_unsupported_keywords():
     assert '"Rust"' in result
 
 
+def test_resume_tailor_tool_uses_source_resume_as_evidence():
+    result = json.loads(
+        ResumeTailorTool().run(
+            {
+                "jd_text": "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI.",
+                "resume_text": "Built FastAPI services.",
+            }
+        )
+    )
+
+    assert result["summary_keywords"] == ["FastAPI"]
+    assert result["unsupported_keywords"] == ["LangChain"]
+
+
 def test_resume_draft_tool_generates_grounded_markdown():
     jd = "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust."
     resume_text = "Gaoyi Wu\n\nBuilt Python and FastAPI services."
@@ -241,7 +257,7 @@ def test_resume_draft_tool_generates_grounded_markdown():
     assert "# Tailored Resume Draft" in result
     assert "LangChain" in result
     assert "FastAPI" in result
-    assert "Unsupported JD keywords not inserted: Rust" in result
+    assert "Unsupported JD keywords not inserted: LangChain, Rust" in result
     assert resume_text in result
 
 

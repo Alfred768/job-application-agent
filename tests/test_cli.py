@@ -615,7 +615,7 @@ def test_cli_applications_prepare_can_generate_tailored_resume_draft(tmp_path):
     tailored = (out_dir / "tailored-resume.md").read_text()
     assert "# Tailored Resume Draft" in tailored
     assert "LangChain" in tailored
-    assert "Unsupported JD keywords not inserted: Rust" in tailored
+    assert "Unsupported JD keywords not inserted: LangChain, Rust" in tailored
 
 
 def test_cli_applications_prepare_uses_selected_resume_template_text(tmp_path):
@@ -660,7 +660,8 @@ def test_cli_applications_prepare_uses_selected_resume_template_text(tmp_path):
     tailored = (out_dir / "tailored-resume.md").read_text()
     assert "Gaoyi Wu" in tailored
     assert "Built FastAPI services and LLM workflow tools." in tailored
-    assert "LangChain" in tailored
+    assert "Supported keyword emphasis: FastAPI" in tailored
+    assert "Unsupported JD keywords not inserted: LangChain" in tailored
 
 
 def test_cli_applications_prepare_can_wire_tailored_resume_upload(tmp_path):
@@ -975,7 +976,7 @@ def test_cli_resumes_tailor_writes_grounded_resume_draft(tmp_path):
     text = out_path.read_text()
     assert "# Tailored Resume Draft" in text
     assert "LangChain" in text
-    assert "Unsupported JD keywords not inserted: Rust" in text
+    assert "Unsupported JD keywords not inserted: LangChain, Rust" in text
 
 
 def test_cli_read_json_source_sends_browser_user_agent(monkeypatch):

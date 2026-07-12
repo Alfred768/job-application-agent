@@ -90,12 +90,22 @@ def build_jd_review_chain(
     return ToolChain("jd_review", steps, registry)
 
 
-def build_resume_preparation_chain(registry: ToolRegistry, jd_text: str) -> ToolChain:
-    """resume_tailor -> truthfulness_check."""
+def build_resume_preparation_chain(
+    registry: ToolRegistry,
+    jd_text: str,
+    resume_text: Optional[str] = None,
+) -> ToolChain:
+    """resume_tailor -> truthfulness_check with optional source evidence."""
     return ToolChain(
         "resume_preparation",
         [
-            ChainStep("resume_tailor", lambda c, jd=jd_text: {"jd_text": jd}),
+            ChainStep(
+                "resume_tailor",
+                lambda c, jd=jd_text, rt=resume_text: {
+                    "jd_text": jd,
+                    "resume_text": rt or "",
+                },
+            ),
             ChainStep("truthfulness_check", lambda c: {"plan_json": c.get("resume_tailor", "{}")}),
         ],
         registry,

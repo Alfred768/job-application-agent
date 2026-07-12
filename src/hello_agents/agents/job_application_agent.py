@@ -30,6 +30,9 @@ from hello_agents.tools.chain import (
     build_resume_preparation_chain,
 )
 from hello_agents.tools.registry import ToolRegistry
+from job_agent.jobs import import_job_from_text
+from job_agent.resumes import index_resume_templates
+from job_agent.scoring import classify_role
 
 JOB_APPLICATION_SYSTEM_PROMPT = """
 You are a careful personal career operations agent.
@@ -106,7 +109,11 @@ class JobApplicationAgent(PlanAndSolveAgent):
         if self.resume_source_dir is not None:
             sections.append(f"## Recommended Resume\n\n{review_res.outputs['resume_selector']}")
 
-        prep_chain = build_resume_preparation_chain(self.tool_registry, input_text)
+        prep_chain = build_resume_preparation_chain(
+            self.tool_registry,
+            input_text,
+            resume_text=self._selected_resume_evidence(input_text),
+        )
         prep_res = prep_chain.run()
         edit_plan = prep_res.outputs["resume_tailor"]
         sections.append(f"## Resume Edit Plan\n\n```json\n{edit_plan}\n```")
@@ -151,6 +158,22 @@ class JobApplicationAgent(PlanAndSolveAgent):
         submit_gate = self.tool_registry.execute_tool("submit_gate", "")
         sections.append(f"## Submit Gate\n\n{submit_gate}")
         return "\n\n".join(sections) + "\n"
+
+    def _selected_resume_evidence(self, jd_text: str) -> str | None:
+        """Load only the selected local template as evidence for keyword edits."""
+        if self.resume_source_dir is None:
+            return None
+        job = import_job_from_text(jd_text)
+        target_track = classify_role(job)
+        selected = next(
+            (
+                template
+                for template in index_resume_templates(self.resume_source_dir)
+                if template.track == target_track and template.parsed_text
+            ),
+            None,
+        )
+        return selected.parsed_text if selected else None
 
     def _should_use_llm_notes(self) -> bool:
         return getattr(self.llm, "provider", "deterministic") != "deterministic"

@@ -18,7 +18,7 @@ _HTTP_USER_AGENT = (
 import typer
 
 from job_agent.db import connect, init_db
-from job_agent.document_export import markdown_to_docx_bytes
+from job_agent.document_export import markdown_to_docx_bytes, tailor_docx_bytes
 from job_agent.execution import SUBMIT_GATE, execute_application_batch, summarize_execution
 from job_agent.config import load_env
 from job_agent.forms import (
@@ -41,7 +41,7 @@ from job_agent.resume_plans import (
     render_llm_tailored_resume_draft,
     render_tailored_resume_draft,
 )
-from job_agent.resumes import index_resume_templates
+from job_agent.resumes import extract_resume_text, index_resume_templates
 from job_agent.runners import render_batch_fill_runner
 from job_agent.profile import parse_resume_to_profile, render_profile_template
 from job_agent.runtime_filler import render_runtime_autofill_script
@@ -108,6 +108,30 @@ def _render_tailored_resume(
     if use_llm and _is_real_llm(llm):
         return render_llm_tailored_resume_draft(base_resume_text, jd_text, llm, plan)
     return render_tailored_resume_draft(base_resume_text, plan)
+
+
+def _read_resume_text(path: Path) -> str:
+    extracted = extract_resume_text(path)
+    if extracted is not None:
+        return extracted
+    return path.read_text()
+
+
+def _render_upload_resume(
+    source_path: Path,
+    output_path: Path,
+    plan,
+    markdown_text: str,
+) -> None:
+    """Preserve valid DOCX templates; use Markdown export for text/PDF inputs."""
+    if source_path.suffix.lower() == ".docx":
+        try:
+            output_path.write_bytes(tailor_docx_bytes(source_path, plan.skill_order))
+            return
+        except Exception:
+            # A malformed user document should not prevent a reviewable draft.
+            pass
+    output_path.write_bytes(markdown_to_docx_bytes(markdown_text))
 
 
 def _review_slug(index: int, job: Job) -> str:
@@ -214,12 +238,14 @@ def _prepare_application_package(
     upload_resume_path = None
     if resume:
         tailored_resume_path = out_dir / "tailored-resume.md"
-        resume_plan = propose_resume_edit_plan(jd_text)
-        tailored_resume_path.write_text(
-            _render_tailored_resume(resume.read_text(), jd_text, llm, use_llm, resume_plan)
+        base_resume_text = _read_resume_text(resume)
+        resume_plan = propose_resume_edit_plan(jd_text, evidence_text=base_resume_text)
+        tailored_markdown = _render_tailored_resume(
+            base_resume_text, jd_text, llm, use_llm, resume_plan
         )
+        tailored_resume_path.write_text(tailored_markdown)
         upload_resume_path = out_dir / "tailored-resume.docx"
-        upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
+        _render_upload_resume(resume, upload_resume_path, resume_plan, tailored_markdown)
     elif resume_source_dir:
         selected_track = classify_role(job)
         selected_template = next(
@@ -235,14 +261,22 @@ def _prepare_application_package(
             resume_plan = propose_resume_edit_plan(
                 jd_text,
                 resume_track=selected_template.track,
+                evidence_text=selected_template.parsed_text,
             )
-            tailored_resume_path.write_text(
-                _render_tailored_resume(
-                    selected_template.parsed_text, jd_text, llm, use_llm, resume_plan
-                )
+            tailored_markdown = _render_tailored_resume(
+                selected_template.parsed_text, jd_text, llm, use_llm, resume_plan
             )
+            tailored_resume_path.write_text(tailored_markdown)
             upload_resume_path = out_dir / "tailored-resume.docx"
-            upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_resume_path.read_text()))
+            if selected_template.docx_path:
+                _render_upload_resume(
+                    selected_template.docx_path,
+                    upload_resume_path,
+                    resume_plan,
+                    tailored_markdown,
+                )
+            else:
+                upload_resume_path.write_bytes(markdown_to_docx_bytes(tailored_markdown))
 
     fill_script_path = None
     runtime_script_path = None
@@ -305,9 +339,12 @@ def tailor_resume(
     out: Path = typer.Option(Path("tailored-resume.md"), "--out", help="Tailored resume draft output path."),
     resume_track: Optional[str] = typer.Option(None, "--resume-track", help="Optional selected resume track."),
 ) -> None:
-    plan = propose_resume_edit_plan(jd_file.read_text(), resume_track=resume_track)
+    base_resume_text = _read_resume_text(resume)
+    plan = propose_resume_edit_plan(
+        jd_file.read_text(), resume_track=resume_track, evidence_text=base_resume_text
+    )
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_tailored_resume_draft(resume.read_text(), plan))
+    out.write_text(render_tailored_resume_draft(base_resume_text, plan))
     typer.echo(f"Wrote tailored resume draft to {out}")
 
 

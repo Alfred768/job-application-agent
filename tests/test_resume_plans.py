@@ -63,3 +63,13 @@ def test_llm_tailored_resume_falls_back_when_llm_raises():
 
     assert "(LLM)" not in draft
     assert "Tailored Resume Draft" in draft
+
+
+def test_resume_edit_plan_only_marks_evidence_backed_keywords_as_supported():
+    plan = propose_resume_edit_plan(
+        "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust.",
+        evidence_text="Gaoyi Wu\nBuilt Python and FastAPI services.",
+    )
+
+    assert plan.summary_keywords == ["FastAPI"]
+    assert plan.unsupported_keywords == ["LangChain", "Rust"]

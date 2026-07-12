@@ -1,0 +1,10 @@
+{
+  "sources": [
+    {
+      "type": "rss",
+      "source": "example-public-rss",
+      "rss_file": "offline-jobs.xml",
+      "limit": 10
+    }
+  ]
+}

@@ -195,6 +195,19 @@ job-agent pipeline run sources.json \
 
 The pipeline imports and deduplicates jobs, ranks them, prepares a tailored DOCX resume and review packet for each shortlisted role, and emits a headed `autofill-runtime.js` that inspects each ATS page at runtime. `pipeline-manifest.json` records stage counts and artifact paths; its submit gate remains `blocked_pending_human_confirmation`.
 
+Run the same flow offline with the included public-data fixture:
+
+```bash
+job-agent pipeline run examples/offline-sources.json \
+  --out-dir output/offline-pipeline \
+  --min-score 0 \
+  --resume-source-dir "$RESUME_SOURCE_DIR" \
+  --profile examples/profile.json \
+  --db output/offline-pipeline/job-agent.db
+```
+
+This fixture is fictional and exists only to verify the full import -> shortlist -> resume package -> guarded autofill path without calling a live job API.
+
 Prepare a single application package from a normalized `jobs.json` item:
 
 ```bash

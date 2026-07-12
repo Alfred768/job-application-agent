@@ -21,7 +21,8 @@ class ResumeTailorTool(Tool):
     def run(self, parameters: dict[str, Any]) -> str:
         jd_text = parameters.get("jd_text") or parameters.get("input") or ""
         resume_track = parameters.get("resume_track")
-        plan = propose_resume_edit_plan(jd_text, resume_track)
+        resume_text = parameters.get("resume_text")
+        plan = propose_resume_edit_plan(jd_text, resume_track, resume_text or None)
         return json.dumps(plan.to_dict(), indent=2)
 
     def get_parameters(self) -> list[ToolParameter]:
@@ -35,6 +36,13 @@ class ResumeTailorTool(Tool):
                 name="resume_track",
                 type="string",
                 description="Selected resume track.",
+                required=False,
+                default="",
+            ),
+            ToolParameter(
+                name="resume_text",
+                type="string",
+                description="Optional source resume text used as factual evidence.",
                 required=False,
                 default="",
             ),
@@ -54,7 +62,7 @@ class ResumeDraftTool(Tool):
         jd_text = parameters.get("jd_text") or parameters.get("input") or ""
         resume_text = parameters.get("resume_text") or ""
         resume_track = parameters.get("resume_track")
-        plan = propose_resume_edit_plan(jd_text, resume_track)
+        plan = propose_resume_edit_plan(jd_text, resume_track, resume_text or None)
         return render_tailored_resume_draft(resume_text, plan)
 
     def get_parameters(self) -> list[ToolParameter]:
