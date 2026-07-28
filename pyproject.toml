@@ -5,21 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "job-application-agent"
 version = "0.1.0"
-description = "Local-first personal job application agent with PEAS-designed safety gates."
+description = "Local-first job application agent with explicit policy-controlled execution."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
   "jinja2>=3.1",
   "openai>=1.0",
+  "playwright>=1.40",
   "pydantic>=2.0",
   "python-docx>=1.1",
   "pypdf>=4.0",
+  "tomli>=2.0; python_version < '3.11'",
   "typer>=0.12",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+]
+gmail = [
+  "google-api-python-client>=2.0",
+  "google-auth-oauthlib>=1.2",
 ]
 
 [project.scripts]
@@ -28,5 +34,9 @@ job-agent = "job_agent.cli:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"job_agent.example_data" = ["*.json", "*.md", "*.xml"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+testpaths = ["tests"]

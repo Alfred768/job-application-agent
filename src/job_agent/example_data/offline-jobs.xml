@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example public career feed</title>
+    <link>https://jobs.example.com</link>
+    <description>Offline fixture for the job application agent.</description>
+    <item>
+      <title>Agent Engineer at Acme AI</title>
+      <link>https://jobs.example.com/acme-ai/agent-engineer</link>
+      <description><![CDATA[
+        Build reliable LLM agents and tool workflows with Python, LangChain,
+        FastAPI, RAG, and evaluation pipelines. Collaborate with product and
+        infrastructure teams. Remote within the United States.
+      ]]></description>
+      <category>Remote</category>
+    </item>
+  </channel>
+</rss>

@@ -10,6 +10,7 @@ from urllib.request import urlopen
 from job_agent.jobs import (
     import_job_from_text,
     jobs_to_dicts,
+    parse_ashby_jobs,
     parse_greenhouse_jobs,
     parse_lever_jobs,
     parse_remotive_jobs,
@@ -188,6 +189,52 @@ class LeverJobSourceTool(Tool):
                 name="payload_json",
                 type="string",
                 description="Optional raw Lever JSON payload for offline import/testing.",
+                required=False,
+            ),
+            ToolParameter(
+                name="limit",
+                type="integer",
+                description="Optional maximum number of jobs to import.",
+                required=False,
+            ),
+        ]
+
+
+class AshbyJobSourceTool(Tool):
+    """Import postings from a public Ashby job board API response."""
+
+    def __init__(self):
+        super().__init__(
+            name="ashby_job_source",
+            description="Import public Ashby job board API jobs into normalized job objects.",
+        )
+
+    def run(self, parameters: dict[str, Any]) -> str:
+        organization = str(
+            parameters.get("organization")
+            or parameters.get("org")
+            or parameters.get("board")
+            or ""
+        ).strip()
+        if not organization:
+            raise ValueError("AshbyJobSourceTool requires organization.")
+        limit = _coerce_limit(parameters.get("limit"))
+        payload_json = parameters.get("payload_json")
+        if payload_json:
+            payload = json.loads(str(payload_json))
+        else:
+            url = f"https://api.ashbyhq.com/posting-api/job-board/{organization}"
+            payload = _read_json_url(url)
+        jobs = parse_ashby_jobs(payload, organization=organization, limit=limit)
+        return json.dumps(jobs_to_dicts(jobs), indent=2, ensure_ascii=True)
+
+    def get_parameters(self) -> list[ToolParameter]:
+        return [
+            ToolParameter(name="organization", type="string", description="Ashby public job board organization slug."),
+            ToolParameter(
+                name="payload_json",
+                type="string",
+                description="Optional raw Ashby JSON payload for offline import/testing.",
                 required=False,
             ),
             ToolParameter(

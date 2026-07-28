@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from hello_agents.tools.base import Tool, ToolParameter
+from job_agent.jd_analysis import parse_jd
 from job_agent.jobs import import_job_from_text
-from job_agent.resumes import index_resume_templates
+from job_agent.resumes import index_resume_templates, select_best_resume_template
 from job_agent.scoring import classify_role
 
 
@@ -17,7 +18,7 @@ class ResumeIndexerTool(Tool):
     def __init__(self):
         super().__init__(
             name="resume_indexer",
-            description="Index DOCX/PDF resume templates from RESUME_SOURCE_DIR or a provided directory.",
+            description="Index local PDF resume templates eligible for ATS upload.",
         )
 
     def run(self, parameters: dict[str, Any]) -> str:
@@ -28,9 +29,7 @@ class ResumeIndexerTool(Tool):
         lines = []
         for template in templates:
             lines.append(
-                f"track={template.track}; "
-                f"docx={template.docx_path or 'None'}; "
-                f"pdf={template.pdf_path or 'None'}"
+                f"track={template.track}; pdf={template.pdf_path or 'None'}"
             )
         return "\n".join(lines)
 
@@ -39,7 +38,7 @@ class ResumeIndexerTool(Tool):
             ToolParameter(
                 name="source_dir",
                 type="string",
-                description="Directory containing role-specific resume DOCX/PDF files.",
+                description="Directory containing role-specific resume PDF files.",
             )
         ]
 
@@ -59,13 +58,16 @@ class ResumeSelectorTool(Tool):
         job = import_job_from_text(jd_text)
         selected_track = classify_role(job)
         templates = index_resume_templates(Path(source_dir))
-        selected = next((item for item in templates if item.track == selected_track), None)
+        selected = select_best_resume_template(
+            templates,
+            target_track=selected_track,
+            required_skills=parse_jd(jd_text).required_skills,
+        )
         if selected is None:
             return f"selected_track={selected_track}\nselected_template=None"
         return (
             f"selected_track={selected_track}\n"
-            f"selected_docx={selected.docx_path or 'None'}\n"
-            f"selected_pdf={selected.pdf_path or 'None'}"
+            f"selected_pdf={selected.upload_path or 'None'}"
         )
 
     def get_parameters(self) -> list[ToolParameter]:
@@ -73,7 +75,7 @@ class ResumeSelectorTool(Tool):
             ToolParameter(
                 name="source_dir",
                 type="string",
-                description="Directory containing role-specific resume DOCX/PDF files.",
+                description="Directory containing role-specific resume PDF files.",
             ),
             ToolParameter(
                 name="jd_text",

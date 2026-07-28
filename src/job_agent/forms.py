@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
 
 from job_agent.sensitive_kb import resolve_sensitive_answer
 
@@ -17,12 +18,60 @@ SENSITIVE_FIELD_KEYWORDS = [
     "gender",
     "ethnicity",
     "race",
+    "sex",
     "salary",
+    "compensation",
+    "pay expectation",
     "relocation",
     "start date",
+    "eeo",
+    "demographic",
+    "clearance",
+    "citizen",
+    "citizenship",
     "legal",
     "attestation",
+    "certify",
+    "arbitration",
+    "acknowledgement",
+    "acknowledgment",
+    "consent",
+    "privacy",
+    "personal data",
+    "notetaker",
+    "notetakers",
+    "transcribe",
 ]
+
+
+def _label_tokens(label: str) -> set[str]:
+    return {
+        token
+        for token in "".join(ch.lower() if ch.isalnum() else " " for ch in label or "").split()
+        if token
+    }
+
+
+def _is_low_risk_identity_field(label: str) -> bool:
+    tokens = _label_tokens(label)
+    if "legal" not in tokens:
+        return False
+    has_name_token = bool(tokens & {"name", "first", "last", "middle", "given", "family"})
+    if not has_name_token:
+        return False
+    sensitive_context = {
+        "attestation",
+        "attest",
+        "authorization",
+        "authorized",
+        "background",
+        "certify",
+        "sponsor",
+        "sponsorship",
+        "visa",
+        "salary",
+    }
+    return not bool(tokens & sensitive_context)
 
 
 @dataclass(frozen=True)
@@ -38,10 +87,9 @@ class FieldPlan:
 @dataclass(frozen=True)
 class FormFillPlan:
     fields: list[FieldPlan] = field(default_factory=list)
-    can_auto_submit: bool = False
+    can_auto_submit: bool = True
     submit_gate_reason: str = (
-        "Final Submit remains manual for browser-based applications unless a "
-        "source-specific adapter explicitly permits auto-submit."
+        "Automatic final submission is enabled when no blocking review fields remain."
     )
 
     @property
@@ -59,6 +107,8 @@ class FormField:
     field_type: str = "text"
     required: bool = False
     options: list[str] = field(default_factory=list)
+    field_id: str = ""
+    name: str = ""
 
 
 def inspect_form_snapshot(snapshot_json: str) -> list[FormField]:
@@ -71,12 +121,16 @@ def inspect_form_snapshot(snapshot_json: str) -> list[FormField]:
                 field_type=str(raw.get("type", "text")).strip() or "text",
                 required=bool(raw.get("required", False)),
                 options=list(raw.get("options", [])),
+                field_id=str(raw.get("id", "")).strip(),
+                name=str(raw.get("name", "")).strip(),
             )
         )
     return fields
 
 
 def is_sensitive_field(label: str) -> bool:
+    if _is_low_risk_identity_field(label):
+        return False
     normalized = label.lower()
     return any(keyword in normalized for keyword in SENSITIVE_FIELD_KEYWORDS)
 
@@ -92,11 +146,42 @@ def _approved_answers(profile: dict) -> dict[str, str]:
     return {str(key).strip().lower(): str(value) for key, value in raw_answers.items()}
 
 
+def _normalize_option(text: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else " " for ch in text or "").strip()
+
+
+def _matching_option_label(options: list[str], answer: str) -> str:
+    want = _normalize_option(answer)
+    if not want:
+        return answer
+    want_tokens = [token for token in want.split() if token]
+    for option in options:
+        opt = _normalize_option(option)
+        opt_tokens = set(opt.split())
+        if (
+            opt == want
+            or (want and want in opt)
+            or (opt and opt in want)
+            or (want_tokens and all(token in opt_tokens for token in want_tokens))
+        ):
+            return str(option)
+    return answer
+
+
 def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan:
     approved_answers = _approved_answers(profile)
     plans = []
     for field_item in fields:
         label_lower = field_item.label.lower()
+        field_key = " ".join(
+            part
+            for part in [
+                field_item.label.lower(),
+                field_item.field_id.lower(),
+                field_item.name.lower(),
+            ]
+            if part
+        )
         ftype = field_item.field_type.lower()
         value = ""
         confidence = 0.0
@@ -106,10 +191,11 @@ def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan
         exact_answer = approved_answers.get(label_lower)
         if ftype == "file":
             action = "upload"
-            if "resume" in label_lower or "cv" in label_lower:
+            if "resume" in field_key or "cv" in field_key:
                 value = profile.get("resume_file", "")
-                confidence = 1.0 if value else 0.0
-                approved = True if value else False
+                is_pdf = bool(value) and Path(str(value)).expanduser().suffix.lower() == ".pdf"
+                confidence = 1.0 if is_pdf else 0.0
+                approved = is_pdf
         elif sensitive:
             # Sensitive fields auto-fill ONLY from the approved knowledge base
             # (sensitive_answers KB with approved=true, or legacy profile fields
@@ -118,21 +204,29 @@ def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan
             # other placeholders are never auto-submitted.
             kb_answer = resolve_sensitive_answer(field_item.label, profile)
             if kb_answer:
-                value = kb_answer
+                value = _matching_option_label(field_item.options, kb_answer) if ftype == "select" else kb_answer
                 confidence = 1.0
                 approved = True
                 action = "select" if ftype == "select" else "fill"
             elif exact_answer is not None:
-                value = exact_answer
+                value = _matching_option_label(field_item.options, exact_answer) if ftype == "select" else exact_answer
                 confidence = 0.5
                 action = "select" if ftype == "select" else "fill"
         elif exact_answer is not None:
             action = "select" if ftype == "select" else "fill"
-            value = exact_answer
+            value = _matching_option_label(field_item.options, exact_answer) if ftype == "select" else exact_answer
             confidence = 1.0
             approved = True
         elif "email" in label_lower:
             value = profile.get("email", "")
+            confidence = 1.0 if value else 0.0
+        elif "first name" in label_lower or "given name" in label_lower:
+            value = profile.get("first_name") or (profile.get("name", "").split(" ")[0] if profile.get("name") else "")
+            confidence = 1.0 if value else 0.0
+        elif "last name" in label_lower or "family name" in label_lower:
+            value = profile.get("last_name") or (
+                " ".join(profile.get("name", "").split(" ")[1:]) if profile.get("name") else ""
+            )
             confidence = 1.0 if value else 0.0
         elif "name" in label_lower:
             value = profile.get("name", "")
@@ -168,7 +262,11 @@ def build_form_fill_plan(fields: list[FormField], profile: dict) -> FormFillPlan
                 approved=approved,
             )
         )
-    return FormFillPlan(fields=plans)
+    can_auto_submit = not any(
+        field.confidence < 0.9 or (field.sensitive and not field.approved)
+        for field in plans
+    )
+    return FormFillPlan(fields=plans, can_auto_submit=can_auto_submit)
 
 
 def render_playwright_fill_script(plan: FormFillPlan, application_url: str | None = None) -> str:
@@ -176,11 +274,13 @@ def render_playwright_fill_script(plan: FormFillPlan, application_url: str | Non
         'const { chromium } = require("playwright");',
         "",
         "async function main() {",
-        "  const browser = await chromium.launch({ headless: false });",
-        "  const page = await browser.newPage();",
+        "  let browser = null;",
+        "  try {",
+        "    browser = await chromium.launch({ headless: false });",
+        "    const page = await browser.newPage();",
     ]
     if application_url:
-        lines.append(f"  await page.goto({json.dumps(application_url)});")
+        lines.append(f"    await page.goto({json.dumps(application_url)});")
 
     for field_item in plan.fields:
         # Fill any field with a confident approved value. Sensitive fields are
@@ -192,26 +292,31 @@ def render_playwright_fill_script(plan: FormFillPlan, application_url: str | Non
             continue
         if field_item.action == "upload":
             lines.append(
-                f"  await page.getByLabel({json.dumps(field_item.label)}).setInputFiles({json.dumps(field_item.value)});"
+                f"    await page.getByLabel({json.dumps(field_item.label)}).setInputFiles({json.dumps(field_item.value)});"
             )
         elif field_item.action == "select":
             lines.append(
-                f"  await page.getByLabel({json.dumps(field_item.label)}).selectOption({{ label: {json.dumps(field_item.value)} }});"
+                f"    await page.getByLabel({json.dumps(field_item.label)}).selectOption({{ label: {json.dumps(field_item.value)} }});"
             )
         else:
             lines.append(
-                f"  await page.getByLabel({json.dumps(field_item.label)}).fill({json.dumps(field_item.value)});"
+                f"    await page.getByLabel({json.dumps(field_item.label)}).fill({json.dumps(field_item.value)});"
             )
 
     lines.extend(
         [
-            f"  console.log('Review required fields:', {json.dumps(plan.review_required_fields)});",
-            f"  console.log('Submit gate:', {json.dumps(plan.submit_gate_reason)});",
-            "  console.log('Review the page manually before any final submission.');",
+            f"    console.log('Review required fields:', {json.dumps(plan.review_required_fields)});",
+            f"    console.log('Submit gate:', {json.dumps(plan.submit_gate_reason)});",
+            "    console.log('Snapshot fill complete; live runtime controls automatic submission.');",
+            "  } finally {",
+            "    if (browser) {",
+            "      await browser.close();",
+            "    }",
+            "  }",
             "}",
             "",
             "main().catch((error) => {",
-            "  console.error(error);",
+            "  console.error('Form fill failed:', error && error.message ? error.message : error);",
             "  process.exit(1);",
             "});",
         ]
@@ -228,40 +333,62 @@ def render_playwright_form_snapshot_script(
         'const fs = require("fs");',
         "",
         "async function main() {",
-        "  const browser = await chromium.launch({ headless: false });",
-        "  const page = await browser.newPage();",
+        "  let browser = null;",
+        "  try {",
+        "    browser = await chromium.launch({ headless: false });",
+        "    const page = await browser.newPage();",
     ]
     if application_url:
-        lines.append(f"  await page.goto({json.dumps(application_url)});")
+        lines.append(f"    await page.goto({json.dumps(application_url)});")
     lines.extend(
         [
-            "  const fields = await page.evaluate(() => {",
+            "    const fields = await page.evaluate(() => {",
             '    const controls = Array.from(document.querySelectorAll("input, textarea, select"));',
+            "    const textForIds = (ids) =>",
+            "      (ids || '')",
+            "        .split(/\\s+/)",
+            "        .map((id) => id && document.getElementById ? document.getElementById(id) : null)",
+            "        .filter((node) => node && node.textContent)",
+            "        .map((node) => node.textContent.trim())",
+            "        .filter(Boolean)",
+            "        .join(' ');",
             "    const labelFor = (control) => {",
             "      if (control.id) {",
-            '        const explicit = document.querySelector(`label[for="${control.id}"]`);',
+            "        const explicit = Array.from(document.querySelectorAll('label')).find((label) =>",
+            "          label.htmlFor === control.id || label.getAttribute('for') === control.id",
+            "        );",
             "        if (explicit && explicit.textContent) return explicit.textContent.trim();",
             "      }",
             "      const wrapping = control.closest('label');",
             "      if (wrapping && wrapping.textContent) return wrapping.textContent.trim();",
-            "      return control.getAttribute('aria-label') || control.getAttribute('placeholder') || control.name || '';",
+            "      const labelledBy = textForIds(control.getAttribute('aria-labelledby'));",
+            "      if (labelledBy) return labelledBy;",
+            "      const describedBy = textForIds(control.getAttribute('aria-describedby'));",
+            "      return control.getAttribute('aria-label') || control.getAttribute('placeholder') || describedBy || control.name || '';",
             "    };",
             "    return controls.map((control) => ({",
             "      label: labelFor(control),",
             "      type: control.getAttribute('type') || control.tagName.toLowerCase(),",
+            "      id: control.id || '',",
+            "      name: control.name || '',",
             "      required: Boolean(control.required),",
             "      options: control.tagName.toLowerCase() === 'select'",
             "        ? Array.from(control.options).map((option) => option.textContent.trim()).filter(Boolean)",
             "        : [],",
             "    })).filter((field) => field.label);",
-            "  });",
-            f"  fs.writeFileSync({json.dumps(output_path)}, JSON.stringify(fields, null, 2));",
-            f"  console.log('Wrote form snapshot to {output_path}');",
-            "  console.log('Review the snapshot before using it for guarded form filling.');",
+            "    });",
+            f"    fs.writeFileSync({json.dumps(output_path)}, JSON.stringify(fields, null, 2));",
+            f"    console.log('Wrote form snapshot to {output_path}');",
+            "    console.log('Review the snapshot before using it for guarded form filling.');",
+            "  } finally {",
+            "    if (browser) {",
+            "      await browser.close();",
+            "    }",
+            "  }",
             "}",
             "",
             "main().catch((error) => {",
-            "  console.error(error);",
+            "  console.error('Form snapshot failed:', error && error.message ? error.message : error);",
             "  process.exit(1);",
             "});",
         ]

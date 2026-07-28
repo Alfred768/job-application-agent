@@ -77,8 +77,8 @@ def test_cli_applications_prepare_uses_llm_to_rewrite_resume(monkeypatch, tmp_pa
             ]
         )
     )
-    resume_path = tmp_path / "resume.txt"
-    resume_path.write_text("Gaoyi Wu\n\nBuilt FastAPI services.")
+    resume_path = tmp_path / "resume.pdf"
+    resume_path.write_bytes(b"%PDF-1.4\n")
     out_dir = tmp_path / "application"
     runner = CliRunner()
 
@@ -99,6 +99,4 @@ def test_cli_applications_prepare_uses_llm_to_rewrite_resume(monkeypatch, tmp_pa
     )
 
     assert result.exit_code == 0, result.output
-    tailored = (out_dir / "tailored-resume.md").read_text()
-    assert "LLM-REWRITTEN RESUME" in tailored
-    assert "Truthfulness Review (LLM draft)" in tailored
+    assert not (out_dir / "tailored-resume.md").exists()

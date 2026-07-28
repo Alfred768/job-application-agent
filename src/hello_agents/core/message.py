@@ -1,11 +1,25 @@
-"""消息系统"""
+"""Messages shared by local history and managed conversations."""
 
-import uuid
-from typing import Optional, Dict, Any, Literal
-from datetime import datetime
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any, Dict, Literal, Optional
+from uuid import uuid4
+
 from pydantic import BaseModel
 
-MessageRole = Literal["user", "assistant", "system", "tool"]
+MessageRole = Literal[
+    "user",
+    "assistant",
+    "system",
+    "tool",
+    "tool_result",
+    "observation",
+    "safety_gate",
+    "thought",
+    "action",
+    "memory_update",
+]
 
 
 class Message(BaseModel):
@@ -13,22 +27,22 @@ class Message(BaseModel):
 
     content: str
     role: MessageRole
-    message_id: str = ""
-    conversation_id: str = ""
-    parent_id: Optional[str] = None
-    branch_point: bool = False
-    timestamp: datetime = None
-    metadata: Optional[Dict[str, Any]] = None
+    message_id: str
+    conversation_id: str
+    parent_id: Optional[str]
+    branch_point: bool
+    timestamp: datetime
+    metadata: Dict[str, Any]
 
     def __init__(self, content: str, role: MessageRole, **kwargs):
         super().__init__(
             content=content,
             role=role,
-            message_id=kwargs.get("message_id", uuid.uuid4().hex[:12]),
+            message_id=kwargs.get("message_id") or uuid4().hex[:12],
             conversation_id=kwargs.get("conversation_id", ""),
             parent_id=kwargs.get("parent_id"),
             branch_point=kwargs.get("branch_point", False),
-            timestamp=kwargs.get("timestamp", datetime.now()),
+            timestamp=kwargs.get("timestamp") or datetime.now(timezone.utc),
             metadata=kwargs.get("metadata", {}),
         )
 
@@ -41,7 +55,7 @@ class Message(BaseModel):
                 "conversation_id": self.conversation_id,
                 "parent_id": self.parent_id,
                 "branch_point": self.branch_point,
-                "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+                "timestamp": self.timestamp.isoformat(),
                 "metadata": self.metadata,
             }
         return {"role": self.role, "content": self.content}

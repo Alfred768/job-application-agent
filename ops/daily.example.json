@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "source_config": "sources.json",
+  "profile": "profiles/your-profile.json",
+  "sensitive_kb": "profiles/your-sensitive-answers.json",
+  "database": "job-agent.db",
+  "profile_vector_db": "profiles/your-profile.db",
+  "resume_source_dir": "${RESUME_SOURCE_DIR}",
+  "required_resume_pdf": null,
+  "output_root": "output/daily",
+  "min_score": 70,
+  "limit": 100,
+  "daily_submit_target": 100,
+  "timeout_seconds": 300,
+  "empty_wake_minutes": 15,
+  "use_llm": true,
+  "llm_answers": true,
+  "browser_headless": true,
+  "submit_complete": false,
+  "require_gmail_token": true,
+  "evaluation": {
+    "imported_cohort_target": 500,
+    "min_confirmed_submission_rate": 0.8,
+    "min_terminal_audit_coverage": 1.0
+  },
+  "auto_repair": {
+    "enabled": true,
+    "max_cycles": 2,
+    "agent_binary": "codex",
+    "agent_timeout_seconds": 900,
+    "verification_timeout_seconds": 1200,
+    "combobox_no_progress_seconds": 20,
+    "retry_after_verified_repair": true
+  }
+}

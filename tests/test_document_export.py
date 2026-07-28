@@ -1,9 +1,10 @@
 from io import BytesIO
 from zipfile import ZipFile
 
-from docx import Document
-
-from job_agent.document_export import markdown_to_docx_bytes, tailor_docx_bytes
+from job_agent.document_export import (
+    convert_docx_to_pdf,
+    markdown_to_docx_bytes,
+)
 
 
 def test_markdown_to_docx_bytes_writes_basic_word_document():
@@ -23,20 +24,24 @@ def test_markdown_to_docx_bytes_writes_basic_word_document():
     assert "Built FastAPI services." in document_xml
 
 
-def test_tailor_docx_preserves_source_and_reorders_existing_skills(tmp_path):
+def test_markdown_to_docx_bytes_removes_markdown_formatting_artifacts():
+    data = markdown_to_docx_bytes(
+        "**Languages:** Python\n\n[LinkedIn](https://linkedin.example/gaoyi)"
+    )
+
+    with ZipFile(BytesIO(data)) as docx:
+        document_xml = docx.read("word/document.xml").decode("utf-8")
+
+    assert "**" not in document_xml
+    assert "[LinkedIn]" not in document_xml
+    assert "Languages: Python" in document_xml
+    assert "LinkedIn: https://linkedin.example/gaoyi" in document_xml
+
+
+def test_convert_docx_to_pdf_returns_false_without_converter(tmp_path, monkeypatch):
     source = tmp_path / "source.docx"
-    document = Document()
-    document.add_paragraph("GAOYI WU")
-    document.add_paragraph("TECHNICAL SKILLS")
-    document.add_paragraph("Backend: Redis, Python, FastAPI")
-    document.add_paragraph("PROJECTS")
-    document.save(source)
+    source.write_bytes(markdown_to_docx_bytes("Gaoyi Wu"))
 
-    tailored = tailor_docx_bytes(source, ["Python", "FastAPI"])
-    output = tmp_path / "tailored.docx"
-    output.write_bytes(tailored)
+    monkeypatch.setattr("job_agent.document_export.shutil.which", lambda _: None)
 
-    source_doc = Document(source)
-    tailored_doc = Document(output)
-    assert source_doc.paragraphs[2].text == "Backend: Redis, Python, FastAPI"
-    assert tailored_doc.paragraphs[2].text == "Backend: Python, FastAPI, Redis"
+    assert convert_docx_to_pdf(source, tmp_path / "source.pdf") is False

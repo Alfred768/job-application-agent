@@ -16,10 +16,24 @@ def shortlist_jobs(
     jobs: list[Job],
     min_score: int = 70,
     limit: int | None = None,
+    *,
+    diversify_companies: bool = False,
 ) -> list[ShortlistedJob]:
     ranked = [ShortlistedJob(job=job, fit=score_fit(job)) for job in jobs]
     shortlisted = [item for item in ranked if item.fit.score >= min_score]
     shortlisted.sort(key=lambda item: item.fit.score, reverse=True)
+    if diversify_companies:
+        first_per_company: list[ShortlistedJob] = []
+        repeated_companies: list[ShortlistedJob] = []
+        seen_companies: set[str] = set()
+        for item in shortlisted:
+            company_key = " ".join(str(item.job.company or "").casefold().split())
+            if company_key in seen_companies:
+                repeated_companies.append(item)
+                continue
+            seen_companies.add(company_key)
+            first_per_company.append(item)
+        shortlisted = first_per_company + repeated_companies
     return shortlisted[:limit] if limit is not None else shortlisted
 
 

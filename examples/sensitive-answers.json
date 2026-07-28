@@ -1,0 +1,149 @@
+{
+  "work_authorization": {
+    "label": "Work Authorization",
+    "patterns": [
+      "authorized to work",
+      "work authorization",
+      "legally authorized",
+      "eligible to work"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "sponsorship": {
+    "label": "Visa Sponsorship",
+    "patterns": [
+      "sponsorship",
+      "require sponsorship",
+      "visa sponsorship",
+      "sponsor",
+      "require visa"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "salary": {
+    "label": "Salary Expectation",
+    "patterns": [
+      "salary",
+      "compensation",
+      "desired salary",
+      "salary expectation",
+      "pay expectation"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "relocation": {
+    "label": "Relocation",
+    "patterns": [
+      "relocation",
+      "relocate",
+      "willing to relocate",
+      "open to relocate"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "start_date": {
+    "label": "Start Date",
+    "patterns": [
+      "start date",
+      "earliest start",
+      "available to start",
+      "start date"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "eeo_gender": {
+    "label": "EEO: Gender",
+    "patterns": [
+      "gender",
+      "sex"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "eeo_race": {
+    "label": "EEO: Race/Ethnicity",
+    "patterns": [
+      "race",
+      "ethnicity",
+      "hispanic",
+      "latino",
+      "hispanic/latino"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "disability": {
+    "label": "Disability Status",
+    "patterns": [
+      "disability",
+      "disabled"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "veteran": {
+    "label": "Veteran Status",
+    "patterns": [
+      "veteran",
+      "protected veteran"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "citizenship": {
+    "label": "Citizenship",
+    "patterns": [
+      "citizen",
+      "citizenship",
+      "us citizen",
+      "u s citizen"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "security_clearance": {
+    "label": "Security Clearance",
+    "patterns": [
+      "security clearance",
+      "clearance",
+      "active clearance"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "legal_attestation": {
+    "label": "Legal Attestation",
+    "patterns": [
+      "legal attestation",
+      "i attest",
+      "i certify",
+      "i hereby certify",
+      "true and correct",
+      "background check",
+      "i authorize",
+      "arbitration agreement",
+      "agreement acknowledgement",
+      "agreement acknowledgment"
+    ],
+    "answer": "",
+    "approved": false
+  },
+  "privacy_consent": {
+    "label": "Privacy / AI Notetaker Consent",
+    "patterns": [
+      "privacy policy",
+      "personal data",
+      "process your personal data",
+      "ai notetaker",
+      "ai notetakers",
+      "transcribe conversations"
+    ],
+    "answer": "",
+    "approved": false
+  }
+}

@@ -1,5 +1,5 @@
-from job_agent.jobs import deduplicate_jobs, format_job_as_jd_text, import_job_from_text, parse_rss_jobs
-from job_agent.jobs import parse_greenhouse_jobs, parse_lever_jobs, parse_remotive_jobs
+from job_agent.jobs import canonical_job_url, deduplicate_jobs, format_job_as_jd_text, import_job_from_text, parse_rss_jobs
+from job_agent.jobs import parse_ashby_jobs, parse_greenhouse_jobs, parse_lever_jobs, parse_remotive_jobs
 from job_agent.models import Job
 
 
@@ -24,6 +24,15 @@ def test_import_job_from_text_uses_safe_fallbacks():
 
     assert job.company == "Unknown Company"
     assert job.title == "Unknown Role"
+
+
+def test_import_job_from_text_uses_plain_first_line_when_it_looks_like_title():
+    job = import_job_from_text(
+        "Software Engineer, ML Infrastructure, Optimization\n\n"
+        "Build machine learning infrastructure and model optimization tooling."
+    )
+
+    assert job.title == "Software Engineer, ML Infrastructure, Optimization"
 
 
 def test_parse_rss_jobs_normalizes_public_feed_items():
@@ -79,6 +88,10 @@ def test_format_job_as_jd_text_preserves_provenance_for_agent_review():
     assert "Source: example-rss" in text
     assert "Apply URL: https://jobs.example.com/acme-agent" in text
     assert "Build LLM agents" in text
+    reparsed = import_job_from_text(text)
+    assert reparsed.source == "example-rss"
+    assert reparsed.source_url == "https://jobs.example.com/acme-agent"
+    assert reparsed.apply_url == "https://jobs.example.com/acme-agent"
 
 
 def test_parse_greenhouse_jobs_normalizes_public_board_response():
@@ -101,7 +114,7 @@ def test_parse_greenhouse_jobs_normalizes_public_board_response():
     assert jobs[0].company == "acme"
     assert jobs[0].location == "Remote"
     assert jobs[0].source == "greenhouse:acme"
-    assert jobs[0].apply_url == "https://boards.greenhouse.io/acme/jobs/123"
+    assert jobs[0].apply_url == "https://job-boards.greenhouse.io/acme/jobs/123"
     assert "FastAPI" in jobs[0].raw_jd
 
 
@@ -127,6 +140,34 @@ def test_parse_lever_jobs_normalizes_public_postings_response():
     assert jobs[0].source == "lever:acme"
     assert jobs[0].apply_url == "https://jobs.lever.co/acme/abc"
     assert "orchestration" in jobs[0].raw_jd
+
+
+def test_parse_ashby_jobs_normalizes_public_board_response():
+    payload = {
+        "jobs": [
+            {
+                "id": "abc",
+                "title": "AI Product Engineer",
+                "jobUrl": "https://jobs.ashbyhq.com/brainco/abc",
+                "applyUrl": "https://jobs.ashbyhq.com/brainco/abc/application",
+                "location": "San Francisco Bay Area",
+                "descriptionHtml": "<p>Build applied AI products with LLMs.</p>",
+                "workplaceType": "Hybrid",
+            }
+        ]
+    }
+
+    jobs = parse_ashby_jobs(payload, organization="brainco")
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "AI Product Engineer"
+    assert jobs[0].company == "brainco"
+    assert jobs[0].location == "San Francisco Bay Area"
+    assert jobs[0].remote_policy == "Hybrid"
+    assert jobs[0].source == "ashby:brainco"
+    assert jobs[0].source_url == "https://jobs.ashbyhq.com/brainco/abc"
+    assert jobs[0].apply_url == "https://jobs.ashbyhq.com/brainco/abc/application"
+    assert "LLMs" in jobs[0].raw_jd
 
 
 def test_parse_remotive_jobs_normalizes_public_api_response():
@@ -183,6 +224,49 @@ def test_deduplicate_jobs_collapses_tracking_variants_and_merges_provenance():
     assert unique[0].source == "company-rss | greenhouse:acme"
     assert "FastAPI" in unique[0].raw_jd
     assert unique[0].apply_url == "https://jobs.acme.example/roles/123?utm_source=rss"
+
+
+def test_greenhouse_custom_and_official_urls_share_requisition_identity():
+    custom_url = "https://motional.com/open-positions/?gh_jid=7730609003#/7730609003"
+    official_url = "https://job-boards.greenhouse.io/motional/jobs/7730609003"
+
+    assert canonical_job_url(custom_url) == canonical_job_url(official_url)
+    assert canonical_job_url(custom_url) == "https://job-boards.greenhouse.io/jobs/7730609003"
+
+    unique = deduplicate_jobs(
+        [
+            Job(
+                title="Machine Learning Systems Engineer",
+                company="Motional",
+                raw_jd="Build ML systems.",
+                source="company-site",
+                apply_url=custom_url,
+            ),
+            Job(
+                title="Machine Learning Systems Engineer",
+                company="Motional",
+                raw_jd="Build production ML systems.",
+                source="greenhouse:motional",
+                apply_url=official_url,
+            ),
+        ]
+    )
+
+    assert len(unique) == 1
+    assert unique[0].source == "company-site | greenhouse:motional"
+
+
+def test_lever_apply_and_posting_urls_share_requisition_identity():
+    posting_url = "https://jobs.lever.co/Acme/123e4567-e89b-12d3-a456-426614174000"
+    apply_url = (
+        "https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000/apply"
+        "?lever-source=company-site"
+    )
+
+    assert canonical_job_url(posting_url) == canonical_job_url(apply_url)
+    assert canonical_job_url(apply_url) == (
+        "https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000"
+    )
 
 
 def test_deduplicate_jobs_uses_role_identity_when_urls_are_missing():

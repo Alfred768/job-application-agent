@@ -2,11 +2,12 @@
 
 from abc import ABC, abstractmethod
 from typing import Optional, Iterator
+
+from .config import Config
+from .conversation_manager import ConversationManager
 from .message import Message
 from .llm import HelloAgentsLLM
-from .config import Config
 from .stream import StreamEvent
-from .conversation_manager import ConversationManager
 
 
 class Agent(ABC):
@@ -24,27 +25,61 @@ class Agent(ABC):
         self.llm = llm
         self.system_prompt = system_prompt
         self.config = config or Config()
-        self._history: list[Message] = []
         self.conversation_manager = conversation_manager
+        self._history: list[Message] = []
 
-    def _resolve_history(self, conversation_id: Optional[str] = None) -> list[Message]:
-        if self.conversation_manager and conversation_id:
-            conv = self.conversation_manager.get_conversation(conversation_id)
-            if conv:
-                return conv.messages
+    def _resolve_history(
+        self,
+        conversation_id: Optional[str] = None,
+    ) -> list[Message]:
+        if self.conversation_manager is not None and conversation_id:
+            conversation = self.conversation_manager.get_conversation(
+                conversation_id
+            )
+            if conversation is not None:
+                return list(conversation.messages)
         return self._history
 
     def _save_conversation_messages(
-        self, input_text: str, response: str, conversation_id: Optional[str] = None
+        self,
+        input_text: str,
+        response: str,
+        conversation_id: Optional[str] = None,
+        extra_messages: Optional[list[Message]] = None,
     ) -> None:
-        if self.conversation_manager and conversation_id:
-            self.conversation_manager.add_message(conversation_id, input_text, "user")
+        messages = list(extra_messages or [])
+        if self.conversation_manager is not None and conversation_id:
             self.conversation_manager.add_message(
-                conversation_id, response, "assistant"
+                conversation_id,
+                input_text,
+                "user",
             )
-        else:
-            self.add_message(Message(input_text, "user"))
-            self.add_message(Message(response, "assistant"))
+            for message in messages:
+                self.conversation_manager.add_message(
+                    conversation_id,
+                    message.content,
+                    message.role,
+                    metadata=message.metadata,
+                )
+            self.conversation_manager.add_message(
+                conversation_id,
+                response,
+                "assistant",
+            )
+            return
+        self._save_history_messages(input_text, response, messages)
+
+    def _save_history_messages(
+        self,
+        input_text: str,
+        response: str,
+        extra_messages: Optional[list[Message]] = None,
+    ) -> None:
+        extra_messages = extra_messages or []
+        self.add_message(Message(input_text, "user"))
+        for message in extra_messages:
+            self.add_message(message)
+        self.add_message(Message(response, "assistant"))
 
     @abstractmethod
     def run(self, input_text: str, **kwargs) -> str:
@@ -61,8 +96,11 @@ class Agent(ABC):
     def clear_history(self):
         self._history.clear()
 
-    def get_history(self) -> list[Message]:
-        return self._history.copy()
+    def get_history(
+        self,
+        conversation_id: Optional[str] = None,
+    ) -> list[Message]:
+        return list(self._resolve_history(conversation_id))
 
     def __str__(self) -> str:
         return f"Agent(name={self.name}, provider={self.llm.provider})"

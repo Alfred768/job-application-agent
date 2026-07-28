@@ -1,9 +1,8 @@
-import json
-
 from hello_agents import ToolRegistry
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.career.models import JobApplicationState
 from hello_agents.tools.builtin.career import (
+    AshbyJobSourceTool,
     ApplicationTrackerTool,
     ApplicationPackageTool,
     FitScorerTool,
@@ -16,15 +15,12 @@ from hello_agents.tools.builtin.career import (
     LeverJobSourceTool,
     ManualJDImportTool,
     RemotiveJobSourceTool,
-    ResumeDraftTool,
     ResumeIndexerTool,
     ResumeSelectorTool,
-    ResumeTailorTool,
     ReviewPacketTool,
     RSSJobSourceTool,
     SubmitGateTool,
     SensitiveFieldDetectorTool,
-    TruthfulnessCheckTool,
 )
 
 
@@ -62,14 +58,11 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(LeverJobSourceTool())
     registry.register_tool(ResumeIndexerTool())
     registry.register_tool(ResumeSelectorTool())
-    registry.register_tool(ResumeTailorTool())
     registry.register_tool(ReviewPacketTool())
     registry.register_tool(RemotiveJobSourceTool())
     registry.register_tool(RSSJobSourceTool())
-    registry.register_tool(ResumeDraftTool())
     registry.register_tool(SubmitGateTool())
     registry.register_tool(SensitiveFieldDetectorTool())
-    registry.register_tool(TruthfulnessCheckTool())
 
     assert {
         "manual_jd_import",
@@ -85,14 +78,11 @@ def test_career_tools_register_with_hello_agents_registry():
         "lever_job_source",
         "resume_indexer",
         "resume_selector",
-        "resume_tailor",
         "review_packet",
         "remotive_job_source",
         "rss_job_source",
-        "resume_draft",
         "submit_gate",
         "sensitive_field_detector",
-        "truthfulness_check",
     } <= set(registry.list_tools())
 
 
@@ -104,11 +94,67 @@ def test_job_application_agent_reviews_manual_jd():
 
     assert "# Application Review" in result
     assert "Agent Engineer" in result
-    assert "Final Submit remains manual" in result
+    assert "Automatic final submission is enabled" in result
 
 
-def test_job_application_agent_includes_jd_analysis_and_resume_plan(tmp_path):
-    (tmp_path / "GAOYI_WU_Agent_Engineer.docx").write_text("docx")
+def test_job_application_agent_records_review_and_safety_history():
+    agent = JobApplicationAgent(name="career-agent", llm=FakeLLM())
+    jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents."
+
+    result = agent.run(jd)
+
+    history = agent.get_history()
+    roles = [message.role for message in history]
+    assert roles[0] == "user"
+    assert roles[-1] == "assistant"
+    assert roles.count("observation") >= 2
+    assert roles.count("safety_gate") >= 1
+    assert roles.count("thought") >= 1
+    assert roles.count("action") >= 1
+    assert roles.count("memory_update") >= 1
+    assert history[0].content == jd
+    sections = [message.metadata.get("section") for message in history[1:-1]]
+    assert "jd_analysis" in sections
+    assert "fit_score" in sections
+    assert "submit_gate" in sections
+    assert history[-1].content == result
+    assert "## Submit Gate" in history[-1].content
+    assert "Automatic final submission is enabled" in history[-1].content
+
+
+def test_job_application_agent_updates_last_state_with_fit_resume_and_gates(tmp_path):
+    (tmp_path / "GAOYI_WU_Agent_Engineer.pdf").write_text("pdf")
+    snapshot = '[{"label": "Email"}, {"label": "Do you require visa sponsorship?"}]'
+    profile = '{"email": "gaoyi@example.com", "sponsorship": "Needs review"}'
+    agent = JobApplicationAgent(
+        name="career-agent",
+        llm=FakeLLM(),
+        resume_source_dir=tmp_path,
+        form_snapshot_json=snapshot,
+        profile_json=profile,
+    )
+
+    agent.run("Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents.")
+
+    state = agent.get_last_state()
+    assert state is not None
+    assert state.job is not None
+    assert state.job.company == "Acme AI"
+    assert state.fit_score is not None
+    assert state.fit_score.role_track == "Agent Engineer"
+    assert state.selected_resume is not None
+    assert state.selected_resume.track == "Agent Engineer"
+    assert state.jd_analysis is not None
+    assert state.submit_gate is not None
+    assert state.form_fields is not None
+    assert state.sensitive_fields is not None
+    assert state.form_plan.review_required_fields == ["Do you require visa sponsorship?"]
+    assert state.status == "manual_review_required"
+    assert len(state.safety_gates) >= 2
+
+
+def test_job_application_agent_includes_jd_analysis_and_selected_pdf(tmp_path):
+    (tmp_path / "GAOYI_WU_Agent_Engineer.pdf").write_text("pdf")
     agent = JobApplicationAgent(name="career-agent", llm=FakeLLM(), resume_source_dir=tmp_path)
     jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents with LangChain, RAG, FastAPI, and Rust."
 
@@ -116,15 +162,12 @@ def test_job_application_agent_includes_jd_analysis_and_resume_plan(tmp_path):
 
     assert "## JD Analysis" in result
     assert '"role_track": "Agent Engineer"' in result
-    assert "## Resume Edit Plan" in result
-    assert "LangChain" in result
-    assert "unsupported_keywords" in result
-    assert "Rust" in result
-    assert "## Truthfulness Gate" in result
+    assert "## Recommended Resume" in result
+    assert "GAOYI_WU_Agent_Engineer.pdf" in result
 
 
 def test_job_application_agent_selects_resume_and_tracks_application(tmp_path):
-    (tmp_path / "GAOYI_WU_Agent_Engineer.docx").write_text("docx")
+    (tmp_path / "GAOYI_WU_Agent_Engineer.pdf").write_text("pdf")
     db_path = tmp_path / "agent.db"
     agent = JobApplicationAgent(
         name="career-agent",
@@ -138,7 +181,7 @@ def test_job_application_agent_selects_resume_and_tracks_application(tmp_path):
 
     assert "## Recommended Resume" in result
     assert "selected_track=Agent Engineer" in result
-    assert "GAOYI_WU_Agent_Engineer.docx" in result
+    assert "GAOYI_WU_Agent_Engineer.pdf" in result
     assert "## Tracking" in result
     assert "application_id=1" in result
 
@@ -154,7 +197,7 @@ def test_job_application_agent_exports_application_package(tmp_path):
     assert "package_dir=" in result
     assert (package_dir / "review.md").exists()
     assert (package_dir / "jd-analysis.json").exists()
-    assert (package_dir / "resume-edit-plan.json").exists()
+    assert not (package_dir / "resume-edit-plan.json").exists()
     assert (package_dir / "submit-gate.txt").exists()
 
 
@@ -182,15 +225,25 @@ def test_job_application_agent_uses_llm_for_review_notes_when_enabled():
     result = agent.run("Company: Acme\nTitle: Agent Engineer\n\nBuild LLM agents.")
 
     assert llm.messages
+    assert "Recent Tool Results:" in llm.messages[0][0]["content"]
+    assert "Long-term memory summaries:" in llm.messages[0][0]["content"]
+    assert "profile_json" not in llm.messages[0][0]["content"]
     assert "## LLM Review Notes" in result
     assert "Prioritize agent workflow achievements" in result
+    state = agent.get_last_state()
+    assert state is not None
+    assert state.thoughts
+    assert (
+        state.thoughts[0].summary
+        == "Prioritize agent workflow achievements and keep claims truthful."
+    )
 
 
-def test_job_application_state_starts_with_manual_submit_gate():
+def test_job_application_state_starts_with_automatic_submit_policy():
     state = JobApplicationState()
 
     assert state.status == "new"
-    assert state.form_plan.can_auto_submit is False
+    assert state.form_plan.can_auto_submit is True
 
 
 def test_resume_indexer_tool_lists_templates(tmp_path):
@@ -200,17 +253,17 @@ def test_resume_indexer_tool_lists_templates(tmp_path):
     result = ResumeIndexerTool().run({"source_dir": str(tmp_path)})
 
     assert "Agent Engineer" in result
-    assert "GAOYI_WU_Agent_Engineer.docx" in result
+    assert "GAOYI_WU_Agent_Engineer.pdf" in result
 
 
 def test_resume_selector_tool_selects_track_from_jd(tmp_path):
-    (tmp_path / "GAOYI_WU_ML_Infra.docx").write_text("docx")
+    (tmp_path / "GAOYI_WU_ML_Infra.pdf").write_text("pdf")
     jd = "Title: ML Infrastructure Engineer\n\nBuild Kubernetes, Kafka, and MLflow pipelines."
 
     result = ResumeSelectorTool().run({"source_dir": str(tmp_path), "jd_text": jd})
 
     assert "selected_track=ML Infra" in result
-    assert "GAOYI_WU_ML_Infra.docx" in result
+    assert "GAOYI_WU_ML_Infra.pdf" in result
 
 
 def test_jd_parser_tool_returns_structured_analysis():
@@ -223,53 +276,6 @@ def test_jd_parser_tool_returns_structured_analysis():
     assert '"FastAPI"' in result
 
 
-def test_resume_tailor_tool_flags_unsupported_keywords():
-    jd = "Title: Agent Engineer\n\nBuild LangChain agents with Rust and RAG."
-
-    result = ResumeTailorTool().run({"jd_text": jd, "resume_track": "Agent Engineer"})
-
-    assert '"target_track": "Agent Engineer"' in result
-    assert '"LangChain"' in result
-    assert '"unsupported_keywords": [' in result
-    assert '"Rust"' in result
-
-
-def test_resume_tailor_tool_uses_source_resume_as_evidence():
-    result = json.loads(
-        ResumeTailorTool().run(
-            {
-                "jd_text": "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI.",
-                "resume_text": "Built FastAPI services.",
-            }
-        )
-    )
-
-    assert result["summary_keywords"] == ["FastAPI"]
-    assert result["unsupported_keywords"] == ["LangChain"]
-
-
-def test_resume_draft_tool_generates_grounded_markdown():
-    jd = "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI and Rust."
-    resume_text = "Gaoyi Wu\n\nBuilt Python and FastAPI services."
-
-    result = ResumeDraftTool().run({"jd_text": jd, "resume_text": resume_text})
-
-    assert "# Tailored Resume Draft" in result
-    assert "LangChain" in result
-    assert "FastAPI" in result
-    assert "Unsupported JD keywords not inserted: LangChain, Rust" in result
-    assert resume_text in result
-
-
-def test_truthfulness_check_tool_blocks_unsupported_claims():
-    plan_json = '{"unsupported_keywords": ["Rust"]}'
-
-    result = TruthfulnessCheckTool().run({"plan_json": plan_json})
-
-    assert "truthfulness_status=needs_review" in result
-    assert "Rust" in result
-
-
 def test_application_package_tool_writes_review_artifacts(tmp_path):
     jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents with LangChain."
     out_dir = tmp_path / "application-package"
@@ -279,8 +285,8 @@ def test_application_package_tool_writes_review_artifacts(tmp_path):
     assert "package_dir=" in result
     assert (out_dir / "review.md").read_text().startswith("# Application Review")
     assert '"role_track": "Agent Engineer"' in (out_dir / "jd-analysis.json").read_text()
-    assert '"target_track": "Agent Engineer"' in (out_dir / "resume-edit-plan.json").read_text()
-    assert "Final Submit remains manual" in (out_dir / "submit-gate.txt").read_text()
+    assert not (out_dir / "resume-edit-plan.json").exists()
+    assert "Automatic final submission is enabled" in (out_dir / "submit-gate.txt").read_text()
 
 
 def test_form_inspector_tool_normalizes_field_snapshot():
@@ -330,20 +336,25 @@ def test_form_fill_script_tool_generates_guarded_playwright_script():
     assert ".click(" not in result
 
 
-def test_form_fill_script_tool_can_upload_resume_file():
+def test_form_fill_script_tool_can_upload_resume_file(tmp_path, monkeypatch):
     snapshot = '[{"label": "Resume", "type": "file", "required": true}]'
     profile = '{"email": "gaoyi@example.com"}'
+    resume_dir = tmp_path / "resumes"
+    resume_dir.mkdir()
+    resume_path = resume_dir / "GAOYI_WU_SDE.pdf"
+    resume_path.write_bytes(b"%PDF-1.4\nsource resume")
+    monkeypatch.setenv("RESUME_SOURCE_DIR", str(resume_dir))
 
     result = FormFillScriptTool().run(
         {
             "form_snapshot_json": snapshot,
             "profile_json": profile,
             "application_url": "https://jobs.example.com/apply",
-            "resume_file": "/tmp/tailored-resume.pdf",
+            "resume_file": str(resume_path),
         }
     )
 
-    assert 'await page.getByLabel("Resume").setInputFiles("/tmp/tailored-resume.pdf");' in result
+    assert f'await page.getByLabel("Resume").setInputFiles("{resume_path.resolve()}");' in result
     assert ".click(" not in result
 
 
@@ -371,6 +382,57 @@ def test_application_tracker_tool_creates_application_record(tmp_path):
     assert "application_id=1" in result
     assert "status=needs_review" in result
     assert db_path.exists()
+
+    repeated = ApplicationTrackerTool().run({"database_path": str(db_path), "jd_text": jd})
+    assert "job_id=1" in repeated
+    assert "application_id=1" in repeated
+
+
+def test_application_tracker_tool_does_not_reuse_same_title_with_different_url(tmp_path):
+    db_path = tmp_path / "agent.db"
+    first_jd = (
+        "Company: Acme AI\n"
+        "Title: Agent Engineer\n"
+        "Location: Remote\n"
+        "Apply URL: https://jobs.example.com/acme/1\n\n"
+        "Build LLM agents."
+    )
+    second_jd = (
+        "Company: Acme AI\n"
+        "Title: Agent Engineer\n"
+        "Location: Remote\n"
+        "Apply URL: https://jobs.example.com/acme/2\n\n"
+        "Build LLM agents for a different team."
+    )
+
+    first = ApplicationTrackerTool().run({"database_path": str(db_path), "jd_text": first_jd})
+    second = ApplicationTrackerTool().run({"database_path": str(db_path), "jd_text": second_jd})
+
+    assert "application_id=1" in first
+    assert "application_id=2" in second
+
+
+def test_application_tracker_tool_reuses_tracking_url_variants(tmp_path):
+    db_path = tmp_path / "agent.db"
+    first_jd = (
+        "Company: Acme AI\n"
+        "Title: Agent Engineer\n"
+        "Apply URL: https://jobs.example.com/acme/1?utm_source=rss\n\n"
+        "Build LLM agents."
+    )
+    second_jd = (
+        "Company: Acme AI\n"
+        "Title: Agent Engineer\n"
+        "Apply URL: https://jobs.example.com/acme/1?ref=careers\n\n"
+        "Build LLM agents."
+    )
+
+    first = ApplicationTrackerTool().run({"database_path": str(db_path), "jd_text": first_jd})
+    second = ApplicationTrackerTool().run({"database_path": str(db_path), "jd_text": second_jd})
+
+    assert "application_id=1" in first
+    assert "job_id=1" in second
+    assert "application_id=1" in second
 
 
 def test_rss_job_source_tool_returns_normalized_jobs_json():
@@ -408,6 +470,17 @@ def test_lever_job_source_tool_returns_normalized_jobs_json():
     assert '"company": "acme"' in result
     assert '"source": "lever:acme"' in result
     assert '"apply_url": "https://jobs.lever.co/acme/1"' in result
+
+
+def test_ashby_job_source_tool_returns_normalized_jobs_json():
+    payload = '{"jobs": [{"title": "AI Product Engineer", "jobUrl": "https://jobs.ashbyhq.com/brainco/1", "applyUrl": "https://jobs.ashbyhq.com/brainco/1/application", "location": "San Francisco", "descriptionHtml": "Build AI products."}]}'
+
+    result = AshbyJobSourceTool().run({"organization": "brainco", "payload_json": payload})
+
+    assert '"title": "AI Product Engineer"' in result
+    assert '"company": "brainco"' in result
+    assert '"source": "ashby:brainco"' in result
+    assert '"apply_url": "https://jobs.ashbyhq.com/brainco/1/application"' in result
 
 
 def test_remotive_job_source_tool_returns_normalized_jobs_json():

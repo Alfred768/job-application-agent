@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from hello_agents.tools.base import Tool, ToolParameter
@@ -13,6 +14,7 @@ from job_agent.forms import (
     render_playwright_form_snapshot_script,
     render_playwright_fill_script,
 )
+from job_agent.resumes import ResumePathError, resolve_original_resume_pdf
 
 
 class FormInspectorTool(Tool):
@@ -122,7 +124,16 @@ class FormFillScriptTool(Tool):
         resume_file = parameters.get("resume_file")
         profile = json.loads(profile_json)
         if resume_file:
-            profile["resume_file"] = str(resume_file)
+            source_dir = str(os.getenv("RESUME_SOURCE_DIR") or "").strip()
+            try:
+                profile["resume_file"] = str(
+                    resolve_original_resume_pdf(
+                        resume_file,
+                        source_dir=source_dir or None,
+                    )
+                )
+            except ResumePathError as exc:
+                raise ValueError(str(exc)) from exc
         plan = build_form_fill_plan(inspect_form_snapshot(snapshot), profile)
         return render_playwright_fill_script(plan, application_url=application_url)
 

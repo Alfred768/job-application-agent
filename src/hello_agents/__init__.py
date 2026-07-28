@@ -1,13 +1,9 @@
-"""
-HelloAgents - 轻量级多智能体框架（StockSage 精简版）
-
-仅保留 StockSage 项目实际使用的核心组件与 Agent 范式。
-"""
-
-from .version import __version__, __author__, __email__, __description__
+"""Runtime components for the job application agent."""
 
 from .core.llm import HelloAgentsLLM
 from .core.config import Config
+from .core.conversation import Conversation
+from .core.conversation_manager import ConversationManager
 from .core.message import Message
 from .core.exceptions import HelloAgentsException
 from .core.stream import StreamEvent
@@ -16,9 +12,12 @@ from .agents.job_application_agent import JobApplicationAgent
 from .agents.plan_solve_agent import PlanAndSolveAgent
 from .agents.react_agent import ReActAgent
 from .agents.reflection_agent import ReflectionAgent
+from .agents.simple_agent import SimpleAgent
 
-from .tools.registry import ToolRegistry, global_registry
+from .tools.async_executor import AsyncResult, AsyncTask, AsyncToolExecutor
 from .tools.base import Tool, ToolParameter
+from .tools.chain import ChainResult, ChainStep, ToolChain
+from .tools.registry import ToolRegistry
 
 import logging
 
@@ -26,12 +25,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 __all__ = [
-    "__version__",
-    "__author__",
-    "__email__",
-    "__description__",
     "HelloAgentsLLM",
     "Config",
+    "Conversation",
+    "ConversationManager",
     "Message",
     "HelloAgentsException",
     "StreamEvent",
@@ -39,8 +36,14 @@ __all__ = [
     "PlanAndSolveAgent",
     "ReActAgent",
     "ReflectionAgent",
+    "SimpleAgent",
+    "AsyncResult",
+    "AsyncTask",
+    "AsyncToolExecutor",
+    "ChainResult",
+    "ChainStep",
+    "ToolChain",
     "ToolRegistry",
-    "global_registry",
     "Tool",
     "ToolParameter",
 ]

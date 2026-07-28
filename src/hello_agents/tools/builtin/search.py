@@ -1,32 +1,65 @@
-"""Search tool - lightweight web search built-in tool for the HelloAgents base.
-
-Uses a best-effort public endpoint (DuckDuckGo HTML) with no API key, and
-degrades gracefully when the network is unavailable. This is a base-framework
-utility tool; the career agent uses dedicated job-source tools instead.
-"""
+"""Small public web-search example Tool."""
 
 from __future__ import annotations
 
-import re
+from html.parser import HTMLParser
 from typing import Any, Dict, List
 from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
+from hello_agents.core.contracts import ToolEffect
+
 from ..base import Tool, ToolParameter
 
-_UA = (
+
+_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "AppleWebKit/537.36 Chrome/124.0 Safari/537.36"
 )
 
 
-class SearchTool(Tool):
-    """Return a short list of web results for a query."""
+class _SearchResultParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.results: list[str] = []
+        self._capture_depth = 0
+        self._parts: list[str] = []
 
-    def __init__(self, max_results: int = 5):
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        classes = dict(attrs).get("class", "") or ""
+        if "result__snippet" in classes or "result__a" in classes:
+            self._capture_depth = 1
+            self._parts = []
+        elif self._capture_depth:
+            self._capture_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._capture_depth:
+            return
+        self._capture_depth -= 1
+        if self._capture_depth == 0:
+            text = " ".join(" ".join(self._parts).split())
+            if text:
+                self.results.append(text)
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture_depth:
+            self._parts.append(data)
+
+
+class SearchTool(Tool):
+    """Search a public endpoint and return concise text results."""
+
+    def __init__(self, max_results: int = 5) -> None:
         super().__init__(
             name="search",
-            description="Search the web and return concise text results.",
+            description="Search the public web for a query.",
+            effect=ToolEffect.READ,
         )
         self.max_results = max_results
 
@@ -35,24 +68,33 @@ class SearchTool(Tool):
             ToolParameter(
                 name="query",
                 type="string",
-                description="Search query.",
-                required=True,
+                description="Public web search query.",
             )
         ]
 
     def run(self, parameters: Dict[str, Any]) -> str:
-        query = str(parameters.get("query") or parameters.get("input") or "").strip()
+        query = str(
+            parameters.get("query")
+            or parameters.get("input")
+            or ""
+        ).strip()
         if not query:
             return "Error: empty query"
+        request = Request(
+            f"https://duckduckgo.com/html/?q={quote_plus(query)}",
+            headers={"User-Agent": _USER_AGENT},
+        )
         try:
-            url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-            with urlopen(Request(url, headers={"User-Agent": _UA}), timeout=15) as resp:
-                html = resp.read().decode("utf-8", errors="ignore")
+            with urlopen(request, timeout=15) as response:
+                html = response.read().decode("utf-8", errors="ignore")
         except Exception as exc:  # noqa: BLE001
-            return f"Error: search failed ({exc})"
-        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
-        cleaned = [re.sub(r"<[^>]+>", "", s).strip() for s in snippets]
-        cleaned = [c for c in cleaned if c][: self.max_results]
-        if not cleaned:
+            return f"Error: search failed ({type(exc).__name__}: {exc})"
+        parser = _SearchResultParser()
+        parser.feed(html)
+        unique = list(dict.fromkeys(parser.results))[: self.max_results]
+        if not unique:
             return "No results."
-        return "\n".join(f"{i}. {c}" for i, c in enumerate(cleaned, 1))
+        return "\n".join(
+            f"{index}. {result}"
+            for index, result in enumerate(unique, start=1)
+        )

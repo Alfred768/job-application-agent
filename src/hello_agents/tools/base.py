@@ -5,6 +5,8 @@ from typing import Dict, Any, List
 
 from pydantic import BaseModel
 
+from hello_agents.core.contracts import ToolEffect
+
 
 class ToolParameter(BaseModel):
     """工具参数定义"""
@@ -19,9 +21,16 @@ class ToolParameter(BaseModel):
 class Tool(ABC):
     """工具基类"""
 
-    def __init__(self, name: str, description: str):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        *,
+        effect: ToolEffect = ToolEffect.READ,
+    ):
         self.name = name
         self.description = description
+        self.effect = effect
 
     @abstractmethod
     def run(self, parameters: Dict[str, Any]) -> str:
@@ -37,6 +46,16 @@ class Tool(ABC):
         """验证参数"""
         required_params = [p.name for p in self.get_parameters() if p.required]
         return all(param in parameters for param in required_params)
+
+    def effective_effect(self, parameters: Dict[str, Any]) -> ToolEffect:
+        """Return the effect for one invocation.
+
+        Most tools have one fixed effect.  Environment tools that can either
+        fill a form or submit it may derive the effect from their already
+        validated invocation context.  ControlledExecution remains the only
+        caller of this hook, so a tool cannot use it to bypass the policy gate.
+        """
+        return self.effect
 
     def to_openai_schema(self) -> Dict[str, Any]:
         """转换为 OpenAI function calling schema 格式"""

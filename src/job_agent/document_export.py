@@ -3,6 +3,9 @@ from __future__ import annotations
 from io import BytesIO
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -14,8 +17,13 @@ def _markdown_line_to_text(line: str) -> str:
     if stripped.startswith(">"):
         return stripped.lstrip(">").strip()
     if stripped.startswith("- "):
-        return stripped[2:].strip()
-    return stripped
+        stripped = stripped[2:].strip()
+    stripped = re.sub(
+        r"\[([^\]]+)\]\(([^)]+)\)",
+        lambda match: f"{match.group(1)}: {match.group(2)}",
+        stripped,
+    )
+    return stripped.replace("**", "").replace("__", "").replace("`", "")
 
 
 def _paragraph_xml(text: str) -> str:
@@ -33,7 +41,7 @@ def markdown_to_docx_bytes(markdown_text: str) -> bytes:
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         "<w:body>"
         + "".join(_paragraph_xml(paragraph) for paragraph in paragraphs)
-        + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'
+        + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr>'
         + "</w:body></w:document>"
     )
     content_types = (
@@ -59,51 +67,38 @@ def markdown_to_docx_bytes(markdown_text: str) -> bytes:
     return output.getvalue()
 
 
-def tailor_docx_bytes(source_path: str | Path, supported_keywords: list[str]) -> bytes:
-    """Copy a source DOCX and safely promote existing skills in its skills section.
+def convert_docx_to_pdf(docx_path: str | Path, pdf_path: str | Path) -> bool:
+    """Convert a DOCX document to PDF using a local office converter.
 
-    The source file is never modified. Only comma/semicolon-delimited skill
-    entries that already exist in the source are reordered; no new factual
-    claim is inserted. Callers can fall back to ``markdown_to_docx_bytes`` for
-    malformed or unsupported documents.
+    Returns False when no supported converter is installed or the conversion
+    fails, so callers can decide whether to fall back to the DOCX artifact.
     """
-    from docx import Document
+    source = Path(docx_path)
+    target = Path(pdf_path)
+    converter = shutil.which("soffice") or shutil.which("libreoffice")
+    if not converter or not source.exists():
+        return False
 
-    document = Document(str(source_path))
-    keywords = [keyword.lower() for keyword in supported_keywords if keyword]
-    paragraphs = document.paragraphs
-    heading_indexes = {
-        index
-        for index, paragraph in enumerate(paragraphs)
-        if paragraph.text.strip().lower() in {"skills", "technical skills"}
-    }
-
-    for heading_index in heading_indexes:
-        for paragraph in paragraphs[heading_index + 1 :]:
-            text = paragraph.text.strip()
-            if not text:
-                continue
-            if text.upper() in {
-                "SUMMARY",
-                "EDUCATION",
-                "PROFESSIONAL EXPERIENCE",
-                "EXPERIENCE",
-                "PROJECTS",
-                "TECHNICAL SKILLS",
-            }:
-                break
-            if ":" not in text and "：" not in text:
-                continue
-            separator = ":" if ":" in text else "："
-            prefix, values = text.split(separator, 1)
-            chunks = [chunk.strip() for chunk in re.split(r"[,;|]", values) if chunk.strip()]
-            if len(chunks) < 2:
-                continue
-            chunks.sort(
-                key=lambda chunk: not any(keyword in chunk.lower() for keyword in keywords)
-            )
-            paragraph.text = f"{prefix}{separator} {', '.join(chunks)}"
-
-    output = BytesIO()
-    document.save(output)
-    return output.getvalue()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        result = subprocess.run(
+            [
+                converter,
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(output_dir),
+                str(source),
+            ],
+            text=True,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        produced = output_dir / f"{source.stem}.pdf"
+        if result.returncode != 0 or not produced.exists():
+            return False
+        shutil.move(str(produced), target)
+    return target.exists() and target.stat().st_size > 0

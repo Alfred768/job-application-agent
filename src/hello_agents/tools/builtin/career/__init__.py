@@ -1,4 +1,4 @@
-"""Career tools for the PEAS-designed job application agent."""
+"""Career tools for the policy-controlled job application agent."""
 
 from .application_tracker import ApplicationTrackerTool
 from .document_exporter import ApplicationPackageTool
@@ -10,6 +10,7 @@ from .form_tools import (
     SensitiveFieldDetectorTool,
 )
 from .job_sources import (
+    AshbyJobSourceTool,
     GreenhouseJobSourceTool,
     LeverJobSourceTool,
     ManualJDImportTool,
@@ -19,7 +20,6 @@ from .job_sources import (
 from .fit_scorer import FitScorerTool
 from .jd_parser import JDParserTool
 from .resume_tools import ResumeIndexerTool, ResumeSelectorTool
-from .resume_tailor import ResumeDraftTool, ResumeTailorTool, TruthfulnessCheckTool
 from .review_packet import ReviewPacketTool
 from .submit_gate import SubmitGateTool
 
@@ -30,6 +30,7 @@ __all__ = [
     "FormFillScriptTool",
     "FormInspectorTool",
     "FormSnapshotScriptTool",
+    "AshbyJobSourceTool",
     "GreenhouseJobSourceTool",
     "LeverJobSourceTool",
     "ManualJDImportTool",
@@ -39,10 +40,7 @@ __all__ = [
     "JDParserTool",
     "ResumeIndexerTool",
     "ResumeSelectorTool",
-    "ResumeDraftTool",
-    "ResumeTailorTool",
     "ReviewPacketTool",
     "SensitiveFieldDetectorTool",
     "SubmitGateTool",
-    "TruthfulnessCheckTool",
 ]

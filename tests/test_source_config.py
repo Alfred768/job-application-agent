@@ -1,4 +1,7 @@
 import json
+from urllib.error import URLError
+
+import pytest
 
 from job_agent.source_config import load_jobs_from_source_config, _read_url
 
@@ -21,6 +24,10 @@ def test_load_jobs_from_source_config_combines_public_sources(tmp_path):
     remotive_path.write_text(
         '{"jobs": [{"title": "Backend Engineer", "company_name": "RemoteCo", "url": "https://remotive.com/jobs/1", "candidate_required_location": "Worldwide", "description": "Build APIs."}]}'
     )
+    ashby_path = tmp_path / "ashby.json"
+    ashby_path.write_text(
+        '{"jobs": [{"title": "AI Product Engineer", "jobUrl": "https://jobs.ashbyhq.com/brainco/1", "applyUrl": "https://jobs.ashbyhq.com/brainco/1/application", "location": "San Francisco", "descriptionHtml": "Build AI products."}]}'
+    )
     config_path = tmp_path / "sources.json"
     config_path.write_text(
         json.dumps(
@@ -28,6 +35,7 @@ def test_load_jobs_from_source_config_combines_public_sources(tmp_path):
                 "sources": [
                     {"type": "rss", "source": "example-rss", "rss_file": str(rss_path)},
                     {"type": "greenhouse", "board_token": "dataforge", "payload_file": str(greenhouse_path)},
+                    {"type": "ashby", "organization": "brainco", "payload_file": str(ashby_path)},
                     {"type": "remotive", "payload_file": str(remotive_path)},
                 ]
             }
@@ -39,11 +47,13 @@ def test_load_jobs_from_source_config_combines_public_sources(tmp_path):
     assert [job.title for job in jobs] == [
         "Agent Engineer",
         "ML Platform Engineer",
+        "AI Product Engineer",
         "Backend Engineer",
     ]
     assert [job.source for job in jobs] == [
         "example-rss",
         "greenhouse:dataforge",
+        "ashby:brainco",
         "remotive",
     ]
 
@@ -80,6 +90,106 @@ def test_load_jobs_from_source_config_deduplicates_overlapping_sources(tmp_path)
     assert "Python" in jobs[0].raw_jd
 
 
+def test_source_filters_apply_before_limit(tmp_path):
+    greenhouse_path = tmp_path / "greenhouse.json"
+    greenhouse_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "title": "Account Executive",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+                        "location": {"name": "New York, NY"},
+                        "content": "Sell software.",
+                    },
+                    {
+                        "title": "Senior Finance Manager",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/2",
+                        "location": {"name": "London, UK"},
+                        "content": "Manage finance.",
+                    },
+                    {
+                        "title": "2026 Early Career Software Engineer",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/3",
+                        "location": {"name": "Seattle, WA"},
+                        "content": "Build backend systems.",
+                    },
+                    {
+                        "title": "Machine Learning Engineer",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/4",
+                        "location": {"name": "San Francisco, CA"},
+                        "content": "Build ML systems.",
+                    },
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "type": "greenhouse",
+                        "board_token": "acme",
+                        "payload_file": str(greenhouse_path),
+                        "title_include": ["software engineer", "machine learning"],
+                        "location_include": ["seattle", "san francisco"],
+                        "limit": 1,
+                    }
+                ]
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.title for job in jobs] == ["2026 Early Career Software Engineer"]
+
+
+def test_source_config_defaults_are_merged_into_sources(tmp_path):
+    greenhouse_path = tmp_path / "greenhouse.json"
+    greenhouse_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "title": "Account Executive",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+                        "location": {"name": "New York, NY"},
+                        "content": "Sell software.",
+                    },
+                    {
+                        "title": "Machine Learning Engineer",
+                        "absolute_url": "https://boards.greenhouse.io/acme/jobs/2",
+                        "location": {"name": "San Francisco, CA"},
+                        "content": "Build ML systems.",
+                    },
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {"title_include": ["machine learning"]},
+                "sources": [
+                    {
+                        "type": "greenhouse",
+                        "board_token": "acme",
+                        "payload_file": str(greenhouse_path),
+                    }
+                ],
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.title for job in jobs] == ["Machine Learning Engineer"]
+
+
 def test_read_url_sends_browser_user_agent_not_python_urllib(monkeypatch):
     """Public job APIs (e.g. Remotive) 403 the default Python-urllib UA.
 
@@ -110,3 +220,43 @@ def test_read_url_sends_browser_user_agent_not_python_urllib(monkeypatch):
     assert captured["user_agent"]
     assert "Python-urllib" not in captured["user_agent"]
     assert "Mozilla" in captured["user_agent"]
+
+
+def test_source_failure_is_isolated_and_other_sources_still_import(
+    tmp_path,
+    monkeypatch,
+):
+    import job_agent.source_config as source_config
+
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {"type": "greenhouse", "board_token": "unavailable"},
+                    {"type": "greenhouse", "board_token": "healthy"},
+                ]
+            }
+        )
+    )
+
+    def fake_read_json(_base_dir, item, _default_url):
+        if item["board_token"] == "unavailable":
+            raise URLError("timed out")
+        return {
+            "jobs": [
+                {
+                    "title": "Software Engineer I",
+                    "absolute_url": "https://boards.greenhouse.io/healthy/jobs/1",
+                    "location": {"name": "New York, NY"},
+                    "content": "Build software.",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(source_config, "_read_json", fake_read_json)
+
+    with pytest.warns(RuntimeWarning, match="Skipping greenhouse source unavailable"):
+        jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.title for job in jobs] == ["Software Engineer I"]

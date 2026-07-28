@@ -2,14 +2,14 @@
 
 A pre-filled, user-approved bank for sensitive application fields (work
 authorization, sponsorship, salary, relocation, start date, EEO/demographic,
-disability, veteran, legal attestation). The user fills it once and marks each
-entry ``approved: true``; the form fillers then auto-fill those fields instead
-of leaving them for manual review.
+disability, veteran, citizenship, security clearance, legal attestation). The
+user fills it once and marks each entry ``approved: true``; the form fillers
+then auto-fill those fields instead of leaving them for manual review.
 
-Safety contract (matches the PEAS design):
+Safety contract:
 - A sensitive field is auto-filled ONLY when the KB has an ``approved`` answer
   whose label patterns match the field. That approval IS the user's explicit
-  confirmation the PEAS "sensitive-field gate" requires.
+  confirmation required by the sensitive-field policy gate.
 - Unmatched or unapproved sensitive fields stay review-required.
 """
 
@@ -62,7 +62,7 @@ SENSITIVE_FIELD_DEFS: list[dict[str, Any]] = [
     {
         "key": "eeo_race",
         "label": "EEO: Race/Ethnicity",
-        "patterns": ["race", "ethnicity"],
+        "patterns": ["race", "ethnicity", "hispanic", "latino", "hispanic/latino"],
         "example": "Prefer not to say",
     },
     {
@@ -78,9 +78,45 @@ SENSITIVE_FIELD_DEFS: list[dict[str, Any]] = [
         "example": "I am not a veteran",
     },
     {
+        "key": "citizenship",
+        "label": "Citizenship",
+        "patterns": ["citizen", "citizenship", "us citizen", "u s citizen"],
+        "example": "Needs review",
+    },
+    {
+        "key": "security_clearance",
+        "label": "Security Clearance",
+        "patterns": ["security clearance", "clearance", "active clearance"],
+        "example": "Needs review",
+    },
+    {
         "key": "legal_attestation",
         "label": "Legal Attestation",
-        "patterns": ["legal attestation", "i attest", "i certify", "background check", "i authorize"],
+        "patterns": [
+            "legal attestation",
+            "i attest",
+            "i certify",
+            "i hereby certify",
+            "true and correct",
+            "background check",
+            "i authorize",
+            "arbitration agreement",
+            "agreement acknowledgement",
+            "agreement acknowledgment",
+        ],
+        "example": "Yes",
+    },
+    {
+        "key": "privacy_consent",
+        "label": "Privacy / AI Notetaker Consent",
+        "patterns": [
+            "privacy policy",
+            "personal data",
+            "process your personal data",
+            "ai notetaker",
+            "ai notetakers",
+            "transcribe conversations",
+        ],
         "example": "Yes",
     },
 ]
@@ -93,6 +129,183 @@ def normalize(text: str) -> str:
         .replace("\n", " ")
         .strip()
     ).replace("  ", " ")
+
+
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "be",
+    "do",
+    "for",
+    "i",
+    "in",
+    "is",
+    "of",
+    "or",
+    "the",
+    "to",
+    "you",
+    "your",
+}
+
+_SENSITIVE_STEMS = {
+    "attest",
+    "authoriz",
+    "background",
+    "certif",
+    "citizen",
+    "compensat",
+    "acknowledg",
+    "arbitrat",
+    "consent",
+    "disab",
+    "eligib",
+    "ethnic",
+    "gender",
+    "hispanic",
+    "legal",
+    "latino",
+    "pay",
+    "privacy",
+    "race",
+    "relocat",
+    "salary",
+    "sex",
+    "sponsor",
+    "transcrib",
+    "notetak",
+    "veteran",
+    "visa",
+    "work",
+}
+
+_SINGLE_TOKEN_MATCH_STEMS = _SENSITIVE_STEMS - {"eligib", "legal", "work"}
+
+
+def _stem_token(token: str) -> str:
+    token = token.lower()
+    for prefix, stem in [
+        ("authoriz", "authoriz"),
+        ("sponsor", "sponsor"),
+        ("relocat", "relocat"),
+        ("compensat", "compensat"),
+        ("eligib", "eligib"),
+        ("certif", "certif"),
+        ("attest", "attest"),
+        ("disab", "disab"),
+        ("ethnic", "ethnic"),
+    ]:
+        if token.startswith(prefix):
+            return stem
+    for suffix in ["ation", "ions", "ing", "ed", "es", "s"]:
+        if len(token) > len(suffix) + 3 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _meaningful_tokens(text: str) -> set[str]:
+    country_tokens = {"u", "s", "us", "usa", "united", "states"}
+    return {
+        _stem_token(token)
+        for token in normalize(text).split()
+        if token and token not in _STOPWORDS and token not in country_tokens
+    }
+
+
+def _country_markers(text: str) -> set[str]:
+    normalized = f" {normalize(text)} "
+    markers: set[str] = set()
+    if any(token in normalized for token in [" united states ", " usa ", " u s a ", " u s ", " us "]):
+        markers.add("us")
+    if " canada " in normalized or " canadian " in normalized:
+        markers.add("canada")
+    if any(token in normalized for token in [" united kingdom ", " uk ", " u k ", " british ", " britain "]):
+        markers.add("uk")
+    return markers
+
+
+def _sensitive_pattern_matches(label: str, pattern: str) -> bool:
+    label_norm = normalize(label)
+    pattern_norm = normalize(pattern)
+    if not label_norm or not pattern_norm:
+        return False
+    label_countries = _country_markers(label_norm)
+    pattern_countries = _country_markers(pattern_norm)
+    if pattern_countries:
+        if not label_countries:
+            return False
+        if label_countries.isdisjoint(pattern_countries):
+            return False
+    if pattern_norm in label_norm or label_norm in pattern_norm:
+        return True
+
+    label_tokens = _meaningful_tokens(label_norm)
+    pattern_tokens = _meaningful_tokens(pattern_norm)
+    if not label_tokens or not pattern_tokens:
+        return False
+    for exclusive_stem in {"citizen", "sponsor"}:
+        if exclusive_stem in pattern_tokens and exclusive_stem not in label_tokens:
+            return False
+    clearance_tokens = {"security", "clearance", "ts", "sci"}
+    if pattern_tokens & clearance_tokens and not label_tokens & clearance_tokens:
+        return False
+    if {"apply", "maintain"} <= pattern_tokens and not label_tokens & clearance_tokens:
+        return False
+    authorization_tokens = {"authoriz", "eligible", "legal", "right"}
+    if pattern_tokens & authorization_tokens and not label_tokens & authorization_tokens:
+        return False
+    if "background" in pattern_tokens and "check" in pattern_tokens and not (
+        "check" in label_tokens or "screen" in label_tokens or "screening" in label_tokens or "verif" in label_tokens
+    ):
+        return False
+    visa_type_tokens = {"opt", "h1b", "tn"}
+    if pattern_tokens & visa_type_tokens and not label_tokens & visa_type_tokens:
+        return False
+    # A broad future-sponsorship question can mention a visa without asking
+    # for the candidate's visa *type*. Do not let a generic "visa type"
+    # pattern override the approved Yes/No sponsorship answer in that case.
+    visa_type_context_tokens = {"type", "status", "which", "kind"}
+    if pattern_tokens & visa_type_context_tokens and not label_tokens & visa_type_context_tokens:
+        return False
+    # A pattern that is only about a visa type should not match a generic
+    # sponsorship Yes/No question.
+    if pattern_tokens & visa_type_tokens and not pattern_tokens & visa_type_context_tokens:
+        if ("sponsor" in label_tokens or "require" in label_tokens) and "type" not in label_tokens:
+            return False
+    if pattern_tokens <= label_tokens or label_tokens <= pattern_tokens:
+        return True
+
+    common = label_tokens & pattern_tokens
+    if len(common) >= 2:
+        if "top" in pattern_tokens and "top" not in label_tokens:
+            return False
+        return bool(common & _SENSITIVE_STEMS)
+    return bool(common & _SINGLE_TOKEN_MATCH_STEMS)
+
+
+def _entry_priority(key: str, entry: dict[str, Any]) -> tuple[int, int]:
+    """Prefer specific eligibility/identity answers over broad preferences."""
+    specific_keys = {
+        "citizenship",
+        "active_security_clearance",
+        "security_clearance_eligibility",
+        "security_clearance",
+        "sponsorship_type",
+        "hispanic_or_latino",
+        "terms_consent",
+        "ai_notetaker_consent",
+    }
+    broad_preference_keys = {"security_clearance_interest"}
+    if key in specific_keys:
+        group = 0
+    elif key in broad_preference_keys:
+        group = 2
+    else:
+        group = 1
+    longest_pattern = max((len(str(pattern)) for pattern in entry.get("patterns", []) if pattern), default=0)
+    return (group, -longest_pattern)
 
 
 def render_sensitive_kb_template() -> dict[str, dict[str, Any]]:
@@ -131,13 +344,15 @@ def match_sensitive_answer(label: str, kb: dict[str, Any]) -> str | None:
     if not kb or not label:
         return None
     n = normalize(label)
-    for entry in kb.values():
-        if not isinstance(entry, dict):
-            continue
+    entries = sorted(
+        ((str(key), entry) for key, entry in kb.items() if isinstance(entry, dict)),
+        key=lambda item: _entry_priority(item[0], item[1]),
+    )
+    for _key, entry in entries:
         if not entry.get("approved") or not entry.get("answer"):
             continue
-        patterns = [normalize(p) for p in entry.get("patterns", []) if p]
-        if patterns and any(p and p in n for p in patterns):
+        patterns = [str(p) for p in entry.get("patterns", []) if p]
+        if patterns and any(_sensitive_pattern_matches(n, p) for p in patterns):
             return str(entry["answer"])
     return None
 
@@ -145,14 +360,15 @@ def match_sensitive_answer(label: str, kb: dict[str, Any]) -> str | None:
 def merge_legacy_sensitive(profile: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Build a KB view from legacy flat profile fields for backward compat."""
     legacy = {
-        "work_authorization": ["authorized to work", "work authorization", "legally authorized"],
-        "sponsorship": ["sponsorship", "sponsor", "visa"],
-        "salary": ["salary", "compensation"],
+        item["key"]: list(item["patterns"])
+        for item in SENSITIVE_FIELD_DEFS
     }
     out: dict[str, dict[str, Any]] = {}
     for key, patterns in legacy.items():
         value = profile.get(key)
-        if value and str(value).strip() and str(value).strip().lower() != "needs review":
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
+        if value and str(value).strip().lower() not in {"needs review", "n/a", "na", "tbd"}:
             out[key] = {"patterns": patterns, "answer": str(value), "approved": True}
     return out
 

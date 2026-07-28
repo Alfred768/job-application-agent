@@ -9,5 +9,5 @@ def test_render_markdown_review_includes_submit_boundary():
     markdown = render_markdown_review(job, score_fit(job))
 
     assert "# Application Review" in markdown
-    assert "Final Submit remains manual" in markdown
+    assert "Automatically submit only when all required fields are truthfully resolved" in markdown
     assert "Acme" in markdown

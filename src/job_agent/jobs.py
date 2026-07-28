@@ -28,13 +28,29 @@ def _field_from_text(text: str, label: str) -> str | None:
     return None
 
 
+def _fallback_title_from_text(text: str) -> str | None:
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first_line or ":" in first_line or len(first_line) > 140:
+        return None
+    if re.search(
+        r"\b(?:engineer|developer|scientist|architect|researcher|analyst|manager|designer)\b",
+        first_line,
+        flags=re.IGNORECASE,
+    ):
+        return first_line
+    return None
+
+
 def import_job_from_text(text: str) -> Job:
     return Job(
-        title=_field_from_text(text, "Title") or "Unknown Role",
+        title=_field_from_text(text, "Title") or _fallback_title_from_text(text) or "Unknown Role",
         company=_field_from_text(text, "Company") or "Unknown Company",
         location=_field_from_text(text, "Location"),
         raw_jd=text,
-        source="manual",
+        source=_field_from_text(text, "Source") or "manual",
+        source_url=_field_from_text(text, "Source URL"),
+        apply_url=_field_from_text(text, "Apply URL"),
+        remote_policy=_field_from_text(text, "Remote Policy"),
     )
 
 
@@ -109,7 +125,9 @@ def parse_greenhouse_jobs(payload: dict[str, Any], board_token: str, limit: int 
             break
         location = item.get("location") or {}
         location_name = location.get("name") if isinstance(location, dict) else None
-        url = item.get("absolute_url")
+        job_id = item.get("id")
+        source_url = item.get("absolute_url")
+        embed_url = f"https://job-boards.greenhouse.io/{board_token}/jobs/{job_id}" if job_id else source_url
         jobs.append(
             Job(
                 title=item.get("title") or "Unknown Role",
@@ -117,8 +135,8 @@ def parse_greenhouse_jobs(payload: dict[str, Any], board_token: str, limit: int 
                 location=location_name,
                 raw_jd=_clean_text(item.get("content")) or item.get("title") or "",
                 source=f"greenhouse:{board_token}",
-                source_url=url,
-                apply_url=url,
+                source_url=source_url,
+                apply_url=embed_url,
             )
         )
     return jobs
@@ -141,6 +159,36 @@ def parse_lever_jobs(payload: list[dict[str, Any]], site: str, limit: int | None
                 raw_jd=_clean_text(description) or item.get("text") or "",
                 source=f"lever:{site}",
                 source_url=url,
+                apply_url=url,
+                remote_policy=item.get("workplaceType"),
+            )
+        )
+    return jobs
+
+
+def parse_ashby_jobs(payload: dict[str, Any], organization: str, limit: int | None = None) -> list[Job]:
+    jobs: list[Job] = []
+    for item in payload.get("jobs", []):
+        if limit is not None and len(jobs) >= limit:
+            break
+        location = item.get("location")
+        if not location and isinstance(item.get("address"), dict):
+            postal = item.get("address", {}).get("postalAddress") or {}
+            parts = [
+                postal.get("addressLocality"),
+                postal.get("addressRegion"),
+                postal.get("addressCountry"),
+            ]
+            location = ", ".join(str(part) for part in parts if part) or None
+        url = item.get("applyUrl") or item.get("jobUrl")
+        jobs.append(
+            Job(
+                title=item.get("title") or "Unknown Role",
+                company=organization,
+                location=location,
+                raw_jd=_clean_text(item.get("descriptionHtml")) or item.get("title") or "",
+                source=f"ashby:{organization}",
+                source_url=item.get("jobUrl") or url,
                 apply_url=url,
                 remote_policy=item.get("workplaceType"),
             )
@@ -173,12 +221,32 @@ def _normalized_text(value: str | None) -> str:
     return " ".join((value or "").casefold().split())
 
 
-def _canonical_job_url(value: str | None) -> str | None:
+def canonical_job_url(value: str | None) -> str | None:
     if not value:
         return None
     parts = urlsplit(value.strip())
     if not parts.netloc:
         return value.strip().rstrip("/")
+    greenhouse_job_id = next(
+        (
+            item_value.strip()
+            for key, item_value in parse_qsl(parts.query, keep_blank_values=True)
+            if key.casefold() == "gh_jid" and re.fullmatch(r"\d+", item_value.strip())
+        ),
+        None,
+    )
+    host = parts.netloc.casefold().split("@")[-1].split(":")[0]
+    if greenhouse_job_id is None and host.endswith(".greenhouse.io"):
+        match = re.search(r"/jobs/(\d+)(?:/|$)", parts.path, flags=re.IGNORECASE)
+        if match:
+            greenhouse_job_id = match.group(1)
+    if greenhouse_job_id:
+        return f"https://job-boards.greenhouse.io/jobs/{greenhouse_job_id}"
+    if host in {"jobs.lever.co", "jobs.eu.lever.co"}:
+        segments = [segment for segment in parts.path.split("/") if segment]
+        if len(segments) >= 2:
+            company, requisition_id = segments[:2]
+            return f"https://{host}/{company.casefold()}/{requisition_id}"
     query = urlencode(
         sorted(
             (key, item_value)
@@ -192,7 +260,7 @@ def _canonical_job_url(value: str | None) -> str | None:
 
 
 def _job_identity(job: Job) -> tuple[str, ...]:
-    canonical_url = _canonical_job_url(job.apply_url or job.source_url)
+    canonical_url = canonical_job_url(job.apply_url or job.source_url)
     if canonical_url:
         return ("url", canonical_url)
     return (

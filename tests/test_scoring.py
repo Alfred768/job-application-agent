@@ -20,3 +20,48 @@ def test_score_fit_returns_explainable_result():
     assert score.score >= 70
     assert score.role_track == "ML Infra"
     assert score.reasons
+
+
+def test_classify_software_engineer_ml_infrastructure_title_as_ml_infra():
+    job = import_job_from_text(
+        "Title: Software Engineer, ML Infrastructure, Optimization\n\n"
+        "Build model lifecycle infrastructure, optimization tooling, and PyTorch workflows."
+    )
+
+    assert classify_role(job) == "ML Infra"
+
+
+def test_classify_algorithm_software_engineer_title_as_ai_algorithm():
+    job = import_job_from_text(
+        "Title: New Grads 2026 - Software Engineer, Algorithm\n\n"
+        "Design prediction, planning, mapping, and simulation algorithms for autonomous driving."
+    )
+
+    assert classify_role(job) == "AI Algorithm Engineer"
+
+
+def test_classify_role_prefers_explicit_ml_engineer_title_over_agentic_body_terms():
+    job = import_job_from_text(
+        "Title: Machine Learning Engineer\n\n"
+        "Build AI features with LLM applications, agentic workflow optimization, "
+        "experimentation, reliability, and Python."
+    )
+
+    assert classify_role(job) == "MLE"
+
+
+def test_classify_role_does_not_select_engineering_resume_track_for_gtm_operations_title():
+    job = import_job_from_text(
+        "Title: Marketing Ops AI Agent Engineer\n\nBuild LangChain agents and RAG workflows."
+    )
+
+    assert classify_role(job) == "Other"
+    assert score_fit(job).score == 20
+
+
+def test_classify_research_engineer_machine_learning_as_mle():
+    job = import_job_from_text(
+        "Title: Research Engineer, Machine Learning\n\nBuild agentic ML systems."
+    )
+
+    assert classify_role(job) == "MLE"

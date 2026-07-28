@@ -1,8 +1,15 @@
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from job_agent.resume_plans import propose_resume_edit_plan, render_tailored_resume_draft
-from job_agent.resumes import extract_resume_text, index_resume_templates, infer_track_from_filename
+from job_agent.models import ResumeTemplate
+from job_agent.resumes import (
+    ResumePathError,
+    extract_resume_text,
+    index_resume_templates,
+    infer_track_from_filename,
+    resolve_original_resume_pdf,
+    select_best_resume_template,
+)
 
 
 def write_minimal_docx(path: Path, paragraphs: list[str]) -> None:
@@ -24,7 +31,7 @@ def test_infer_track_from_known_resume_names():
     assert infer_track_from_filename("GAOYI_WU_Data_Scientist.pdf") == "Data Scientist"
 
 
-def test_index_resume_templates_pairs_docx_and_pdf(tmp_path):
+def test_index_resume_templates_reads_pdf_resumes_only(tmp_path):
     (tmp_path / "GAOYI_WU_Agent_Engineer.docx").write_text("docx")
     (tmp_path / "GAOYI_WU_Agent_Engineer.pdf").write_text("pdf")
 
@@ -32,8 +39,55 @@ def test_index_resume_templates_pairs_docx_and_pdf(tmp_path):
 
     assert len(templates) == 1
     assert templates[0].track == "Agent Engineer"
-    assert templates[0].docx_path == Path(tmp_path / "GAOYI_WU_Agent_Engineer.docx")
+    assert templates[0].docx_path is None
     assert templates[0].pdf_path == Path(tmp_path / "GAOYI_WU_Agent_Engineer.pdf")
+
+
+def test_resolve_original_resume_pdf_requires_source_dir_membership(tmp_path):
+    source_dir = tmp_path / "resumes"
+    source_dir.mkdir()
+    selected = source_dir / "GAOYI_WU_SDE.pdf"
+    selected.write_bytes(b"%PDF-1.4\nsource")
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"%PDF-1.4\noutside")
+
+    assert resolve_original_resume_pdf(selected, source_dir=source_dir) == selected.resolve()
+    try:
+        resolve_original_resume_pdf(outside, source_dir=source_dir)
+    except ResumePathError as exc:
+        assert "must come from required resume source dir" in str(exc)
+    else:
+        raise AssertionError("source-dir outsider must be rejected")
+
+
+def test_resolve_original_resume_pdf_rejects_package_local_generated_pdf(tmp_path):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    generated = package_dir / "tailored-resume.pdf"
+    generated.write_bytes(b"%PDF-1.4\ngenerated")
+
+    try:
+        resolve_original_resume_pdf(generated, package_dir=package_dir)
+    except ResumePathError as exc:
+        assert "not package-local" in str(exc)
+    else:
+        raise AssertionError("package-local generated resume PDF must be rejected")
+
+
+def test_resolve_original_resume_pdf_requires_exact_pdf_when_specified(tmp_path):
+    source_dir = tmp_path / "resumes"
+    source_dir.mkdir()
+    required = source_dir / "GAOYI_WU_MLE.pdf"
+    required.write_bytes(b"%PDF-1.4\nrequired")
+    other = source_dir / "GAOYI_WU_SDE.pdf"
+    other.write_bytes(b"%PDF-1.4\nother")
+
+    try:
+        resolve_original_resume_pdf(other, source_dir=source_dir, required_pdf=required)
+    except ResumePathError as exc:
+        assert "does not match required path" in str(exc)
+    else:
+        raise AssertionError("non-required source PDF must be rejected when an exact PDF is required")
 
 
 def test_extract_resume_text_reads_docx_paragraphs(tmp_path):
@@ -49,28 +103,54 @@ def test_extract_resume_text_reads_docx_paragraphs(tmp_path):
     assert "FastAPI and LangChain" in text
 
 
-def test_index_resume_templates_populates_parsed_text_from_docx(tmp_path):
-    docx_path = tmp_path / "GAOYI_WU_Agent_Engineer.docx"
-    write_minimal_docx(docx_path, ["Agent Engineer resume", "Built RAG workflows."])
+def test_select_best_resume_template_prefers_actual_jd_evidence_over_filename_track():
+    templates = [
+        ResumeTemplate(track="MLE", pdf_path=Path("mle.pdf"), parsed_text="Experience with PyTorch."),
+        ResumeTemplate(track="AI Algorithm Engineer", pdf_path=Path("ai.pdf"), parsed_text="Python and PyTorch model training."),
+    ]
 
-    templates = index_resume_templates(tmp_path)
+    selected = select_best_resume_template(
+        templates,
+        target_track="MLE",
+        required_skills=["Python", "PyTorch"],
+    )
 
-    assert templates[0].parsed_text is not None
-    assert "Built RAG workflows." in templates[0].parsed_text
+    assert selected is templates[1]
 
 
-def test_render_tailored_resume_draft_inserts_only_supported_keywords():
-    jd = "Title: Agent Engineer\n\nBuild LangChain agents with FastAPI, RAG, and Rust."
-    plan = propose_resume_edit_plan(jd, resume_track="Agent Engineer")
-    base_resume = "Gaoyi Wu\n\nBuilt LLM workflow tools with Python and FastAPI."
+def test_select_best_resume_template_uses_closest_pdf_when_track_does_not_match():
+    templates = [
+        ResumeTemplate(track="SDE", pdf_path=Path("backend.pdf"), parsed_text="Python FastAPI Postgres"),
+        ResumeTemplate(track="MLE", pdf_path=Path("ml.pdf"), parsed_text="PyTorch MLflow"),
+    ]
 
-    draft = render_tailored_resume_draft(base_resume, plan)
+    selected = select_best_resume_template(
+        templates,
+        target_track="Agent Engineer",
+        required_skills=["Python", "FastAPI"],
+    )
 
-    assert "# Tailored Resume Draft" in draft
-    assert "Target track: Agent Engineer" in draft
-    assert "LangChain" in draft
-    assert "FastAPI" in draft
-    supported_section = draft.split("## Review Required", 1)[0]
-    assert "Rust" not in supported_section
-    assert "Unsupported JD keywords not inserted: Rust" in draft
-    assert base_resume in draft
+    assert selected is templates[0]
+
+
+def test_select_best_resume_template_uses_target_track_keywords_for_ml_infra():
+    templates = [
+        ResumeTemplate(
+            track="AI Algorithm Engineer",
+            pdf_path=Path("ai.pdf"),
+            parsed_text="Python and PyTorch model training.",
+        ),
+        ResumeTemplate(
+            track="ML Infra",
+            pdf_path=Path("ml-infra.pdf"),
+            parsed_text="Python Kubernetes MLflow infrastructure serving Docker platform.",
+        ),
+    ]
+
+    selected = select_best_resume_template(
+        templates,
+        target_track="ML Infra",
+        required_skills=["Python", "PyTorch"],
+    )
+
+    assert selected is templates[1]

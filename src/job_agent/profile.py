@@ -44,11 +44,14 @@ class RichProfile:
     email: str = ""
     phone: str = ""
     location: str = ""
+    country: str = ""
     linkedin: str = ""
     github: str = ""
     portfolio: str = ""
     website: str = ""
     cover_letter: str = ""
+    name_pronunciation: str = ""
+    years_experience: str = ""
     skills: list[str] = field(default_factory=list)
     work_history: list[WorkEntry] = field(default_factory=list)
     education: list[EducationEntry] = field(default_factory=list)
@@ -68,11 +71,15 @@ def _split_sections(text: str) -> dict[str, list[str]]:
         "objective": "summary",
         "skills": "skills",
         "technical skills": "skills",
+        "technical skill": "skills",
         "experience": "experience",
+        "professional experience": "experience",
         "work experience": "experience",
         "employment": "experience",
         "education": "education",
         "projects": "projects",
+        "project experience": "projects",
+        "publications": "publications",
     }
     sections: dict[str, list[str]] = {}
     current = "header"
@@ -81,7 +88,9 @@ def _split_sections(text: str) -> dict[str, list[str]]:
         line = raw.strip()
         if not line:
             continue
-        key = section_keys.get(line.lower())
+        normalized = re.sub(r"[^a-z ]", " ", line.lower())
+        normalized = " ".join(normalized.split())
+        key = section_keys.get(normalized)
         if key:
             current = key
             sections.setdefault(current, [])
@@ -119,6 +128,17 @@ def _parse_contact(header_lines: list[str]) -> dict[str, str]:
 
 
 def _parse_title_company(line: str) -> tuple[str, str]:
+    if " | " in line:
+        left, right = line.split(" | ", 1)
+        date_match = re.search(
+            r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec|Present|\d{4})\b.*$",
+            right,
+            flags=re.IGNORECASE,
+        )
+        if date_match:
+            title = right[: date_match.start()].strip(" ,-")
+            if title:
+                return title, left.strip()
     for sep in [" — ", " – ", " at ", " - ", " | "]:
         if sep in line:
             role, company = line.split(sep, 1)
@@ -159,7 +179,8 @@ def parse_resume_to_profile(resume_text: str) -> RichProfile:
 
     skills: list[str] = []
     for line in sections.get("skills", []):
-        skills.extend(s.strip() for s in re.split(r"[,;•]", line) if s.strip())
+        skill_line = line.split(":", 1)[1] if ":" in line else line
+        skills.extend(s.strip() for s in re.split(r"[,;•]", skill_line) if s.strip())
 
     work = _parse_work_experience(sections.get("experience", []))
     edu = _parse_education(sections.get("education", []))
@@ -184,11 +205,14 @@ def render_profile_template() -> dict[str, Any]:
         "email": "",
         "phone": "",
         "location": "",
+        "country": "",
         "linkedin": "",
         "github": "",
         "portfolio": "",
         "website": "",
         "cover_letter": "",
+        "name_pronunciation": "",
+        "years_experience": "",
         "skills": [],
         "work_history": [
             {"title": "", "company": "", "location": "", "start_date": "", "end_date": "", "current": False, "description": ""}
@@ -196,7 +220,13 @@ def render_profile_template() -> dict[str, Any]:
         "education": [
             {"school": "", "degree": "", "field": "", "start_date": "", "end_date": "", "gpa": ""}
         ],
-        "demographics": {"gender": "Prefer not to say", "race": "Prefer not to say", "disability": "Prefer not to say", "veteran": "Prefer not to say"},
+        "demographics": {
+            "gender": "Prefer not to say",
+            "ethnicity": "Prefer not to say",
+            "race": "Prefer not to say",
+            "disability": "Prefer not to say",
+            "veteran": "Prefer not to say",
+        },
         "answers": {},
         "sensitive_answers": {},
     }

@@ -1,4 +1,4 @@
-"""Submit safety gate tool."""
+"""Automatic submission policy tool."""
 
 from __future__ import annotations
 
@@ -8,18 +8,18 @@ from hello_agents.tools.base import Tool, ToolParameter
 
 
 class SubmitGateTool(Tool):
-    """Hard gate that prevents ordinary browser applications from auto-submitting."""
+    """Describe when an application may be submitted automatically."""
 
     def __init__(self):
         super().__init__(
             name="submit_gate",
-            description="Enforce human confirmation before final Submit on browser applications.",
+            description="Allow final Submit when all required answers are resolved truthfully.",
         )
 
     def run(self, parameters: dict[str, Any]) -> str:
         return (
-            "Final Submit remains manual unless an allowed source-specific adapter "
-            "explicitly permits auto-submit."
+            "Automatic final submission is enabled when all required fields have "
+            "truthful answers and no blocking review fields remain."
         )
 
     def get_parameters(self) -> list[ToolParameter]:

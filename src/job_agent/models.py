@@ -11,6 +11,11 @@ class ResumeTemplate:
     pdf_path: Path | None = None
     parsed_text: str | None = None
 
+    @property
+    def upload_path(self) -> Path | None:
+        """Only original PDF resumes are eligible for ATS upload."""
+        return self.pdf_path
+
 
 @dataclass(frozen=True)
 class Job:

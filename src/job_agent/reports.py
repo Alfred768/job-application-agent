@@ -36,7 +36,7 @@ def render_markdown_review(job: Job, score: FitScore) -> str:
             "",
             "- Use compliant job sources only.",
             "- Preserve truthful resume evidence.",
-            "- Final Submit remains manual unless an allowed source-specific adapter says otherwise.",
+            "- Automatically submit only when all required fields are truthfully resolved.",
             "",
         ]
     )
