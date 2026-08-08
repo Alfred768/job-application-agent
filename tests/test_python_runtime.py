@@ -22,6 +22,19 @@ def test_self_heal_passes_defaults_and_clamps(monkeypatch):
     assert python_runtime._self_heal_passes() == 3
 
 
+def test_watchdog_process_discovery_finds_playwright_driver(monkeypatch):
+    child = _FakeProcess(4242, "/x/playwright/driver/package/cli.js run-driver")
+    python_runtime._direct_child_pids = lambda pid: [4242]
+    python_runtime._process_command_line = lambda pid: child.command
+    assert python_runtime._playwright_driver_pids() == [4242]
+
+
+class _FakeProcess:
+    def __init__(self, pid, command):
+        self.pid = pid
+        self.command = command
+
+
 def test_captcha_result_blocks_submission_for_unsupported_or_error():
     assert python_runtime._captcha_result_blocks_submission({"status": "unsupported", "detail": "hcaptcha"})
     assert python_runtime._captcha_result_blocks_submission({"status": "error", "detail": "provider error"})
@@ -262,7 +275,14 @@ def test_plan_field_blocks_external_application_portal_instruction():
         "required": True,
     }
 
-    assert python_runtime._plan_field(field, {"answers": {}}, None) == {
+    assert python_runtime._plan_field(
+        field,
+        {
+            "answers": {},
+            "personal_us_company_employment_history": "Never worked for a United States company.",
+        },
+        None,
+    ) == {
         "action": "skip",
         "reason": "external application portal required",
         "sensitive": False,
@@ -2502,9 +2522,40 @@ def test_contractor_consultant_prior_engagement_screening_defaults_to_no():
         "options": ["Yes", "No"],
     }
 
-    assert python_runtime._plan_field(field, {"answers": {}}, None) == {
+    assert python_runtime._plan_field(
+        field,
+        {
+            "answers": {},
+            "personal_us_company_employment_history": "Never worked for a United States company.",
+        },
+        None,
+    ) == {
         "action": "check",
         "option": "No",
+    }
+
+
+def test_company_specific_contract_work_screening_defaults_to_no():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "label": (
+            "Have you ever provided any contract work for Block, Inc. or any "
+            "of its subsidiaries or affiliates?*"
+        ),
+        "required": True,
+        "options": ["Select...", "Yes", "No"],
+    }
+    assert python_runtime._plan_field(
+        field,
+        {
+            "answers": {},
+            "personal_us_company_employment_history": "Never worked for a United States company.",
+        },
+        None,
+    ) == {
+        "action": "select",
+        "value": "No",
     }
 
 
@@ -4132,6 +4183,50 @@ def test_captcha_solution_detail_redacts_greenhouse_embed_tokens():
     assert "secret" not in detail
 
 
+
+def test_restore_native_recaptcha_clears_patched_api():
+    class CapturePage:
+        def __init__(self):
+            self.eval_scripts = []
+
+        def evaluate(self, script):
+            self.eval_scripts.append(str(script))
+            return True
+
+    page = CapturePage()
+    assert python_runtime._restore_native_recaptcha(page, {"kind": "recaptchaV3Enterprise"}) is True
+    assert len(page.eval_scripts) == 1
+    assert "__jobAgentRestoreRecaptchaApi" in page.eval_scripts[0]
+
+
+def test_restore_native_recaptcha_skips_non_recaptcha():
+    class CapturePage:
+        def __init__(self):
+            self.eval_scripts = []
+
+        def evaluate(self, script):
+            self.eval_scripts.append(str(script))
+            return True
+
+    page = CapturePage()
+    assert python_runtime._restore_native_recaptcha(page, {"kind": "hcaptcha"}) is False
+    assert len(page.eval_scripts) == 0
+
+
+def test_restore_native_recaptcha_passes_sitekey_and_action():
+    class CapturePage:
+        def __init__(self):
+            self.eval_scripts = []
+
+        def evaluate(self, script):
+            self.eval_scripts.append(str(script))
+            return True
+
+    page = CapturePage()
+    assert python_runtime._restore_native_recaptcha(page, {"kind": "recaptchaV3"}) is True
+    assert len(page.eval_scripts) == 1
+    assert "__jobAgentRestoreRecaptchaApi" in page.eval_scripts[0]
+
 def test_safe_evidence_url_drops_query_and_redacts_workday_activation():
     assert (
         python_runtime._safe_evidence_url(
@@ -4572,11 +4667,65 @@ def test_optional_demographic_decline_is_left_unselected():
 def test_east_asian_race_does_not_match_hispanic_option():
     assert not python_runtime._option_matches("Hispanic or Latino", "East Asian")
     assert python_runtime._option_matches("Asian (Not Hispanic or Latino)", "East Asian")
+    assert python_runtime._option_matches("East Asian (inclusive of Chinese, Japanese, Korean, Mongolian, Tibetan, and Taiwanese)", "East Asian")
     assert python_runtime._option_matches("Asian", "East Asian")
     assert python_runtime._option_matches("East Asian", "East Asian")
     assert not python_runtime._option_matches("South Asian", "East Asian")
     assert not python_runtime._option_matches("Southeast Asian", "East Asian")
     assert not python_runtime._option_matches("White or Caucasian", "East Asian")
+
+
+def test_work_authorization_dropdown_label_noise_resolves_to_sponsorship_answer():
+    profile = {
+        "target_company": "waymo",
+        "work_authorization_by_country": {"requires_sponsorship": "Yes"},
+        "sensitive_answers": {
+            "work_authorization_current_country": {
+                "patterns": ["authorized to work in the country for which you are applying"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+    answer = python_runtime._work_authorization_dropdown_answer(
+        "Work Authorization\n    (required)\n  \n  ed0fa5ad",
+        profile,
+    )
+    assert "require" in answer and "waymo" in answer
+    option = (
+        "I require, or in the future will require, Waymo's sponsorship to obtain "
+        "work authorization in the country in which this position is based (e.g. H-1B, TN, etc.)"
+    )
+    assert python_runtime._option_matches(option, answer)
+
+
+def test_option_token_containment_never_matches_negated_statement():
+    answer = (
+        "I require/will require Waymo's sponsorship to obtain work authorization "
+        "in the country in which this position is based"
+    )
+    assert python_runtime._option_matches(
+        "I do not require Waymo's sponsorship to obtain work authorization "
+        "in the country in which this position is based",
+        answer,
+    ) is False
+    assert python_runtime._option_matches(
+        "I require, or in the future will require, Waymo's sponsorship to obtain "
+        "work authorization in the country in which this position is based (e.g. H-1B, TN, etc.)",
+        answer,
+    ) is True
+
+
+def test_last_time_wrote_code_professionally_uses_bounded_combobox_answer():
+    profile = {"answers": {}, "demographics": {}, "sensitive_answers": {}}
+    assert python_runtime._priority_auto_answer(
+        "When was the last time you wrote code professionally?",
+        profile,
+    ) == "Within the last 6 months"
+    assert python_runtime._priority_auto_answer(
+        "In your current/recent role, do you regularly read and understand code written by other engineers?",
+        profile,
+    ) == "Yes"
 
 
 def test_single_radio_field_uses_check_instead_of_text_fill():
@@ -4591,6 +4740,25 @@ def test_single_radio_field_uses_check_instead_of_text_fill():
     }
 
     assert python_runtime._plan_field(field, profile, None) == {"action": "check"}
+
+
+def test_required_additional_information_is_not_skipped_as_optional():
+    profile = {
+        "answers": {"Additional Information*": "Here is a short additional note."},
+        "sensitive_answers": {},
+    }
+    field = {
+        "kind": "single",
+        "tag": "textarea",
+        "type": "textarea",
+        "label": "Additional Information*",
+        "required": True,
+        "options": [],
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan == {"action": "fill", "value": "Here is a short additional note."}
 
 
 def test_recover_text_fill_locator_rebinds_radio_marker_to_editable_control():
@@ -6351,6 +6519,18 @@ def test_detect_submission_confirmation_accepts_nuro_success_copy():
 def test_short_no_does_not_match_inside_unrelated_words():
     assert not python_runtime._option_matches("One-North, Singapore", "No")
     assert python_runtime._option_matches("I'm not open to other locations", "No")
+
+
+def test_no_matches_verbose_never_employed_option_phrases():
+    assert python_runtime._option_matches(
+        "I have not previously been employed at Affirm", "No"
+    )
+    assert python_runtime._option_matches(
+        "I have never been employed at Affirm", "No"
+    )
+    assert not python_runtime._option_matches(
+        "I have been employed at Affirm as a full-time employee", "No"
+    )
 
 
 def test_binary_yes_answer_matches_single_affirmative_sentence_option():
@@ -8697,6 +8877,46 @@ def test_greenhouse_react_combobox_fuzzy_matches_country_with_dialing_code(monke
         == "United States +1"
     )
 
+
+def test_combobox_scorer_prefers_east_asian_over_central_asian_substring():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.set_content(
+                """
+                <input id="race" role="combobox" aria-controls="race-list"
+                       data-job-agent-autofill-index="race">
+                <div id="race-list" role="listbox">
+                  <div role="option">Central Asian (inclusive of the peoples of Kazakhstan, Kyrgyzstan, Tajikistan, Turkmenistan, or Uzbekistan)</div>
+                  <div role="option">East Asian (inclusive of Chinese, Japanese, Korean, Mongolian, Tibetan, and Taiwanese)</div>
+                  <div role="option">South Asian (inclusive of the peoples of Afghanistan, Bangladesh, Bhutan, India, Maldives, Nepal, Pakistan, and Sri Lanka)</div>
+                  <div role="option">Southeast Asian (inclusive of Burmese, Cambodian, Filipino, Hmong, Indonesian, Laotian, Malaysian, Mien, Singaporean, Thai, and Vietnamese)</div>
+                </div>
+                """
+            )
+            field = {
+                "kind": "single",
+                "tag": "input",
+                "role": "combobox",
+                "id": "race",
+                "autofillId": "race",
+                "label": "Race/Ethnicity",
+                "required": True,
+                "options": [],
+            }
+            clicked = python_runtime._click_visible_option_with_playwright(
+                page,
+                "Asian",
+                field,
+                aliases=python_runtime._answer_aliases("Asian"),
+            )
+        finally:
+            browser.close()
+
+    assert clicked and "East Asian" in clicked
+    assert "Central Asian" not in clicked
 
 
 def test_intl_tel_input_country_selector_sets_country_via_api():

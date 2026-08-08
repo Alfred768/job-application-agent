@@ -5,6 +5,9 @@ from hello_agents.tools.builtin.career import (
     AshbyJobSourceTool,
     ApplicationTrackerTool,
     ApplicationPackageTool,
+    BuildApplicationPackageTool,
+    EscalateToHumanTool,
+    EvaluateFitTool,
     FitScorerTool,
     FormFillerTool,
     FormFillScriptTool,
@@ -48,6 +51,9 @@ def test_career_tools_register_with_hello_agents_registry():
     registry.register_tool(ManualJDImportTool())
     registry.register_tool(ApplicationTrackerTool())
     registry.register_tool(ApplicationPackageTool())
+    registry.register_tool(BuildApplicationPackageTool())
+    registry.register_tool(EscalateToHumanTool())
+    registry.register_tool(EvaluateFitTool())
     registry.register_tool(FitScorerTool())
     registry.register_tool(FormInspectorTool())
     registry.register_tool(FormFillerTool())
@@ -68,6 +74,9 @@ def test_career_tools_register_with_hello_agents_registry():
         "manual_jd_import",
         "application_tracker",
         "application_package",
+        "build_application_package",
+        "escalate_to_human",
+        "evaluate_fit",
         "fit_scorer",
         "form_inspector",
         "form_filler",
@@ -218,6 +227,30 @@ def test_job_application_agent_includes_form_fill_plan():
     assert "review_required=Do you require visa sponsorship?" in result
 
 
+def test_job_application_agent_escalates_missing_required_fact_to_human():
+    snapshot = '[{"label": "Expected salary", "required": true}]'
+    profile = '{"email": "gaoyi@example.com"}'
+    agent = JobApplicationAgent(
+        name="career-agent",
+        llm=FakeLLM(),
+        form_snapshot_json=snapshot,
+        profile_json=profile,
+    )
+
+    result = agent.run("Company: Acme\nTitle: Agent Engineer\n\nBuild agents.")
+
+    state = agent.get_last_state()
+    assert state is not None
+    assert state.status == "manual_review_required"
+    assert "## Human Review" in result
+    assert any(
+        item.tool_name == "escalate_to_human"
+        and item.ok
+        and item.output["status"] == "waiting_for_user"
+        for item in state.tool_results
+    )
+
+
 def test_job_application_agent_uses_llm_for_review_notes_when_enabled():
     llm = RecordingLLM()
     agent = JobApplicationAgent(name="career-agent", llm=llm)
@@ -287,6 +320,21 @@ def test_application_package_tool_writes_review_artifacts(tmp_path):
     assert '"role_track": "Agent Engineer"' in (out_dir / "jd-analysis.json").read_text()
     assert not (out_dir / "resume-edit-plan.json").exists()
     assert "Automatic final submission is enabled" in (out_dir / "submit-gate.txt").read_text()
+
+
+def test_evaluate_fit_and_build_package_tools_are_separate(tmp_path):
+    jd = "Company: Acme AI\nTitle: Agent Engineer\n\nBuild LLM agents with LangChain."
+    out_dir = tmp_path / "application-package"
+
+    fit = EvaluateFitTool().run({"input": jd})
+    package = BuildApplicationPackageTool().run(
+        {"jd_text": jd, "output_dir": str(out_dir)}
+    )
+
+    assert '"score"' in fit
+    assert '"missing_keywords"' in fit
+    assert "package_dir=" in package
+    assert (out_dir / "jd-analysis.json").exists()
 
 
 def test_form_inspector_tool_normalizes_field_snapshot():

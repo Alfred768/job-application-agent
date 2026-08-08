@@ -344,6 +344,8 @@ def _load_env_before_commands() -> None:
     """Load a local .env (gitignored) before any command runs, so
     OPENAI_API_KEY / LLM_* take effect for `--use-llm` without exporting
     shell variables. Runs on CLI invocation only, not at import."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     load_env()
 
 
@@ -485,7 +487,7 @@ def _validate_required_resume_source_dir(required_resume_source_dir: Path | None
     source_dir = required_resume_source_dir.expanduser()
     if not source_dir.is_dir():
         raise typer.BadParameter(f"required resume source dir does not exist: {source_dir}")
-    return source_dir
+    return source_dir.resolve()
 
 
 def _configured_resume_source_dir() -> Path | None:
@@ -874,6 +876,8 @@ BLOCKING_RETRY_STATUSES = {
     "submission_processing_error",
     "autofill_completed_blocked",
     "autofill_failed",
+    "email_verification_required",
+    "candidate_account_required",
 }
 
 

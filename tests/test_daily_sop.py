@@ -301,6 +301,42 @@ def test_daily_config_expands_environment_paths(
     assert config.submit_complete is False
 
 
+def test_write_state_does_not_move_latest_pointer_back_to_an_older_run(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output" / "daily"
+    older_run = output_root / "2026-07-29" / "192743"
+    newer_run = output_root / "2026-07-29" / "193937"
+    older_run.mkdir(parents=True)
+    newer_run.mkdir()
+    older_state = {
+        "schema_version": 1,
+        "run_id": older_run.name,
+        "phase": "repair_unavailable",
+        "created_at": "2026-07-29T19:27:43-04:00",
+        "updated_at": "2026-07-29T19:49:33-04:00",
+    }
+    newer_state = {
+        "schema_version": 1,
+        "run_id": newer_run.name,
+        "phase": "waiting_for_candidates",
+        "created_at": "2026-07-29T19:39:37-04:00",
+        "updated_at": "2026-07-29T19:40:31-04:00",
+        "next_wake_at": "2026-07-29T19:45:31-04:00",
+    }
+
+    daily_sop_module._write_state(newer_run, newer_state, output_root)
+    older_state["phase"] = "executed_with_blockers"
+    daily_sop_module._write_state(older_run, older_state, output_root)
+
+    latest = json.loads((output_root / "latest.json").read_text())
+    assert latest["run_id"] == newer_run.name
+    assert latest["phase"] == "waiting_for_candidates"
+    assert json.loads((older_run / "run-state.json").read_text())["phase"] == (
+        "executed_with_blockers"
+    )
+
+
 def test_daily_config_accepts_limit_100_and_rejects_larger_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -382,6 +418,18 @@ def test_daily_submission_progress_counts_only_confirmed_local_day_submissions(
     assert progress["submitted"] == 1
     assert progress["remaining"] == 3
     assert progress["reached"] is False
+
+    cohort_progress = daily_submission_progress(
+        config,
+        raw_imported=10,
+    )
+    assert cohort_progress["base_target"] == 4
+    assert cohort_progress["raw_imported"] == 10
+    assert cohort_progress["rate_target"] == 8
+    assert cohort_progress["target"] == 8
+    assert cohort_progress["confirmed_rate"] == 0.1
+    assert cohort_progress["remaining"] == 7
+    assert cohort_progress["reached"] is False
 
 
 def test_run_accounting_uses_execution_date_across_midnight(
@@ -821,6 +869,102 @@ def test_repair_resume_persists_rebuilt_scope_before_readiness_check(
     assert final_manifest["artifacts"]["repair_request"] == str(request_path)
 
 
+def test_repair_resume_supersedes_stale_scope_when_complete_audit_has_only_candidate_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, run_dir, _ = _repair_resume_fixture(tmp_path, monkeypatch)
+    state_path = run_dir / "run-state.json"
+    manifest_path = run_dir / "pipeline-manifest.json"
+    state = json.loads(state_path.read_text())
+    manifest = json.loads(manifest_path.read_text())
+    audit_path = run_dir / "execution-audit.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "counts": {"completed": 1},
+                "progress": {
+                    "planned": 1,
+                    "terminal": 1,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "company": "Palantir",
+                        "title": "Software Engineer, New Grad",
+                        "status": "autofill_completed_blocked",
+                        "review_items": [
+                            {
+                                "label": "High School Name",
+                                "reason": "unmapped field",
+                                "sensitive": False,
+                                "blocking": True,
+                            },
+                            {
+                                "label": (
+                                    "Do you have any, or anticipate any "
+                                    "upcoming offer deadlines?"
+                                ),
+                                "reason": (
+                                    "candidate fact needs explicit approved answer"
+                                ),
+                                "sensitive": False,
+                                "blocking": True,
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    state["phase"] = "repair_unavailable"
+    state["artifacts"]["execution_audit"] = str(audit_path)
+    manifest["artifacts"]["execution_audit"] = str(audit_path)
+    state_path.write_text(json.dumps(state))
+    manifest_path.write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(
+        daily_sop_module,
+        "check_repair_agent_readiness",
+        lambda _policy: pytest.fail(
+            "an empty current-audit repair scope must not check Codex readiness"
+        ),
+    )
+    monkeypatch.setattr(
+        daily_sop_module,
+        "run_repair_cycle",
+        lambda *args, **kwargs: pytest.fail(
+            "an empty current-audit repair scope must not run Codex"
+        ),
+    )
+
+    refreshed = repair_daily_run(
+        config,
+        run_dir=run_dir,
+        refresh_request_only=True,
+    )
+
+    assert refreshed == run_dir
+    final_state = json.loads(state_path.read_text())
+    assert final_state["phase"] == "executed_with_blockers"
+    assert final_state["consumed_repair_cycles"] == 0
+    request_path = Path(final_state["artifacts"]["repair_request"])
+    request = json.loads(request_path.read_text())
+    assert request["no_repairable_scope"] is True
+    assert request["findings"] == []
+    assert request["retry_targets"] == []
+    assert request["rebuilt_from_audit"] == str(audit_path)
+    assert "supersedes_retained_request" in request
+    assert (
+        final_state["history"][-1]["repair_reason"]
+        == "current_audit_has_no_repairable_scope"
+    )
+    assert "Restore the repair-agent session" not in (
+        run_dir / "RUN_SUMMARY.md"
+    ).read_text()
+
+
 def test_historical_recover_replays_plans_without_browser_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -947,6 +1091,420 @@ def test_historical_recover_replays_plans_without_browser_retry(
     assert "recovery_retry_batch" not in updated_state["artifacts"]
     assert len(updated_state["recovery_attempts"]) == 1
     assert "not_run" not in (run_dir / "RUN_SUMMARY.md").read_text()
+
+
+def test_historical_recover_rebuilds_package_after_candidate_fact_is_approved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import job_agent.cli as cli_module
+
+    config = _config(tmp_path, monkeypatch)
+    config.config_path.write_text('{"schema_version": 1}\n')
+    old_inputs = fingerprint_inputs(config)
+    config.source_config.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {
+                        "type": "remotive",
+                        "search": "new source configuration",
+                        "limit": 5,
+                    }
+                ]
+            }
+        )
+    )
+    relationship_label = (
+        "Are you related to, or in a close personal relationship with, "
+        "anyone who currently works for Example?"
+    )
+    config.profile.write_text(
+        json.dumps(
+            {
+                "name": "Test Candidate",
+                "email": "candidate@example.com",
+                "phone": "+1 555 0100",
+                "answers": {relationship_label: "No"},
+            }
+        )
+    )
+
+    run_dir = config.output_root / "2026-07-29" / "101010"
+    original_package = run_dir / "applications" / "001-example"
+    original_package.mkdir(parents=True)
+    (original_package / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "name": "Test Candidate",
+                    "email": "candidate@example.com",
+                    "phone": "+1 555 0100",
+                    "answers": {},
+                }
+            }
+        )
+        + ";\n"
+    )
+    jobs_path = run_dir / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Example",
+                    "title": "Engineer",
+                    "apply_url": "https://example.test/jobs/42",
+                    "raw_jd": "Build reliable systems.",
+                }
+            ]
+        )
+    )
+    batch_summary = run_dir / "applications" / "batch-summary.json"
+    batch_summary.write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Example",
+                    "title": "Engineer",
+                    "apply_url": "https://example.test/jobs/42",
+                    "package_dir": str(original_package),
+                    "runtime_script_path": str(
+                        original_package / "autofill-runtime.js"
+                    ),
+                    "application_id": "17",
+                }
+            ]
+        )
+    )
+    audit_path = run_dir / "execution-audit.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "counts": {
+                    "total": 1,
+                    "completed": 1,
+                    "submitted": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                },
+                "progress": {
+                    "planned": 1,
+                    "terminal": 1,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "company": "Example",
+                        "title": "Engineer",
+                        "apply_url": "https://example.test/jobs/42",
+                        "package_dir": str(original_package),
+                        "application_id": "17",
+                        "status": "autofill_completed_blocked",
+                        "review_items": [
+                            {
+                                "label": relationship_label,
+                                "reason": (
+                                    "combobox needs saved answer / manual selection"
+                                ),
+                                "sensitive": False,
+                                "blocking": True,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    manifest_path = run_dir / "pipeline-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "counts": {
+                    "imported": 1,
+                    "shortlisted": 1,
+                    "prepared": 1,
+                },
+                "artifacts": {
+                    "jobs": str(jobs_path),
+                    "batch_summary": str(batch_summary),
+                    "execution_audit": str(audit_path),
+                },
+                "daily_sop": {"input_sha256": old_inputs},
+            }
+        )
+    )
+    state_path = run_dir / "run-state.json"
+    historical_settings = config.snapshot()
+    historical_settings["evaluation"] = {
+        "imported_cohort_target": 500,
+        "min_confirmed_submission_rate": 0.8,
+        "min_terminal_audit_coverage": 1.0,
+    }
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_dir.name,
+                "phase": "executed_with_blockers",
+                "created_at": "2026-07-29T10:10:10-04:00",
+                "updated_at": "2026-07-29T10:12:10-04:00",
+                "config_path": str(config.config_path),
+                "config_sha256": "fixture",
+                "input_sha256": old_inputs,
+                "settings": historical_settings,
+                "artifacts": {
+                    "manifest": str(manifest_path),
+                    "jobs": str(jobs_path),
+                    "batch_summary": str(batch_summary),
+                    "execution_audit": str(audit_path),
+                },
+                "execution_attempts": [],
+                "history": [],
+            }
+        )
+    )
+
+    def fake_prepare(job, out_dir, **_kwargs):
+        out_dir.mkdir(parents=True)
+        runtime_script = out_dir / "autofill-runtime.js"
+        runtime_script.write_text("// rebuilt with approved facts")
+        return {
+            "company": job.company,
+            "title": job.title,
+            "apply_url": job.apply_url,
+            "package_dir": str(out_dir),
+            "runtime_script_path": str(runtime_script),
+            "application_id": "17",
+        }
+
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_application_package",
+        fake_prepare,
+    )
+
+    recovered = recover_daily_run(config, run_dir=run_dir)
+
+    assert recovered == run_dir
+    recovery = json.loads(
+        (run_dir / "recovery-execution.json").read_text()
+    )
+    assert recovery["status_counts"] == {"verified": 1}
+    assert recovery["verified_targets"][0]["recovery_strategy"] == (
+        "candidate_fact_resolution"
+    )
+    retry_path = Path(
+        json.loads(state_path.read_text())["artifacts"][
+            "recovery_retry_batch"
+        ]
+    )
+    retry_item = json.loads(retry_path.read_text())[0]
+    assert retry_item["application_id"] == "17"
+    assert retry_item["recovery_verified"] is True
+    assert retry_item["retry_scope"] == "single_application"
+    assert "/recovery/candidate-facts-" in retry_item["package_dir"]
+    assert json.loads(state_path.read_text())["input_sha256"] == (
+        fingerprint_inputs(config)
+    )
+    assert json.loads(state_path.read_text())["config_sha256"] == hashlib.sha256(
+        config.config_path.read_bytes()
+    ).hexdigest()
+
+
+def test_recovery_merge_reads_all_attempts_and_preserves_attempt_files(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    original_path = run_dir / "execution-audit.json"
+    retry_path = run_dir / "execution-audit-retry-01.json"
+    original_path.write_text(
+        json.dumps(
+            {
+                "progress": {
+                    "planned": 2,
+                    "terminal": 2,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "application_id": "1",
+                        "company": "Acme",
+                        "title": "Engineer",
+                        "status": "autofill_completed_blocked",
+                    },
+                    {
+                        "application_id": "2",
+                        "company": "Collective",
+                        "title": "Fullstack Engineer",
+                        "status": "autofill_completed_blocked",
+                    },
+                ],
+            }
+        )
+    )
+    retry_path.write_text(
+        json.dumps(
+            {
+                "progress": {
+                    "planned": 1,
+                    "terminal": 1,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "application_id": "1",
+                        "company": "Acme",
+                        "title": "Engineer",
+                        "status": "submitted",
+                    }
+                ],
+            }
+        )
+    )
+    state = {
+        "execution_attempts": [
+            {"attempt": 1, "audit": str(original_path)},
+            {"attempt": 2, "audit": str(retry_path)},
+        ]
+    }
+
+    merged = daily_sop_module._execution_audit_for_report(
+        state,
+        run_dir=run_dir,
+        root=tmp_path,
+        fallback=json.loads(retry_path.read_text()),
+    )
+
+    assert {
+        item["application_id"]: item["status"]
+        for item in merged["applications"]
+    } == {
+        "1": "submitted",
+        "2": "autofill_completed_blocked",
+    }
+    target = next(
+        item
+        for item in merged["applications"]
+        if item["application_id"] == "2"
+    )
+    target["recovery_plan"] = {"strategy": "candidate_fact_resolution"}
+    target["recovery_execution"] = {"status": "verified"}
+
+    daily_sop_module._persist_recovery_annotations(
+        state,
+        run_dir=run_dir,
+        root=tmp_path,
+        fallback_path=retry_path,
+        recovery_audit=merged,
+    )
+
+    original = json.loads(original_path.read_text())
+    retry = json.loads(retry_path.read_text())
+    original_target = next(
+        item
+        for item in original["applications"]
+        if item["application_id"] == "2"
+    )
+    assert original_target["recovery_execution"]["status"] == "verified"
+    assert retry["applications"] == [
+        {
+            "application_id": "1",
+            "company": "Acme",
+            "title": "Engineer",
+            "status": "submitted",
+        }
+    ]
+
+
+def test_candidate_fact_recovery_requires_new_fact_and_no_mixed_blockers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, monkeypatch)
+    relationship_label = (
+        "Are you related to, or in a close personal relationship with, "
+        "anyone who currently works for Example?"
+    )
+    config.profile.write_text(
+        json.dumps(
+            {
+                "name": "Test Candidate",
+                "email": "candidate@example.com",
+                "phone": "+1 555 0100",
+                "answers": {relationship_label: "No"},
+            }
+        )
+    )
+    run_dir = config.output_root / "2026-07-29" / "111111"
+    unchanged_package = run_dir / "applications" / "unchanged"
+    unchanged_package.mkdir(parents=True)
+    (unchanged_package / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {relationship_label: "No"},
+                }
+            }
+        )
+        + ";\n"
+    )
+    mixed_package = run_dir / "applications" / "mixed"
+    mixed_package.mkdir(parents=True)
+    (mixed_package / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps({"profile": {"answers": {}}})
+        + ";\n"
+    )
+    jobs_path = run_dir / "jobs.json"
+    jobs_path.write_text("[]")
+    handlers = daily_sop_module._candidate_fact_recovery_handlers(
+        config,
+        run_dir=run_dir,
+        jobs_path=jobs_path,
+        attempt_number=1,
+    )
+    fact_item = {
+        "label": relationship_label,
+        "reason": "combobox needs saved answer / manual selection",
+        "sensitive": False,
+        "blocking": True,
+    }
+
+    unchanged = handlers["request_candidate_facts"](
+        None,
+        {
+            "package_dir": str(unchanged_package),
+            "review_items": [fact_item],
+        },
+        {},
+    )
+    mixed = handlers["request_candidate_facts"](
+        None,
+        {
+            "package_dir": str(mixed_package),
+            "review_items": [
+                fact_item,
+                {
+                    "label": "Describe prior startup work",
+                    "reason": "unmapped field",
+                    "sensitive": False,
+                    "blocking": True,
+                },
+            ],
+        },
+        {},
+    )
+
+    assert unchanged["status"] == "pending"
+    assert unchanged["details"]["unchanged_field_count"] == 1
+    assert mixed["status"] == "pending"
+    assert mixed["details"]["nonfact_blocker_count"] == 1
 
 
 def test_expired_repair_auth_is_a_nonblocking_preflight_warning(
@@ -1159,6 +1717,76 @@ def test_run_until_daily_target_continues_after_complete_blocked_batch(
     assert daily_submission_progress(config)["submitted"] == 1
 
 
+def test_run_until_daily_target_does_not_stop_at_absolute_floor_when_raw_rate_is_unmet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _write_workspace(tmp_path)
+    payload = workspace["payload"]
+    assert isinstance(payload, dict)
+    payload["daily_submit_target"] = 1
+    payload["submit_complete"] = True
+    monkeypatch.setenv("TEST_RESUME_DIR", str(workspace["resumes"]))
+    config = DailyConfig.from_mapping(
+        payload,
+        config_path=tmp_path / "daily.local.json",
+        root=tmp_path,
+    )
+
+    connection = connect(config.database)
+    job = Job(
+        title="Already Confirmed",
+        company="Confirmed Co",
+        raw_jd="Build systems.",
+        source="test",
+        apply_url="https://jobs.example.com/confirmed",
+    )
+    application_id = create_application(
+        connection,
+        create_job(connection, job),
+        job,
+    )
+    update_application_execution_status(
+        connection,
+        application_id,
+        "submitted",
+    )
+    connection.close()
+
+    previous_run = config.output_root / "current" / "run"
+    previous_run.mkdir(parents=True)
+    local_date = datetime.now().astimezone().date().isoformat()
+    (previous_run / "run-state.json").write_text(
+        json.dumps(
+            {
+                "daily_target": {
+                    "local_date": local_date,
+                    "submitted": 1,
+                }
+            }
+        )
+    )
+    (previous_run / "pipeline-manifest.json").write_text(
+        json.dumps({"counts": {"imported": 2}})
+    )
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    (config.output_root / "latest.json").write_text(
+        json.dumps({"run_dir": str(previous_run)})
+    )
+
+    def fail_if_preparation_continues(_config: DailyConfig) -> Path:
+        raise SopError("raw-rate-target-still-unmet")
+
+    monkeypatch.setattr(
+        daily_sop_module,
+        "prepare_daily_run",
+        fail_if_preparation_continues,
+    )
+
+    with pytest.raises(SopError, match="raw-rate-target-still-unmet"):
+        run_until_daily_target(config)
+
+
 def test_daily_config_loads_bounded_auto_repair_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1175,6 +1803,7 @@ def test_daily_config_loads_bounded_auto_repair_policy(
     }
     workspace["payload"]["evaluation"] = {
         "imported_cohort_target": 500,
+        "confirmation_rate_denominator": "raw_imported",
         "min_confirmed_submission_rate": 0.8,
         "min_terminal_audit_coverage": 1.0,
     }
@@ -1194,8 +1823,33 @@ def test_daily_config_loads_bounded_auto_repair_policy(
     assert config.auto_repair.combobox_no_progress_seconds == 20
     assert config.auto_repair.retry_after_verified_repair is True
     assert config.evaluation.imported_cohort_target == 500
+    assert (
+        config.evaluation.confirmation_rate_denominator
+        == "raw_imported"
+    )
     assert config.evaluation.min_confirmed_submission_rate == 0.8
     assert config.evaluation.min_terminal_audit_coverage == 1.0
+
+
+def test_daily_config_rejects_non_raw_confirmation_denominator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _write_workspace(tmp_path)
+    workspace["payload"]["evaluation"] = {
+        "confirmation_rate_denominator": "final_eligible",
+    }
+    monkeypatch.setenv("TEST_RESUME_DIR", str(workspace["resumes"]))
+
+    with pytest.raises(
+        SopError,
+        match="confirmation_rate_denominator.*raw_imported",
+    ):
+        DailyConfig.from_mapping(
+            workspace["payload"],
+            config_path=tmp_path / "daily.local.json",
+            root=tmp_path,
+        )
 
 
 def test_daily_config_rejects_missing_environment_variable(
@@ -1646,6 +2300,9 @@ def test_prepare_empty_batch_waits_for_external_scheduler(
     assert next_wake_at > before
     assert latest["phase"] == "waiting_for_candidates"
     assert latest["next_wake_at"] == state["next_wake_at"]
+    assert state["daily_target"]["raw_imported"] == 10
+    assert state["daily_target"]["rate_target"] == 8
+    assert state["daily_target"]["target"] == 8
     report = (run_dir / "RUN_SUMMARY.md").read_text()
     assert "external scheduler" in report
     assert "do not sleep inside the Goal" in report
@@ -2079,19 +2736,133 @@ def test_report_records_terminal_states_and_next_action(tmp_path: Path) -> None:
     assert "Evaluator: `job_application_round`" in report
     assert "overall status: `needs_attention`" in report
     assert "### Evaluation Recommendations" in report
+    assert "Confirmed / raw imported" in report
     assert "Confirmed / final eligible" in report
     metrics = json.loads((run_dir / "evaluation-metrics.json").read_text())
     assert metrics["counts"]["final_eligible"] == 1
+    assert metrics["counts"]["confirmed_for_raw_import_rate"] == 0
     assert metrics["rates"]["confirmed_submission_rate_final_eligible"] == 0.0
+    assert metrics["rates"]["raw_import_to_confirmed_rate"] == 0.0
     assert metrics["assessment"]["terminal_audit_coverage"]["status"] == "met"
     assert (
-        metrics["assessment"]["confirmed_submission_rate_final_eligible"]["status"]
+        metrics["assessment"]["raw_import_to_confirmed_rate"]["status"]
         == "not_met"
+    )
+    assert (
+        metrics["assessment"][
+            "confirmed_submission_rate_final_eligible"
+        ]["status"]
+        == "monitor"
     )
     assert metrics["agent_core"]["evaluator"] == "job_application_round"
     assert metrics["agent_core"]["round_id"] == "093000"
     assert metrics["agent_core"]["status"] == "needs_attention"
     assert metrics["agent_core"]["recommendations"]
+
+
+def test_report_combines_scoped_retry_with_prior_terminal_audit(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "output" / "daily" / "2026-07-29" / "124250"
+    run_dir.mkdir(parents=True)
+    original_audit = run_dir / "execution-audit.json"
+    retry_audit = run_dir / "execution-audit-retry-01.json"
+    state = {
+        "run_id": "124250",
+        "phase": "executed",
+        "created_at": "2026-07-29T12:42:50-04:00",
+        "updated_at": "2026-07-29T13:40:15-04:00",
+        "config_path": str(tmp_path / "ops" / "daily.local.json"),
+        "settings": {
+            "submit_complete": True,
+            "evaluation": {
+                "imported_cohort_target": 3,
+                "min_confirmed_submission_rate": 0.8,
+                "min_terminal_audit_coverage": 1.0,
+            },
+        },
+        "artifacts": {"execution_audit": str(retry_audit)},
+        "execution_attempts": [
+            {"attempt": 1, "audit": str(original_audit)},
+            {"attempt": 2, "audit": str(retry_audit)},
+        ],
+    }
+    (run_dir / "run-state.json").write_text(json.dumps(state))
+    (run_dir / "pipeline-manifest.json").write_text(
+        json.dumps(
+            {
+                "counts": {
+                    "imported": 3,
+                    "shortlisted": 3,
+                    "prepared": 3,
+                }
+            }
+        )
+    )
+    original_audit.write_text(
+        json.dumps(
+            {
+                "progress": {
+                    "planned": 3,
+                    "terminal": 3,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "application_id": "1",
+                        "company": "MongoDB",
+                        "title": "Engineer",
+                        "status": "submitted",
+                    },
+                    {
+                        "application_id": "2",
+                        "company": "Sony",
+                        "title": "Engineer II",
+                        "status": "autofill_completed_blocked",
+                    },
+                    {
+                        "application_id": "3",
+                        "company": "Cerebras",
+                        "title": "Systems Engineer",
+                        "status": "submission_blocked_by_anti_spam",
+                    },
+                ],
+            }
+        )
+    )
+    retry_audit.write_text(
+        json.dumps(
+            {
+                "progress": {
+                    "planned": 1,
+                    "terminal": 1,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "application_id": "2",
+                        "company": "Sony",
+                        "title": "Engineer II",
+                        "status": "submitted",
+                    }
+                ],
+            }
+        )
+    )
+
+    report = write_run_report(run_dir).read_text()
+
+    assert "MongoDB" in report
+    assert "Sony" in report
+    assert "Cerebras" in report
+    assert "| 3 | 2 | 0 | 0 | 0 |" in report
+    metrics = json.loads((run_dir / "evaluation-metrics.json").read_text())
+    assert metrics["counts"]["prepared"] == 3
+    assert metrics["counts"]["terminal_records"] == 3
+    assert metrics["counts"]["submitted"] == 2
+    assert metrics["assessment"]["terminal_audit_coverage"]["status"] == "met"
 
 
 def test_report_indexes_unified_application_trajectory_and_continuity(

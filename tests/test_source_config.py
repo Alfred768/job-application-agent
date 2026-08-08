@@ -190,6 +190,107 @@ def test_source_config_defaults_are_merged_into_sources(tmp_path):
     assert [job.title for job in jobs] == ["Machine Learning Engineer"]
 
 
+def test_us_only_source_filter_rejects_explicit_non_us_remote_jobs(
+    tmp_path,
+):
+    greenhouse_path = tmp_path / "greenhouse.json"
+    greenhouse_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/us",
+                        "location": {"name": "Remote - United States"},
+                        "content": "Build distributed Python services.",
+                    },
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/india",
+                        "location": {"name": "Remote - India"},
+                        "content": "Build distributed Python services.",
+                    },
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/worldwide",
+                        "location": {"name": "Remote - Worldwide"},
+                        "content": "Build distributed Python services.",
+                    },
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {
+                    "title_include": ["software engineer"],
+                    "location_include": ["remote"],
+                    "us_only": True,
+                },
+                "sources": [
+                    {
+                        "type": "greenhouse",
+                        "board_token": "acme",
+                        "payload_file": str(greenhouse_path),
+                    }
+                ],
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.apply_url for job in jobs] == [
+        "https://jobs.example.com/us",
+        "https://jobs.example.com/worldwide",
+    ]
+
+
+def test_us_only_source_filter_works_without_keyword_filters(tmp_path):
+    greenhouse_path = tmp_path / "greenhouse.json"
+    greenhouse_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/us",
+                        "location": {"name": "New York, NY"},
+                        "content": "Build distributed Python services.",
+                    },
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/canada",
+                        "location": {"name": "Remote - Canada"},
+                        "content": "Build distributed Python services.",
+                    },
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {"us_only": True},
+                "sources": [
+                    {
+                        "type": "greenhouse",
+                        "board_token": "acme",
+                        "payload_file": str(greenhouse_path),
+                    }
+                ],
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.apply_url for job in jobs] == ["https://jobs.example.com/us"]
+
+
 def test_read_url_sends_browser_user_agent_not_python_urllib(monkeypatch):
     """Public job APIs (e.g. Remotive) 403 the default Python-urllib UA.
 

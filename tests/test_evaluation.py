@@ -19,7 +19,7 @@ def _evaluation_core(policy: EvaluationPolicy) -> AgentCore:
     return core
 
 
-def test_job_application_round_evaluator_uses_final_eligible_denominator():
+def test_job_application_round_evaluator_uses_raw_import_denominator():
     policy = EvaluationPolicy(
         imported_cohort_target=2,
         min_confirmed_submission_rate=0.8,
@@ -59,17 +59,75 @@ def test_job_application_round_evaluator_uses_final_eligible_denominator():
     )
     payload = evaluation_result_to_dict(result)
 
-    assert result.status == "passed"
+    assert result.status == "needs_attention"
     assert payload["counts"]["final_eligible"] == 1
+    assert payload["counts"]["confirmed_for_raw_import_rate"] == 1
     assert (
         payload["rates"][
             "confirmed_submission_rate_final_eligible"
         ]
         == 1.0
     )
+    assert payload["rates"]["raw_import_to_confirmed_rate"] == 0.5
+    assert (
+        payload["assessment"]["raw_import_to_confirmed_rate"]["status"]
+        == "not_met"
+    )
+    assert (
+        payload["assessment"][
+            "confirmed_submission_rate_final_eligible"
+        ]["status"]
+        == "monitor"
+    )
     assert payload["agent_core"]["evaluator"] == "job_application_round"
     assert payload["agent_core"]["round_id"] == "round-1"
     assert "private@example.com" not in json.dumps(payload)
+
+
+def test_job_application_round_evaluator_uses_daily_confirmed_total():
+    policy = EvaluationPolicy(
+        imported_cohort_target=10,
+        min_confirmed_submission_rate=0.8,
+        min_terminal_audit_coverage=1.0,
+    )
+    core = _evaluation_core(policy)
+
+    result = core.evaluate_round(
+        "job_application_round",
+        {
+            "state": {
+                "run_id": "round-daily",
+                "phase": "complete",
+                "daily_target": {"submitted": 8},
+            },
+            "manifest": {
+                "counts": {
+                    "imported": 10,
+                    "shortlisted": 1,
+                    "prepared": 1,
+                }
+            },
+            "audit": {
+                "counts": {
+                    "total": 1,
+                    "submitted": 0,
+                    "skipped": 0,
+                    "submit_clicked_unconfirmed": 0,
+                },
+                "progress": {"complete": True},
+                "applications": [{"status": "autofill_completed_blocked"}],
+            },
+        },
+        round_id="round-daily",
+    )
+
+    assert result.status == "passed"
+    assert result.metrics["counts"]["confirmed_for_raw_import_rate"] == 8
+    assert result.metrics["rates"]["raw_import_to_confirmed_rate"] == 0.8
+    assert (
+        result.metrics["assessment"]["raw_import_to_confirmed_rate"]["status"]
+        == "met"
+    )
 
 
 def test_job_application_round_evaluator_reports_pending_without_audit():
@@ -94,6 +152,12 @@ def test_job_application_round_evaluator_reports_pending_without_audit():
     assert result.status == "pending"
     assert (
         result.metrics["assessment"]["terminal_audit_coverage"][
+            "status"
+        ]
+        == "pending"
+    )
+    assert (
+        result.metrics["assessment"]["raw_import_to_confirmed_rate"][
             "status"
         ]
         == "pending"

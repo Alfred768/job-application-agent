@@ -1,0 +1,4502 @@
+{
+  "target_track": "Agent Engineer / AI Engineer / ML Engineer / Early Career Software Engineer",
+  "notes": [
+    "Live source config for Gaoyi's profile.",
+    "Primary sources are public ATS boards that have already produced real, executable application flows.",
+    "Source-level filters run before limit, so large boards are narrowed to relevant U.S./remote early-career AI/ML/software roles before the scorer sees them.",
+    "Early-career ATS boards are curated from public new-grad listings and verified against each official board API before use."
+  ],
+  "defaults": {
+    "title_include": [
+      "new graduate",
+      "software engineer",
+      "forward deployed",
+      "ml engineer",
+      "applied ai",
+      "junior",
+      "new grad",
+      "agent",
+      "ai engineer",
+      "early career",
+      "machine learning",
+      "entry level",
+      "data scientist",
+      "research scientist",
+      "research engineer",
+      "platform engineer",
+      "devops",
+      "site reliability",
+      "infrastructure",
+      "sre",
+      "mlops",
+      "cloud engineer",
+      "data analyst",
+      "business intelligence",
+      "bi engineer",
+      "quantitative researcher",
+      "nlp engineer",
+      "computer vision",
+      "cv engineer",
+      "robotics",
+      "perception engineer"
+    ],
+    "title_exclude": [
+      "account executive",
+      "customer success",
+      "director",
+      "lead ",
+      "manager",
+      "marketing",
+      "principal",
+      "sales",
+      "senior",
+      "staff",
+      "support engineer",
+      "talent"
+    ],
+    "location_include": [
+      "austin",
+      "boston",
+      "california",
+      "mountain view",
+      "new york",
+      "palo alto",
+      "remote",
+      "san francisco",
+      "san mateo",
+      "seattle",
+      "united states",
+      "usa"
+    ],
+    "us_only": true
+  },
+  "sources": [
+    {
+      "type": "greenhouse",
+      "board_token": "newsbreak",
+      "limit": 20,
+      "title_include": [
+        "agent",
+        "ai engineer",
+        "applied ai",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "account manager",
+        "director",
+        "manager",
+        "marketing",
+        "principal",
+        "sales",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "california",
+        "mountain view",
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "gleanwork",
+      "limit": 20,
+      "title_include": [
+        "agent",
+        "ai",
+        "forward deployed",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "account executive",
+        "customer success",
+        "director",
+        "manager",
+        "principal",
+        "sales",
+        "senior",
+        "staff",
+        "support engineer",
+        "success manager"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "san francisco",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "databricks",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "forward deployed",
+        "machine learning",
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "account executive",
+        "director",
+        "manager",
+        "principal",
+        "sales",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "boston",
+        "california",
+        "new york",
+        "remote",
+        "san francisco",
+        "seattle",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "nuro",
+      "limit": 20,
+      "title_include": [
+        "ai",
+        "machine learning",
+        "ml",
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "california",
+        "mountain view",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "botauto",
+      "limit": 20,
+      "title_include": [
+        "ai",
+        "algorithm engineer",
+        "autonomous",
+        "machine learning",
+        "ml",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "california",
+        "houston",
+        "remote",
+        "texas",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "scaleai",
+      "limit": 20,
+      "title_include": [
+        "agent",
+        "ai",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff",
+        "talent"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "san francisco",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "discord",
+      "limit": 20,
+      "title_include": [
+        "ai",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "san francisco",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "perpay",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "philadelphia",
+        "pennsylvania",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "getbuilt",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "software engineer i",
+        "internal tooling"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "nashville",
+        "tennessee",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "ixllearning",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "california",
+        "san mateo",
+        "new york",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "robinhood",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "early talent",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "california",
+        "menlo park",
+        "new york",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "wehrtyou",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "austin",
+        "boston",
+        "chicago",
+        "new york",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "affirm",
+      "limit": 20,
+      "title_include": [
+        "software engineer i",
+        "software engineer ii",
+        "machine learning engineer",
+        "backend"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote us",
+        "remote canada",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "brex",
+      "limit": 20,
+      "title_include": [
+        "software engineer ii",
+        "software engineer",
+        "backend",
+        "machine learning"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "san francisco",
+        "seattle",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "duolingo",
+      "limit": 20,
+      "title_include": [
+        "software engineer i",
+        "software engineer ii",
+        "software engineer",
+        "machine learning"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "pittsburgh",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "klaviyo",
+      "limit": 20,
+      "title_include": [
+        "software engineer ii",
+        "software engineer",
+        "machine learning"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "boston",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "agent engineer",
+      "limit": 20,
+      "title_include": [
+        "agent",
+        "ai",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "head of",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "software engineer new grad",
+      "limit": 20,
+      "title_include": [
+        "early career",
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "head of",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "airtable",
+      "limit": 20,
+      "title_include": [
+        "ai",
+        "machine learning",
+        "software engineer",
+        "new grad",
+        "early career"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff",
+        "account executive",
+        "sales",
+        "talent"
+      ],
+      "location_include": [
+        "remote",
+        "united states",
+        "usa",
+        "new york",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "verkada",
+      "limit": 20,
+      "title_include": [
+        "ai",
+        "machine learning",
+        "software engineer",
+        "new grad",
+        "early career"
+      ],
+      "title_exclude": [
+        "director",
+        "manager",
+        "principal",
+        "senior",
+        "staff",
+        "account executive",
+        "sales",
+        "talent"
+      ],
+      "location_include": [
+        "remote",
+        "united states",
+        "usa",
+        "new york",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "stripe",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "boston",
+        "california",
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "reddit",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "boston",
+        "california",
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "instacart",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "boston",
+        "california",
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "dropbox",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "boston",
+        "california",
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "lyft",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "anthropic",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level",
+        "forward deployed"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "vercel",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "cloudflare",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "austin",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "mongodb",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "twilio",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "coinbase",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "chime",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "flexport",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "waymo",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "mountain view",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "figma",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "asana",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "notion",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "ramp",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "webflow",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "mercury",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "pinterest",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "squarespace",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "AI engineer",
+      "limit": 20,
+      "title_include": [
+        "AI",
+        "machine learning",
+        "agent",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "junior software engineer",
+      "limit": 20,
+      "title_include": [
+        "junior",
+        "early career",
+        "software engineer",
+        "entry level",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "backend engineer",
+      "limit": 20,
+      "title_include": [
+        "backend",
+        "software engineer",
+        "API",
+        "distributed systems"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "block",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "oakland"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "elastic",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "distributed"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "cockroachlabs",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "upwork",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "airbnb",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "godaddy",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "motional",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "boston",
+        "pittsburgh"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "wayve",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "mountain view"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "marqeta",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "datadog",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "boston"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "okta",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "intercom",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "newrelic",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "fastly",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "sumologic",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "gusto",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "denver"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "launchdarkly",
+      "limit": 20,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "lattice",
+      "limit": 15,
+      "title_include": [
+        "new grad",
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "early career",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "python developer",
+      "limit": 20,
+      "title_include": [
+        "python",
+        "software engineer",
+        "backend",
+        "developer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "full stack developer",
+      "limit": 20,
+      "title_include": [
+        "full stack",
+        "software engineer",
+        "developer",
+        "fullstack"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "data engineer",
+      "limit": 20,
+      "title_include": [
+        "data engineer",
+        "software engineer",
+        "ETL",
+        "pipeline"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "deepmind",
+      "limit": 20,
+      "title_include": [
+        "research",
+        "software engineer",
+        "machine learning",
+        "ai",
+        "engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco",
+        "mountain view",
+        "london"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "stabilityai",
+      "limit": 15,
+      "title_include": [
+        "research",
+        "software engineer",
+        "machine learning",
+        "ai",
+        "engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "descript",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai",
+        "engineer",
+        "full stack"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "roblox",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "ml engineer",
+        "machine learning",
+        "data scientist",
+        "data engineer",
+        "engineer",
+        "developer",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "representative",
+        "engagement"
+      ],
+      "location_include": [
+        "united states",
+        "california",
+        "san francisco",
+        "remote",
+        "washington",
+        "new york",
+        "texas",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "gitlab",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "software engineer",
+        "backend engineer",
+        "site reliability engineer",
+        "forward deployed engineer",
+        "machine learning",
+        "ml engineer",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "support engineer",
+        "customer success",
+        "india",
+        "emea",
+        "meta",
+        "latam",
+        "apac"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "americas",
+        "north america"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "fivetran",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "ai",
+        "machine learning",
+        "data engineer",
+        "backend engineer",
+        "platform engineer",
+        "infrastructure engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "california",
+        "san francisco",
+        "new york",
+        "oakland",
+        "denver"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "xai",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "backend engineer",
+        "data engineer",
+        "machine learning engineer",
+        "ml infrastructure engineer",
+        "platform engineer",
+        "infrastructure engineer",
+        "research engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "tutor",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "california",
+        "san francisco",
+        "palo alto",
+        "memphis",
+        "texas"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "machine learning engineer",
+      "limit": 20,
+      "title_include": [
+        "engineer",
+        "ai",
+        "machine learning",
+        "software",
+        "agent"
+      ],
+      "title_exclude": [
+        "director",
+        "head of",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "applied ai",
+      "limit": 20,
+      "title_include": [
+        "engineer",
+        "ai",
+        "machine learning",
+        "software",
+        "agent"
+      ],
+      "title_exclude": [
+        "director",
+        "head of",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "forward deployed engineer",
+      "limit": 20,
+      "title_include": [
+        "engineer",
+        "ai",
+        "machine learning",
+        "software",
+        "agent"
+      ],
+      "title_exclude": [
+        "director",
+        "head of",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "platform engineer",
+      "limit": 20,
+      "title_include": [
+        "engineer",
+        "ai",
+        "machine learning",
+        "software",
+        "agent"
+      ],
+      "title_exclude": [
+        "director",
+        "head of",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "warp",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "forward deployed engineer",
+        "ml engineer",
+        "ai engineer",
+        "machine learning",
+        "backend engineer",
+        "platform engineer",
+        "infrastructure engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "us",
+        "san francisco",
+        "new york",
+        "california",
+        "canada"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "planetscale",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "ai engineer",
+        "machine learning",
+        "backend engineer",
+        "platform engineer",
+        "infrastructure engineer",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "san francisco",
+        "bay area",
+        "california",
+        "new york",
+        "us"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "heygen",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "ai engineer",
+        "machine learning",
+        "backend engineer",
+        "fullstack",
+        "frontend",
+        "research engineer",
+        "data engineer",
+        "platform engineer",
+        "infrastructure engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "san francisco",
+        "palo alto",
+        "los angeles",
+        "toronto",
+        "california",
+        "canada",
+        "remote",
+        "us"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "postman",
+      "limit": 20,
+      "title_include": [
+        "applied ai",
+        "ai engineer",
+        "machine learning",
+        "software engineer",
+        "data engineer",
+        "backend engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "san francisco",
+        "california",
+        "remote",
+        "us"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "samsara",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "software engineer",
+        "machine learning",
+        "applied ai",
+        "data engineer",
+        "platform engineer",
+        "infrastructure engineer",
+        "backend engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of",
+        "sr."
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "san francisco",
+        "bay area",
+        "california",
+        "seattle",
+        "new york"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "braze",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "applied ai",
+        "forward deployed",
+        "software engineer",
+        "machine learning",
+        "data engineer",
+        "backend engineer",
+        "platform engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "san francisco",
+        "new york",
+        "austin",
+        "chicago",
+        "california",
+        "us"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "spotify",
+      "limit": 20,
+      "title_include": [
+        "machine learning engineer",
+        "backend engineer",
+        "data engineer",
+        "research scientist",
+        "full stack engineer",
+        "software engineer",
+        "ai engineer",
+        "ml engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "new york",
+        "california",
+        "san francisco",
+        "boston",
+        "washington",
+        "seattle"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "palantir",
+      "limit": 20,
+      "title_include": [
+        "forward deployed",
+        "software engineer",
+        "backend engineer",
+        "ai engineer",
+        "machine learning",
+        "new grad",
+        "full stack",
+        "platform engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "new york",
+        "palo alto",
+        "california",
+        "washington",
+        "seattle",
+        "remote"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "palantir",
+      "limit": 25,
+      "title_include": [
+        "new grad"
+      ],
+      "title_exclude": [
+        "defense",
+        "deployment strategist",
+        "government",
+        "intel",
+        "privacy"
+      ],
+      "location_include": [
+        "california",
+        "denver",
+        "new york",
+        "palo alto",
+        "seattle",
+        "united states",
+        "washington"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "outreach",
+      "limit": 20,
+      "title_include": [
+        "forward deployed",
+        "software engineer",
+        "ai engineer",
+        "machine learning",
+        "backend engineer",
+        "full stack",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "seattle",
+        "california",
+        "new york",
+        "san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "spacex",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "software engineer",
+        "machine learning",
+        "data engineer",
+        "site reliability engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of",
+        "sr.",
+        "top secret",
+        "clearance"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "california",
+        "texas",
+        "washington",
+        "austin",
+        "florida"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "neuralink",
+      "limit": 20,
+      "title_include": [
+        "machine learning",
+        "software engineer",
+        "ai engineer",
+        "embedded",
+        "firmware",
+        "electrical engineer",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "california",
+        "texas",
+        "austin",
+        "san francisco",
+        "south san francisco"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "jetbrains",
+      "limit": 20,
+      "title_include": [
+        "forward deployed",
+        "software engineer",
+        "ai",
+        "machine learning",
+        "backend engineer",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "california",
+        "new york",
+        "washington",
+        "texas",
+        "boston",
+        "seattle"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "adyen",
+      "limit": 20,
+      "title_include": [
+        "forward deployed",
+        "software engineer",
+        "ai",
+        "machine learning",
+        "backend engineer",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "principal",
+        "staff",
+        "distinguished",
+        "director",
+        "manager",
+        "lead ",
+        "vp",
+        "head of"
+      ],
+      "location_include": [
+        "united states",
+        "remote",
+        "california",
+        "san francisco",
+        "new york",
+        "chicago",
+        "san jose"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "openai",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "research scientist",
+        "machine learning",
+        "applied ai",
+        "forward deployed"
+      ],
+      "title_exclude": [
+        "account executive",
+        "director",
+        "manager",
+        "senior",
+        "staff",
+        "principal",
+        "lead ",
+        "marketing",
+        "sales",
+        "support"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "vercel",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "ai",
+        "machine learning",
+        "forward deployed"
+      ],
+      "title_exclude": [
+        "account executive",
+        "director",
+        "manager",
+        "senior",
+        "staff",
+        "principal",
+        "lead ",
+        "marketing",
+        "sales",
+        "support"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "linear",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "ai",
+        "machine learning"
+      ],
+      "title_exclude": [
+        "account executive",
+        "director",
+        "manager",
+        "senior",
+        "staff",
+        "principal",
+        "lead ",
+        "marketing",
+        "sales",
+        "support"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "cursor",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "ai",
+        "machine learning"
+      ],
+      "title_exclude": [
+        "account executive",
+        "director",
+        "manager",
+        "senior",
+        "staff",
+        "principal",
+        "lead ",
+        "marketing",
+        "sales",
+        "support"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "bridger",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "cerebras",
+      "limit": 20,
+      "location_include": [
+        "sunnyvale",
+        "california",
+        "united states"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "traba",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "nexxen",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "revel",
+      "limit": 15,
+      "location_include": [
+        "los angeles",
+        "california"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "stradahq",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "hipp",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "firetiger",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "netic",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "Lightfield",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "faros-ai",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "pylon-labs",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "handshake",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "confido",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "PointOne",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "collective",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "julius",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "ellipsislabs",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "n1",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "titan-msp",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "gigaml",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "flashpoint.io",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "teamworks",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "sentilink",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "parallel",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "brainco",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "snowflake",
+      "limit": 20,
+      "location_include": [
+        "bellevue",
+        "seattle",
+        "washington",
+        "california",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "twitch",
+      "limit": 20
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "instalilyai",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "doordashusa",
+      "limit": 20
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "simplisafe",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "wonderschool",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "sigmacomputing",
+      "limit": 20
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "aquaticcapitalmanagement",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "d3",
+      "limit": 15,
+      "location_include": [
+        "los angeles",
+        "california"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "babelstreet",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "uareai",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "Antares",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "NorthwoodSpace",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "Preference-Model",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "allen-control-systems",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "backbone",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "blissway",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "brainbaselabs",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "capy",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "checkout.com",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "clera",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "corvus-robotics",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "cylake-inc",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "deliveroo",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "gen-digital",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "healf",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "icon",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "liquid",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "observable-space",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "people-culture-talent",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "quora",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "realmalliance",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "tracebit",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "uncountable",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "altaresourcetechnologiesinc",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "andurilindustries",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "artefactus",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "axon",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "carbonchain",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "elwoodtechnologies",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "freedomconsulting",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "katalyst",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "mthreerecruitingportal",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "relativity",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "scoutai",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "sonyinteractiveentertainmentglobal",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "torcrobotics",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "transmarketgroup",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "trueanomalyinc",
+      "limit": 15
+    },
+    {
+      "type": "lever",
+      "site": "aledade",
+      "limit": 15
+    },
+    {
+      "type": "lever",
+      "site": "datalabusa",
+      "limit": 15
+    },
+    {
+      "type": "lever",
+      "site": "grailbio",
+      "limit": 15
+    },
+    {
+      "type": "lever",
+      "site": "pingwind",
+      "limit": 15
+    },
+    {
+      "type": "lever",
+      "site": "wyetechllc",
+      "limit": 15
+    },
+    {
+      "type": "ashby",
+      "organization": "applied",
+      "limit": 30,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "developer infrastructure",
+        "machine learning",
+        "new grad",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "ann arbor",
+        "california",
+        "mountain view",
+        "remote",
+        "sunnyvale",
+        "united states"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "whoop",
+      "limit": 25,
+      "title_include": [
+        "android engineer",
+        "ios engineer",
+        "machine learning engineer",
+        "platform engineer",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "boston",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "authenticinsurance",
+      "limit": 20,
+      "title_include": [
+        "data engineer",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "zipcolimited",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "supermove",
+      "limit": 20,
+      "title_include": [
+        "backend engineer",
+        "full stack engineer",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "point72",
+      "limit": 25,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "pendo",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "flip",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "glossgenius",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "thenewyorktimes",
+      "limit": 25,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "atoms",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "heraldapi",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "humeai",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "beaconsoftware",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "data engineer",
+        "machine learning",
+        "software engineer"
+      ],
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "staff"
+      ],
+      "location_include": [
+        "new york",
+        "remote",
+        "united states"
+      ]
+    },
+    {
+      "type": "lever",
+      "site": "qloo",
+      "limit": 10,
+      "title_include": [
+        "machine learning"
+      ],
+      "location_include": [
+        "new york"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "alloy",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "modal",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "harvey",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "elevenlabs",
+      "limit": 20,
+      "title_include": [
+        "ai engineer",
+        "machine learning",
+        "software engineer"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "kalshi",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "decagon",
+      "limit": 20,
+      "title_exclude": [
+        "director",
+        "lead ",
+        "manager",
+        "principal",
+        "senior",
+        "spanish",
+        "staff"
+      ]
+    },
+    {
+      "type": "ashby",
+      "organization": "baseten",
+      "limit": 10
+    },
+    {
+      "type": "ashby",
+      "organization": "supabase",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "langchain",
+      "limit": 20
+    },
+    {
+      "type": "ashby",
+      "organization": "writer",
+      "limit": 20
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "outrider",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "colorado",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "cognitionlabs",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "ai engineer",
+        "machine learning"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "checkr",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "clever",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "roku",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "new york",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "faire",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "c3iot",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "zscaler",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "tanium",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "washington",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "mattermost",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "netlify",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "starburst",
+      "limit": 12,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "mixpanel",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "amplitude",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "iterable",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "customerio",
+      "limit": 12,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "arizeai",
+      "limit": 15,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "snorkelai",
+      "limit": 12,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "coreweave",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "new york",
+        "new jersey",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "togetherai",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "ai engineer",
+        "new grad"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager",
+        "lead "
+      ],
+      "location_include": [
+        "california",
+        "new york",
+        "remote",
+        "united states",
+        "usa"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "data scientist",
+      "limit": 20,
+      "title_include": [
+        "data scientist",
+        "machine learning",
+        "AI"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "research engineer",
+      "limit": 20,
+      "title_include": [
+        "research engineer",
+        "research scientist",
+        "machine learning",
+        "AI"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "cloud engineer",
+      "limit": 20,
+      "title_include": [
+        "cloud engineer",
+        "devops",
+        "site reliability",
+        "infrastructure",
+        "SRE"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "remotive",
+      "search": "MLOps",
+      "limit": 20,
+      "title_include": [
+        "MLOps",
+        "machine learning engineer",
+        "AI engineer",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "rss",
+      "rss_url": "https://hnrss.org/jobs?q=software+engineer&sort=date",
+      "limit": 20,
+      "title_include": [
+        "software engineer",
+        "machine learning",
+        "AI",
+        "data engineer",
+        "new grad",
+        "junior",
+        "entry level"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "rss",
+      "rss_url": "https://hnrss.org/jobs?q=data+scientist&sort=date",
+      "limit": 20,
+      "title_include": [
+        "data scientist",
+        "machine learning",
+        "AI",
+        "data engineer"
+      ],
+      "title_exclude": [
+        "senior",
+        "staff",
+        "principal",
+        "director",
+        "manager"
+      ],
+      "location_include": [
+        "remote",
+        "usa",
+        "united states"
+      ]
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "maymobility"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "lucidmotors"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "epicgames"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "riotgames"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "hubspot"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "epirus"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "inflectionai"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "otterai"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "typeface"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "wellsaidlabs"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "assemblyai"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "speechify"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "labelbox"
+    },
+    {
+      "type": "ashby",
+      "organization": "hex"
+    },
+    {
+      "type": "ashby",
+      "organization": "confluent"
+    },
+    {
+      "type": "ashby",
+      "organization": "reddit"
+    },
+    {
+      "type": "ashby",
+      "organization": "fireworks"
+    },
+    {
+      "type": "ashby",
+      "organization": "anyscale"
+    },
+    {
+      "type": "ashby",
+      "organization": "deepgram"
+    },
+    {
+      "type": "ashby",
+      "organization": "roboflow"
+    },
+    {
+      "type": "ashby",
+      "organization": "character"
+    },
+    {
+      "type": "ashby",
+      "organization": "perplexity"
+    },
+    {
+      "type": "ashby",
+      "organization": "pinecone"
+    },
+    {
+      "type": "ashby",
+      "organization": "weaviate"
+    },
+    {
+      "type": "ashby",
+      "organization": "neon"
+    },
+    {
+      "type": "ashby",
+      "organization": "temporal"
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "purestorage",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "canonical",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "workato",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "upstart",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "dialpad",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "pubmatic",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "opentable",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "sofi",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "tailscale",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "zocdoc",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "linkedin",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "gemini",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "everlane",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "huntress",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "algolia",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "betterment",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "druva",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "careem",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "pagerduty",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "yext",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "mill",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "carrotfertility",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "hometap",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "taskrabbit",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "brave",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "airspace",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "logicgate",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "typeform",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "udemy",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "calendly",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "trivago",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "inmarket",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "boku",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "blend",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "lob",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "rocketlawyer",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "gradle",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "cornerstone",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "gather",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "quotient",
+      "limit": 15
+    },
+    {
+      "type": "greenhouse",
+      "board_token": "greenhouse",
+      "limit": 15
+    }
+  ]
+}

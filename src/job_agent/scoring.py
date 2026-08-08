@@ -135,11 +135,27 @@ def score_fit(job: Job) -> FitScore:
     matched = [keyword for keyword in keywords if _contains_keyword(text, keyword)]
     missing = [keyword for keyword in keywords if not _contains_keyword(text, keyword)][:5]
 
-    base = 40 if role_track != "Other" else 20
+    title_role = _title_role_override(job)
+    explicit_title_match = (
+        role_track != "Other"
+        and title_role == role_track
+    )
+    base = (
+        52
+        if explicit_title_match
+        else 40
+        if role_track != "Other"
+        else 20
+    )
     score = min(95, base + len(matched) * 12)
     reasons = [f"Matched {keyword}" for keyword in matched[:5]]
     if role_track != "Other":
         reasons.insert(0, f"Classified as {role_track}")
+    if explicit_title_match:
+        reasons.insert(
+            1,
+            f"Title explicitly matches {role_track}",
+        )
 
     return FitScore(
         score=score,

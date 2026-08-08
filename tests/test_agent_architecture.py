@@ -68,6 +68,34 @@ def _policy_decision(call: ToolCall):
     )
 
 
+def test_policy_denies_browser_write_during_anti_spam_cooldown():
+    decision = _policy_decision(
+        ToolCall(
+            tool_name="browser_execute",
+            parameters={},
+            effect=ToolEffect.WRITE,
+            context={"anti_spam_cooldown_active": True},
+        )
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "anti_spam_cooldown_active"
+
+
+def test_policy_denies_browser_write_during_failure_circuit_breaker():
+    decision = _policy_decision(
+        ToolCall(
+            tool_name="browser_execute",
+            parameters={},
+            effect=ToolEffect.WRITE,
+            context={"failure_circuit_breaker_active": True},
+        )
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "failure_circuit_breaker_active"
+
+
 def test_perception_normalizes_environment_and_tool_feedback():
     perception = StructuredPerception()
     form = perception.observe_form('[{"label": "Email", "required": true}]')
@@ -79,6 +107,39 @@ def test_perception_normalizes_environment_and_tool_feedback():
     assert form.payload["fields"][0]["label"] == "Email"
     assert invalid.payload["valid"] is False
     assert invalid.payload["error"].startswith("invalid_form_snapshot:")
+
+
+def test_perception_compacts_ats_fields_before_observation():
+    perception = StructuredPerception()
+    options = [
+        {"label": f"Option {index}", "value": "private"}
+        for index in range(20)
+    ]
+    form = perception.observe_form(
+        json.dumps(
+            [
+                {
+                    "label": (
+                        "Describe your most complex production incident " * 12
+                    ),
+                    "type": "textarea",
+                    "required": True,
+                    "value": "candidate@example.com",
+                    "html": "<input value='candidate@example.com'>",
+                    "options": options,
+                }
+            ]
+        )
+    )
+
+    field = form.payload["fields"][0]
+    serialized = json.dumps(form.payload)
+    assert field["label"].endswith("...")
+    assert field["required"] is True
+    assert field["option_count"] == 20
+    assert len(field["options"]) == 12
+    assert "candidate@example.com" not in serialized
+    assert "<input" not in serialized
 
 
 def test_agent_core_returns_structured_results_and_feedback():
@@ -181,6 +242,46 @@ def test_agent_core_closed_loop_preserves_every_round_transition():
     assert memory.thoughts == result.thoughts
     assert memory.rounds == result.rounds
     assert memory.memory_updates == result.memory_updates
+
+
+def test_agent_core_thought_uses_sliding_memory_projection():
+    registry = ToolRegistry()
+    registry.register_tool(RecordingTool("first"))
+    registry.register_tool(RecordingTool("second"))
+    registry.register_tool(RecordingTool("third"))
+    memory = ShortTermMemory()
+    core = AgentCore(ControlledExecution(registry, short_term_memory=memory))
+    initial = StructuredPerception().observe("task", "user", {})
+    seen_contexts: list[list[str]] = []
+
+    def capture(context):
+        seen_contexts.append(
+            [
+                observation.kind
+                for observation in context.short_term_observations
+            ]
+        )
+        return core.build_thought(context)
+
+    core.run_loop(
+        core.create_plan(
+            "Record three values.",
+            [
+                ToolCall("first", {"value": "one"}),
+                ToolCall("second", {"value": "two"}),
+                ToolCall("third", {"value": "three"}),
+            ],
+        ),
+        initial_observation=initial,
+        thought_builder=capture,
+    )
+
+    assert seen_contexts[0] == ["task"]
+    assert seen_contexts[1] == ["tool_result", "memory_summary"]
+    assert seen_contexts[2] == ["tool_result", "memory_summary"]
+    summary = memory.planning_observations(memory.observations[-1])[-1]
+    assert summary.kind == "memory_summary"
+    assert "parameters" not in json.dumps(summary.payload)
 
 
 def test_agent_core_runs_one_selected_action_from_a_bounded_plan():
@@ -492,6 +593,96 @@ def test_career_policy_blocks_forbidden_and_unsafe_actions():
     assert recovered_retry.allowed is True
     assert unscoped_recovered_retry.code == "unscoped_recovery_retry"
     assert unresolved_submit.code == "blocking_review_items"
+
+
+def test_policy_gate_applies_hybrid_candidate_answer_validation():
+    exact = _policy_decision(
+        ToolCall(
+            tool_name="form_filler",
+            parameters={},
+            effect=ToolEffect.WRITE,
+            context={
+                "candidate_answer_validations": [
+                    {
+                        "kind": "exact",
+                        "label": "Degree",
+                        "value": "Bachelor",
+                        "approved_value": "Master",
+                    }
+                ]
+            },
+        )
+    )
+    invalid_email = _policy_decision(
+        ToolCall(
+            tool_name="form_filler",
+            parameters={},
+            effect=ToolEffect.WRITE,
+            context={
+                "candidate_answer_validations": [
+                    {
+                        "kind": "email",
+                        "label": "Email",
+                        "value": "not-an-email",
+                    }
+                ]
+            },
+        )
+    )
+    self_check = _policy_decision(
+        ToolCall(
+            tool_name="form_filler",
+            parameters={},
+            effect=ToolEffect.WRITE,
+            context={
+                "semantic_answer_validations": [
+                    {
+                        "answer": "I built AWS systems.",
+                        "evidence": ["resume"],
+                        "generator_id": "main",
+                        "validator_id": "main",
+                    }
+                ]
+            },
+        )
+    )
+
+    assert exact.code == "candidate_fact_mismatch"
+    assert invalid_email.code == "candidate_email_invalid"
+    assert self_check.code == "self_validation_forbidden"
+
+
+def test_policy_gate_uses_independent_semantic_validator():
+    gate = JobApplicationPolicyGate(
+        semantic_answer_validator=lambda _item: {
+            "verdict": "deny",
+            "reason": "AWS is not in the approved facts.",
+        }
+    )
+
+    decision = gate.evaluate(
+        ToolCall(
+            tool_name="form_filler",
+            parameters={},
+            effect=ToolEffect.WRITE,
+            context={
+                "semantic_answer_validations": [
+                    {
+                        "answer": "I built AWS systems.",
+                        "evidence": ["candidate facts"],
+                        "generator_id": "main",
+                        "validator_id": "nli",
+                    }
+                ]
+            },
+        ),
+        short_term_memory=ShortTermMemory(),
+        long_term_memory=NullLongTermMemory(),
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "semantic_validation_failed"
+    assert "AWS" in decision.reason
 
 
 def test_repair_policy_requires_repairable_offline_isolated_path():

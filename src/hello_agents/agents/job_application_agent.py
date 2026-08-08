@@ -38,6 +38,9 @@ from hello_agents.core.runtime import AgentCore
 from hello_agents.tools.builtin.career import (
     ApplicationPackageTool,
     ApplicationTrackerTool,
+    BuildApplicationPackageTool,
+    EscalateToHumanTool,
+    EvaluateFitTool,
     FitScorerTool,
     FormFillerTool,
     FormInspectorTool,
@@ -180,7 +183,10 @@ class JobApplicationAgent(Agent):
     def _default_registry() -> ToolRegistry:
         registry = ToolRegistry()
         registry.register_tool(ApplicationPackageTool())
+        registry.register_tool(BuildApplicationPackageTool())
         registry.register_tool(ApplicationTrackerTool())
+        registry.register_tool(EscalateToHumanTool())
+        registry.register_tool(EvaluateFitTool())
         registry.register_tool(ManualJDImportTool())
         registry.register_tool(FitScorerTool())
         registry.register_tool(FormInspectorTool())
@@ -207,11 +213,22 @@ class JobApplicationAgent(Agent):
         )
         self.short_term_memory.add_observation(job_observation)
         form_observation = None
+        precomputed_form_plan = None
+        fact_blockers: list[str] = []
         if self.form_snapshot_json is not None:
             form_observation = self.perception.observe_form(
                 self.form_snapshot_json
             )
             self.short_term_memory.add_observation(form_observation)
+            if self.profile_json is not None:
+                try:
+                    precomputed_form_plan = build_form_fill_plan(
+                        inspect_form_snapshot(self.form_snapshot_json),
+                        json.loads(self.profile_json),
+                    )
+                    fact_blockers = precomputed_form_plan.review_required_fields
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    precomputed_form_plan = None
 
         state = JobApplicationState(
             job=job,
@@ -234,7 +251,7 @@ class JobApplicationAgent(Agent):
                 context={"phase": "review"},
             ),
             self._call(
-                "fit_scorer",
+                "evaluate_fit",
                 {"input": input_text},
                 purpose="Score the observed job against approved role tracks.",
                 context={"phase": "review"},
@@ -276,7 +293,7 @@ class JobApplicationAgent(Agent):
         if self.package_dir is not None:
             workflow_steps.append(
                 self._call(
-                    "application_package",
+                    "build_application_package",
                     {
                         "output_dir": str(self.package_dir),
                         "jd_text": input_text,
@@ -314,6 +331,37 @@ class JobApplicationAgent(Agent):
                     ),
                 ]
             )
+            if fact_blockers:
+                workflow_steps.append(
+                    self._call(
+                        "escalate_to_human",
+                        {
+                            "field_labels": fact_blockers,
+                            "reason": "required_candidate_fact_missing",
+                            "checkpoint": {
+                                "company": job.company,
+                                "title": job.title,
+                                "phase": "form",
+                                "status": "waiting_for_user",
+                                "observation_id": (
+                                    form_observation.observation_id
+                                    if form_observation is not None
+                                    else job_observation.observation_id
+                                ),
+                                "agent_runtime_id": self.agent_runtime_id or "",
+                            },
+                        },
+                        purpose=(
+                            "Pause this application until the candidate "
+                            "approves missing facts."
+                        ),
+                        context={
+                            "phase": "human_handoff",
+                            "blocking_review_items": fact_blockers,
+                            "retry_scope": "single_application",
+                        },
+                    )
+                )
 
         workflow_steps.append(
             self._call(
@@ -343,7 +391,7 @@ class JobApplicationAgent(Agent):
 
         review_packet = self._result_output(results, "review_packet")
         jd_analysis = self._result_output(results, "jd_parser")
-        fit_output = self._result_output(results, "fit_scorer")
+        fit_output = self._result_output(results, "evaluate_fit")
         sections: list[str] = [review_packet]
         history_messages = self._loop_history_messages(loop_result)
         state.review_packet = review_packet
@@ -406,7 +454,7 @@ class JobApplicationAgent(Agent):
             )
 
         if self.package_dir is not None:
-            package = self._result_output(results, "application_package")
+            package = self._result_output(results, "build_application_package")
             state.application_package = package
             sections.append(f"## Application Package\n\n{package}")
             history_messages.append(
@@ -428,7 +476,7 @@ class JobApplicationAgent(Agent):
             )
             state.safety_gates.append(state.sensitive_fields)
             try:
-                state.form_plan = build_form_fill_plan(
+                state.form_plan = precomputed_form_plan or build_form_fill_plan(
                     inspect_form_snapshot(self.form_snapshot_json),
                     json.loads(self.profile_json),
                 )
@@ -475,6 +523,16 @@ class JobApplicationAgent(Agent):
                     ),
                 ]
             )
+            if fact_blockers:
+                escalation = self._result_output(results, "escalate_to_human")
+                sections.append(f"## Human Review\n\n{escalation}")
+                history_messages.append(
+                    Message(
+                        escalation,
+                        "tool_result",
+                        metadata={"section": "human_handoff"},
+                    )
+                )
 
         submit_gate = self._result_output(results, "submit_gate")
         state.submit_gate = submit_gate

@@ -79,33 +79,56 @@ def screen_job_for_candidate(job: Job, profile: dict[str, Any] | None) -> Candid
     if not profile:
         return CandidateScreeningResult(eligible=True, reasons=[])
 
+    overrides = (profile or {}).get("screening_overrides") or {}
+
     reasons: list[str] = []
     country = str(profile.get("country") or "").strip().lower()
     location = " ".join(
         part for part in [str(job.location or ""), str(job.remote_policy or "")] if part
     )
-    normalized_location = location.lower()
-    if country in {"united states", "us", "u.s.", "usa"} and _NON_US_LOCATION_PATTERN.search(location):
-        if not _US_LOCATION_PATTERN.search(location) and "worldwide" not in normalized_location:
-            reasons.append(f"listing location is outside the candidate's U.S. work authorization: {location}")
+    if (
+        not overrides.get("ignore_location_filter", False)
+        and country in {"united states", "us", "u.s.", "usa"}
+        and location_is_outside_us(location)
+    ):
+        reasons.append(
+            "listing location is outside the candidate's U.S. work "
+            f"authorization: {location}"
+        )
 
-    if _is_early_career_profile(profile) and _SENIOR_TITLE_PATTERN.search(job.title or ""):
+    if (
+        not overrides.get("ignore_seniority_title_filter", False)
+        and not profile.get("phd_equivalent")
+        and _is_early_career_profile(profile)
+        and _SENIOR_TITLE_PATTERN.search(job.title or "")
+    ):
         reasons.append("listing title requires a seniority level not supported by the candidate profile")
 
     raw_jd = job.raw_jd or ""
     if (
-        _requires_sponsorship(profile)
+        not overrides.get("ignore_sponsorship_filter", False)
+        and _requires_sponsorship(profile)
         and _NO_SPONSORSHIP_PATTERN.search(raw_jd)
         and not _SPONSORSHIP_SUPPORTED_PATTERN.search(raw_jd)
     ):
         reasons.append("listing does not provide visa sponsorship required by the candidate profile")
 
-    if not _is_us_citizen(profile) and _US_CITIZENSHIP_REQUIRED_PATTERN.search(job.raw_jd or ""):
+    if (
+        not overrides.get("ignore_citizenship_requirements", False)
+        and not _is_us_citizen(profile)
+        and _US_CITIZENSHIP_REQUIRED_PATTERN.search(job.raw_jd or "")
+    ):
         reasons.append("listing requires U.S. citizenship not supported by the candidate profile")
 
     required_years = _minimum_required_years(raw_jd)
     candidate_years = _candidate_max_years(profile)
-    if required_years and candidate_years is not None and candidate_years < required_years:
+    if (
+        not overrides.get("ignore_experience_requirements", False)
+        and not profile.get("phd_equivalent")
+        and required_years
+        and candidate_years is not None
+        and candidate_years < required_years
+    ):
         reasons.append(
             f"listing requires at least {required_years} years of experience; "
             f"candidate profile states {candidate_years}"
@@ -114,7 +137,21 @@ def screen_job_for_candidate(job: Job, profile: dict[str, Any] | None) -> Candid
     return CandidateScreeningResult(eligible=not reasons, reasons=reasons)
 
 
+def location_is_outside_us(location: str | None) -> bool:
+    """Return true only for an explicitly non-U.S. location."""
+    value = str(location or "")
+    normalized = value.lower()
+    return bool(
+        _NON_US_LOCATION_PATTERN.search(value)
+        and not _US_LOCATION_PATTERN.search(value)
+        and "worldwide" not in normalized
+    )
+
+
 def _is_early_career_profile(profile: dict[str, Any]) -> bool:
+    overrides = (profile or {}).get("screening_overrides") or {}
+    if overrides.get("ignore_seniority_title_filter") or profile.get("phd_equivalent"):
+        return False
     maximum = _candidate_max_years(profile)
     if maximum is not None and maximum >= 4:
         return False

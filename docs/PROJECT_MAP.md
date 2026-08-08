@@ -72,8 +72,8 @@ ops/daily.local.json
 | JD 解析、匹配分数、候选人筛选 | `jd_analysis.py`, `scoring.py`, `candidate_screening.py`, `shortlist.py` | 同名测试 |
 | PDF 简历索引和选择 | `resumes.py` | `test_resumes.py`, `test_pdf_resume_upload.py` |
 | 档案、答案库、向量检索 | `profile.py`, `application_answers.py`, `sensitive_kb.py`, `profile_vector_store.py` | 同名测试 |
-| 字段语义和表单计划 | `field_semantics.py`, `forms.py` | `test_field_semantics.py`, `test_forms.py` |
-| LLM 非敏感答案 | `llm_answer_resolver.py` | `test_llm_answer_resolver.py` |
+| 字段语义、表单计划和人工补事实 handoff | `field_semantics.py`, `forms.py`, `hello_agents/tools/builtin/career/human_handoff.py` | `test_field_semantics.py`, `test_forms.py`, `test_hello_agents_career.py` |
+| LLM 非敏感答案和独立语义验证 | `llm_answer_resolver.py` | `test_llm_answer_resolver.py` |
 | 浏览器脚本生成 | `runtime_filler.py` | `test_runtime_filler.py` |
 | Python 浏览器运行时 | `python_runtime.py` | `test_python_runtime*.py` |
 | ATS 特例 | `ats_adapters.py` | `test_ats_adapters.py` |

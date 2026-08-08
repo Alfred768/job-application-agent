@@ -22,6 +22,32 @@ def test_score_fit_returns_explainable_result():
     assert score.reasons
 
 
+def test_score_fit_counts_explicit_technical_title_as_fit_evidence():
+    job = import_job_from_text(
+        "Title: Software Engineer, New Grad\n\n"
+        "Build distributed Python services."
+    )
+
+    score = score_fit(job)
+
+    assert score.score == 76
+    assert score.role_track == "SDE"
+    assert score.recommendation == "prepare"
+    assert "Title explicitly matches SDE" in score.reasons
+
+
+def test_score_fit_does_not_boost_non_technical_title_from_body_keywords():
+    job = import_job_from_text(
+        "Title: AI Tutor - French\n\n"
+        "Review model training outputs."
+    )
+
+    score = score_fit(job)
+
+    assert score.score == 64
+    assert all("Title explicitly matches" not in reason for reason in score.reasons)
+
+
 def test_classify_software_engineer_ml_infrastructure_title_as_ml_infra():
     job = import_job_from_text(
         "Title: Software Engineer, ML Infrastructure, Optimization\n\n"

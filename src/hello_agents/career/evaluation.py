@@ -16,12 +16,16 @@ class EvaluationPolicy:
     """Targets used to assess one job-application Agent round."""
 
     imported_cohort_target: int = 500
+    confirmation_rate_denominator: str = "raw_imported"
     min_confirmed_submission_rate: float = 0.80
     min_terminal_audit_coverage: float = 1.0
 
-    def targets(self) -> dict[str, int | float]:
+    def targets(self) -> dict[str, int | float | str]:
         return {
             "imported_cohort_target": self.imported_cohort_target,
+            "confirmation_rate_denominator": (
+                self.confirmation_rate_denominator
+            ),
             "min_confirmed_submission_rate": (
                 self.min_confirmed_submission_rate
             ),
@@ -85,6 +89,14 @@ def build_job_application_evaluation_metrics(
     skipped = min(executed, _count(execution, "skipped"))
     final_eligible = executed - skipped if audit_present else None
     submitted = _count(execution, "submitted")
+    daily_target = _mapping(state.get("daily_target"))
+    daily_submitted_available = daily_target.get("submitted") is not None
+    confirmed_for_raw_import_rate = (
+        _count(daily_target, "submitted")
+        if daily_submitted_available
+        else submitted
+    )
+    raw_confirmation_evidence = daily_submitted_available or audit_present
     terminal_records = sum(
         1
         for item in applications
@@ -96,7 +108,9 @@ def build_job_application_evaluation_metrics(
     )
     confirmed_rate = _rate(submitted, final_eligible)
     imported_confirmation_rate = (
-        _rate(submitted, imported) if audit_present else None
+        _rate(confirmed_for_raw_import_rate, imported)
+        if raw_confirmation_evidence
+        else None
     )
     audit_complete = (
         bool(progress.get("complete")) if audit_present else False
@@ -128,15 +142,15 @@ def build_job_application_evaluation_metrics(
             ),
             "final_eligible": (
                 "Executed applications excluding only terminal safety skips; "
-                "this is the denominator for the confirmed-submission "
-                "quality target."
+                "this is used for a diagnostic execution-success rate."
             ),
             "confirmed_submission": (
                 "Only page-confirmed submissions recorded as submitted."
             ),
             "raw_import_to_confirmed_rate": (
-                "A source-quality funnel metric, monitored without a "
-                "submission quota."
+                "Page-confirmed submissions for the accounting day divided "
+                "by listings accepted by the raw source import; this is the "
+                "primary confirmed-submission target."
             ),
         },
         "counts": {
@@ -147,6 +161,11 @@ def build_job_application_evaluation_metrics(
             "safe_skipped": skipped if audit_present else None,
             "final_eligible": final_eligible,
             "submitted": submitted if audit_present else None,
+            "confirmed_for_raw_import_rate": (
+                confirmed_for_raw_import_rate
+                if raw_confirmation_evidence
+                else None
+            ),
             "terminal_records": (
                 terminal_records if audit_present else None
             ),
@@ -179,12 +198,15 @@ def build_job_application_evaluation_metrics(
                     audit_complete if audit_present else None
                 ),
             },
-            "confirmed_submission_rate_final_eligible": {
+            "raw_import_to_confirmed_rate": {
                 "status": _threshold_status(
-                    confirmed_rate,
+                    imported_confirmation_rate,
                     policy.min_confirmed_submission_rate,
-                    pending=not audit_present,
+                    pending=not raw_confirmation_evidence,
                 ),
+            },
+            "confirmed_submission_rate_final_eligible": {
+                "status": "monitor",
             },
             "submit_clicked_unconfirmed": {
                 "target": 0,
@@ -231,7 +253,7 @@ def _recommendations(metrics: Mapping[str, Any]) -> tuple[str, ...]:
     if (
         _mapping(
             assessment.get(
-                "confirmed_submission_rate_final_eligible"
+                "raw_import_to_confirmed_rate"
             )
         ).get("status")
         == "not_met"

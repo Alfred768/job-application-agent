@@ -351,3 +351,105 @@ def test_screening_keeps_new_grad_growth_path_years_copy():
     )
 
     assert result.eligible is True
+
+
+def _profile_with_overrides(**overrides):
+    return {
+        **_early_career_profile(),
+        "screening_overrides": overrides,
+    }
+
+
+def test_citizenship_override_allows_citizenship_required_role():
+    result = screen_job_for_candidate(
+        Job(
+            title="Data Warehouse Software Engineer I",
+            company="Example",
+            raw_jd="This position requires U.S. citizenship due to federal contracting.",
+            location="Remote US",
+        ),
+        {
+            **_profile_with_overrides(ignore_citizenship_requirements=True),
+            "sensitive_answers": {"citizenship": {"answer": "No", "approved": True}},
+        },
+    )
+    assert result.eligible is True
+
+
+def test_seniority_override_allows_senior_title_for_early_career_profile():
+    result = screen_job_for_candidate(
+        Job(title="Senior ML Platform Engineer", company="Example", raw_jd="", location="Remote US"),
+        _profile_with_overrides(ignore_seniority_title_filter=True),
+    )
+    assert result.eligible is True
+
+
+def test_experience_override_allows_above_profile_years_requirement():
+    result = screen_job_for_candidate(
+        Job(
+            title="Software Engineer, Distributed Systems",
+            company="Example",
+            raw_jd="We'd love to hear from you if you have 5+ years of Software Engineering experience.",
+            location="United States",
+        ),
+        {**_profile_with_overrides(ignore_experience_requirements=True), "years_experience": "1-2"},
+    )
+    assert result.eligible is True
+
+
+def test_phd_equivalent_bypasses_seniority_and_experience_filters():
+    profile = {
+        "country": "United States",
+        "work_history": [{"title": "Research Assistant", "employment_type": "Internship"}],
+        "years_experience": "3",
+        "phd_equivalent": True,
+    }
+    senior_title = screen_job_for_candidate(
+        Job(title="Senior ML Platform Engineer", company="Example", raw_jd="", location="Remote US"),
+        profile,
+    )
+    assert senior_title.eligible is True
+    experience = screen_job_for_candidate(
+        Job(
+            title="Software Engineer",
+            company="Example",
+            raw_jd="Candidates need 4+ years of experience in production ML.",
+            location="Remote US",
+        ),
+        profile,
+    )
+    assert experience.eligible is True
+
+
+def test_phd_equivalent_does_not_bypass_sponsorship_requirement():
+    profile = {
+        "country": "United States",
+        "work_history": [{"title": "Research Assistant", "employment_type": "Internship"}],
+        "years_experience": "3",
+        "phd_equivalent": True,
+        "requires_sponsorship": "Yes",
+    }
+    result = screen_job_for_candidate(
+        Job(
+            title="ML Research Fellow",
+            company="Example",
+            raw_jd="We are not currently able to sponsor visas. Candidates need independent work authorization.",
+            location="Remote US",
+        ),
+        profile,
+    )
+    assert result.eligible is False
+    assert any("sponsorship" in reason for reason in result.reasons)
+
+
+def test_sponsorship_override_allows_no_sponsorship_listing():
+    result = screen_job_for_candidate(
+        Job(
+            title="ML Research Fellow",
+            company="Example",
+            raw_jd="We are not currently able to sponsor visas. Candidates need independent work authorization.",
+            location="Remote US",
+        ),
+        {**_early_career_profile(), "requires_sponsorship": "Yes", "screening_overrides": {"ignore_sponsorship_filter": True}},
+    )
+    assert result.eligible is True

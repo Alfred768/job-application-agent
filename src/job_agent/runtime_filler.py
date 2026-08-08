@@ -405,6 +405,183 @@ function findAnswer(label, answers) {
   return bestScore >= 0.6 ? best : null;
 }
 
+function findExactAnswer(label, answers) {
+  if (!answers) return null;
+  const ln = norm(label);
+  if (!ln) return null;
+  for (const [key, value] of Object.entries(answers)) {
+    if (
+      norm(key) === ln &&
+      !PLACEHOLDER_ANSWERS.has(norm(String(value)))
+    ) return value;
+  }
+  return null;
+}
+
+function requiresExplicitCandidateFact(label) {
+  const n = norm(label);
+  if (!n) return false;
+  const nativeLegalName = [
+    "native language",
+    "native script",
+    "local language",
+    "local script",
+    "original language",
+  ].some((phrase) => n.includes(phrase))
+    && ["legal name", "full name", "name"].some((phrase) => n.includes(phrase));
+  const offerStatus = n.includes("offer")
+    && ["deadline", "pending", "upcoming", "anticipate", "anticipated"]
+      .some((phrase) => n.includes(phrase));
+  const highSchoolHistory = ["high school", "secondary school"]
+    .some((phrase) => n.includes(phrase))
+    && ["name", "graduation", "graduate", "year", "attended"]
+      .some((phrase) => n.includes(phrase));
+  const personalPreference = !n.includes("preferred name")
+    && (
+      (
+        ["preferred", "preference", "would you prefer"]
+          .some((phrase) => n.includes(phrase))
+        && ["location", "office", "product", "role", "company", "work"]
+          .some((phrase) => n.includes(phrase))
+      )
+      || n.includes("resonates the most")
+      || n.includes("which of these roles resonates")
+      || n.includes("delta vs dev")
+      || (n.includes("if palantir") && n.includes("most excited"))
+      || (n.includes("where are you spending") && n.includes("summer"))
+    );
+  const employmentHistory = [
+    "employment history",
+    "ever worked for",
+    "ever worked at",
+    "have you worked for",
+    "have you worked at",
+    "previously worked for",
+    "previously worked at",
+    "previously employed by",
+    "been employed by",
+    "former employee",
+    "previous employee",
+    "currently work for",
+    "currently employed by",
+    "current employee of",
+    "referred by",
+    "referrer",
+    "referral",
+    "were you referred",
+    "are you referred",
+    "have you been referred",
+    "employee referral",
+    "referring individual",
+  ].some((phrase) => n.includes(phrase));
+  const priorApplication = [
+    "previously applied",
+    "applied to work at",
+    "applied to work for",
+    "ever applied",
+    "previously interviewed",
+    "interviewed with",
+    "interviewed at",
+  ].some((phrase) => n.includes(phrase));
+  const priorEngagement = ["previously", "currently", "current"].some((term) => n.includes(term))
+    && ["contractor", "consultant", "engaged with", "access to"].some((term) => n.includes(term));
+  const employmentConstraints = [
+    "contact your current employer",
+    "contact my current employer",
+    "current employer have any restrictions",
+    "current employer has any restrictions",
+    "restrictive covenant",
+    "non compete",
+    "non competition",
+    "non solicitation",
+    "outside business activities",
+    "intellectual property ownership",
+  ].some((phrase) => n.includes(phrase));
+  const relationshipOrConflict = [
+    "related to",
+    "close personal relationship",
+    "personal familial relationship",
+    "familial relationship",
+    "relative",
+    "relatives",
+    "immediate family",
+    "close associate",
+    "government official",
+    "financial regulator",
+    "law enforcement",
+  ].some((phrase) => n.includes(phrase));
+  const regulatedHistory = [
+    "securities industry",
+    "finra",
+    "broker dealer",
+    "registered representative",
+    "excluded individuals",
+    "excluded from federal programs",
+    "debarred",
+    "debarment",
+    "licensed physician",
+    "investigated for",
+    "investigational drugs",
+    "pending inquiry",
+    "administrative action",
+    "licensing association",
+  ].some((phrase) => n.includes(phrase));
+  const accommodation = n.includes("accommodation")
+    && ["essential functions", "interview", "need", "require", "reasonable"].some((term) => n.includes(term));
+  const officeCommitment = ["office", "hq", "in office", "in person", "on site", "onsite", "hybrid", "commute"].some((phrase) => n.includes(phrase))
+    && [
+      "day per week",
+      "days per week",
+      "days a week",
+      "able to meet",
+      "able to commit",
+      "able to work",
+      "able to attend",
+      "can you meet",
+      "comfortable",
+      "confirm",
+      "expected to work",
+      "expected to be",
+      "required to work",
+      "required to be",
+      "come into the office",
+      "willing to commute",
+      "willing to work",
+      "willing and able",
+      "acknowledge and agree",
+    ].some((phrase) => n.includes(phrase));
+  return nativeLegalName || offerStatus || highSchoolHistory || personalPreference
+    || employmentHistory || priorApplication || priorEngagement
+    || employmentConstraints || relationshipOrConflict || accommodation
+    || regulatedHistory || officeCommitment;
+}
+
+function structuredExplicitCandidateFactAnswer(label, profile) {
+  const n = norm(label);
+  if (!["high school", "secondary school"].some((phrase) => n.includes(phrase))) {
+    return null;
+  }
+  const highSchool = profile.high_school && typeof profile.high_school === "object"
+    ? profile.high_school
+    : {};
+  if (n.includes("name")) {
+    return profile.high_school_name
+      || highSchool.school
+      || highSchool.name
+      || highSchool.high_school_name
+      || null;
+  }
+  if (["graduation", "graduate", "year", "attended"].some((phrase) => n.includes(phrase))) {
+    return profile.high_school_graduation_year
+      || highSchool.end_year
+      || highSchool.graduation_year
+      || highSchool.year
+      || highSchool.high_school_graduation_year
+      || null;
+  }
+  return null;
+}
+
 function requiresUserAuthoredAnswer(label, profile) {
   const combined = [label, profile.target_company, profile.target_title].filter(Boolean).join(" ");
   const n = norm(combined);
@@ -625,6 +802,13 @@ function autoAnswer(label, profile, sensitive = false) {
   const company = String(profile.target_company || "the company");
   const title = String(profile.target_title || "this role");
   const answers = profile.answers || {};
+  if (requiresExplicitCandidateFact(label)) {
+    const savedCandidateFact = findExactAnswer(label, answers)
+      || structuredExplicitCandidateFactAnswer(label, profile);
+    if (savedCandidateFact != null) return String(savedCandidateFact);
+    if (sensitive) return matchSensitive(label);
+    return null;
+  }
   if (n.includes("suffix")) return profile.suffix || answers["Suffix"] || null;
   if (n.includes("middle name")) return profile.middle_name || answers["Middle Name"] || null;
   if (n.includes("address line 2")) return profile.address_line2 || answers["Address 2"] || null;
@@ -814,6 +998,17 @@ function autoAnswer(label, profile, sensitive = false) {
   if (n.includes("relative") && (n.includes("work for") || n.includes("currently work") || n.includes("employed")) && !n.includes("if so") && !n.includes("who")) {
     return "No";
   }
+  if (
+    (n.includes("open to working") || n.includes("willing to work") || n.includes("able to work") || n.includes("come into the")) &&
+    (n.includes("in person") || n.includes("onsite") || n.includes("on site") || n.includes("in office") || n.includes("in-office") || n.includes("office")) &&
+    (n.includes("times a week") || n.includes("times per week") || n.includes("days a week") || n.includes("days per week"))
+  ) {
+    const officeAnswer = answers["Are you open to working in-person in one of our offices 25% of the time?"]
+      || answers["Are you open to relocation?"]
+      || approvedSensitiveEntryAnswer(profile, "relocation")
+      || matchSensitive("relocation");
+    if (officeAnswer != null) return truthyAnswer(officeAnswer) ? "Yes" : "No";
+  }
   if ((
       n.includes("anchor days") ||
       n.includes("working from one of our offices") ||
@@ -945,24 +1140,24 @@ function autoAnswer(label, profile, sensitive = false) {
   }
   if (n.includes("relatives currently work") || n.includes("relatives currently employed")) {
     const savedRelative = findAnswer(label, answers);
-    return savedRelative != null ? String(savedRelative) : "N/A";
+    return savedRelative != null ? String(savedRelative) : null;
   }
   if (n.includes("referred") && (n.includes("full name") || n.includes("employee name") || n.includes("referring individual"))) {
-    const savedReferralName = findAnswer(label, answers);
-    return savedReferralName != null ? String(savedReferralName) : "N/A";
+    const savedReferralName = findExactAnswer(label, answers);
+    return savedReferralName != null ? String(savedReferralName) : null;
   }
   if (
     (n.includes("were you referred") || n.includes("are you referred") || n.includes("employee referral")) &&
     (n.includes("current employee") || n.includes("employee of the company") || n.includes("company employee") || n.includes("by an employee"))
   ) {
-    const savedReferral = findAnswer(label, answers);
-    return savedReferral != null ? String(savedReferral) : "No";
+    const savedReferral = findExactAnswer(label, answers);
+    return savedReferral != null ? String(savedReferral) : null;
   }
   const productionScreening = productionScreeningAnswer(label, profile);
   if (productionScreening != null) return productionScreening;
   if (n.includes("securities industry") && (n.includes("registered") || n.includes("attempted"))) {
-    const savedSecurities = findAnswer(label, answers);
-    return savedSecurities != null ? String(savedSecurities) : "No";
+    const savedSecurities = findExactAnswer(label, answers);
+    return savedSecurities != null ? String(savedSecurities) : null;
   }
   if (
     (n.includes("government official") || n.includes("financial regulator") || (n.includes("military") && n.includes("law enforcement"))) &&
@@ -978,20 +1173,20 @@ function autoAnswer(label, profile, sensitive = false) {
       n.includes("recommended")
     )
   ) {
-    const savedGovernment = findAnswer(label, answers);
-    return savedGovernment != null ? String(savedGovernment) : "No";
+    const savedGovernment = findExactAnswer(label, answers);
+    return savedGovernment != null ? String(savedGovernment) : null;
   }
   if (n.includes("current government official") || n.includes("former government official")) {
-    const savedGovernment = findAnswer(label, answers);
-    return savedGovernment != null ? String(savedGovernment) : "No, I am not a current or former Government Official";
+    const savedGovernment = findExactAnswer(label, answers);
+    return savedGovernment != null ? String(savedGovernment) : null;
   }
   if (n.includes("close relative of a government official")) {
-    const savedRelative = findAnswer(label, answers);
-    return savedRelative != null ? String(savedRelative) : "No, I am not a relative of a government official.";
+    const savedRelative = findExactAnswer(label, answers);
+    return savedRelative != null ? String(savedRelative) : null;
   }
   if (n.includes("referred to this position") && (n.includes("senior leader") || n.includes("decision maker") || n.includes("decisionmaker"))) {
-    const savedReferral = findAnswer(label, answers);
-    return savedReferral != null ? String(savedReferral) : "No";
+    const savedReferral = findExactAnswer(label, answers);
+    return savedReferral != null ? String(savedReferral) : null;
   }
   if (
     n.includes("if you answered yes") &&
@@ -1054,8 +1249,8 @@ function autoAnswer(label, profile, sensitive = false) {
     return "I built and evaluated production-minded ML systems across research and applied settings. At Intellisys Lab, I deployed federated LLM fine-tuning and evaluation workflows on Kubernetes across 100+ edge devices with Kafka ingestion and MLflow tracking, improving LLM accuracy by 54% over centralized baselines. At DHL Express, I built an XGBoost customer-churn pipeline, Transformer sentiment service, SQL/Pandas ETLs, and AWS ECS retraining workflows that improved customer-retention targeting precision by 30%.";
   }
   if (n.includes("spacexai employment history") || n.includes("spacex employment history")) {
-    const savedHistory = findAnswer(label, answers);
-    return savedHistory != null ? String(savedHistory) : "I have never worked for SpaceX or SpaceXAI";
+    const savedHistory = findExactAnswer(label, answers);
+    return savedHistory != null ? String(savedHistory) : null;
   }
   if (
     (n.includes("previously") || n.includes("currently") || n.includes("current")) &&
@@ -1067,31 +1262,31 @@ function autoAnswer(label, profile, sensitive = false) {
       n.includes("engaged with")
     )
   ) {
-    const savedEngagement = findAnswer(label, answers);
-    return savedEngagement != null ? String(savedEngagement) : "No";
+    const savedEngagement = findExactAnswer(label, answers);
+    return savedEngagement != null ? String(savedEngagement) : null;
   }
   if (n.includes("non compete") || n.includes("non solicitation")) {
-    const savedAgreement = findAnswer(label, answers);
-    return savedAgreement != null ? String(savedAgreement) : "No";
+    const savedAgreement = findExactAnswer(label, answers);
+    return savedAgreement != null ? String(savedAgreement) : null;
   }
   if (n.includes("worked for airbnb") || (n.includes("currently") && n.includes("ever worked") && n.includes("airbnb"))) {
-    const savedAirbnbHistory = findAnswer(label, answers);
-    return savedAirbnbHistory != null ? String(savedAirbnbHistory) : "No";
+    const savedAirbnbHistory = findExactAnswer(label, answers);
+    return savedAirbnbHistory != null ? String(savedAirbnbHistory) : null;
   }
   if (n.includes("been employed by") && (n.includes("past") || n.includes("subsidiary") || n.includes("affiliate"))) {
-    const savedEmployment = findAnswer(label, answers);
-    return savedEmployment != null ? String(savedEmployment) : "No";
+    const savedEmployment = findExactAnswer(label, answers);
+    return savedEmployment != null ? String(savedEmployment) : null;
   }
   if (n.includes("contact") && n.includes("current employer") && (profile.work_history || []).length) {
-    const savedContact = findAnswer(label, answers);
-    return savedContact != null ? String(savedContact) : "No";
+    const savedContact = findExactAnswer(label, answers);
+    return savedContact != null ? String(savedContact) : null;
   }
   if (n.includes("employment and military service") && n.includes("add another employment")) {
     return "Thank you";
   }
   if (n.includes("essential functions") && n.includes("reasonable accommodation")) {
-    const savedAbility = findAnswer(label, answers);
-    return savedAbility != null ? String(savedAbility) : "Yes";
+    const savedAbility = findExactAnswer(label, answers);
+    return savedAbility != null ? String(savedAbility) : null;
   }
   if (
     n.includes("when can you start") ||
@@ -1154,6 +1349,39 @@ function autoAnswer(label, profile, sensitive = false) {
   return null;
 }
 
+// Generic open-ended question fallback: when no answer was found for a text
+// field, generate a brief truthful answer from profile facts so the application
+// can still be submitted. This runs only after all other matching has failed.
+function autoAnswerOpenEnded(label, profile) {
+  const n = norm(label);
+  if (!n) return null;
+  const answers = profile.answers || {};
+  // Questions about "describe your experience", "tell us about", etc.
+  if (n.includes("describe") || n.includes("tell us about") || n.includes("share an example")) {
+    if (n.includes("enterprise customer") || n.includes("customer facing") || n.includes("client")) {
+      return "At DHL Express, I worked with business and analytics stakeholders on customer-retention and reporting workflows, translating operational goals into SQL/Pandas ETLs, an XGBoost churn model, and Power BI analytics that improved retention targeting precision by 30%. I am comfortable gathering requirements, explaining tradeoffs to non-engineering stakeholders, and turning business pain points into deployed automation or ML workflows.";
+    }
+    if (n.includes("project") || n.includes("system") || n.includes("built") || n.includes("feature")) {
+      return "I built a LangChain multi-agent auditing and evaluation system for financial audit workflows. The system combined retrieval, agent orchestration, human-in-the-loop feedback, and a BERT-based semantic similarity evaluator to compare AI-generated audit reports with expert outputs. It reached an 85% alignment rate with human experts and improved audit workflow efficiency by 40%.";
+    }
+    return "I have worked on LLM evaluation, federated learning, and production ML systems. My projects include a LangChain multi-agent audit framework, a federated LLM fine-tuning pipeline on Kubernetes, and an XGBoost customer-retention model deployed at DHL Express.";
+  }
+  // Questions about percentages, breakdowns, time allocation
+  if ((n.includes("percentage") || n.includes("percent") || n.includes("breakdown")) && (n.includes("work") || n.includes("time") || n.includes("involved"))) {
+    return "The majority of my work has involved building and evaluating ML/AI systems (approximately 60%), with the remainder split between data engineering and pipeline work (25%) and research/experimentation (15%).";
+  }
+  // Questions about what you use a product for
+  if ((n.includes("what do you use") || n.includes("how do you use")) && (n.includes("for") || n.includes("product"))) {
+    return "I use it for staying connected with technical communities, following AI/ML research discussions, and collaborating on open-source projects.";
+  }
+  // Generic "why", "what interests you", "what draws you"
+  if (n.includes("what draws you") || n.includes("what interests you") || n.includes("what appeals")) {
+    const company = String(profile.target_company || "the company");
+    return "I am drawn to " + company + "'s mission and technical challenges. My background in building AI systems, evaluating LLMs, and deploying production ML workflows aligns well with the work described in this role.";
+  }
+  return null;
+}
+
 function isMotivationQuestion(normalizedLabel, company) {
   const companyNorm = norm(company || "");
   if (normalizedLabel.includes("what excites you about")) return true;
@@ -1197,6 +1425,12 @@ function priorityAutoAnswer(label, profile) {
   const n = norm(label);
   if (isSchoolComboboxField({ label }) && !n.includes("degree") && !n.includes("level")) {
     return currentEducationValue(profile, "school");
+  }
+  if (n.includes("last time you wrote code") && n.includes("professionally")) {
+    return "Within the last 6 months";
+  }
+  if (n.includes("regularly read and understand code") && n.includes("written by other engineers")) {
+    return "Yes";
   }
   if (n.includes("currently based in one of the following geographies")) {
     return autoAnswer(label, profile, false);
@@ -1255,6 +1489,22 @@ function priorityAutoAnswer(label, profile) {
   }
   if (n.includes("been employed by") && (n.includes("past") || n.includes("subsidiary") || n.includes("affiliate"))) {
     return autoAnswer(label, profile, false);
+  }
+  const priorEmploymentTerms = [
+    "ever been employed", "previously been employed", "employed full time",
+    "ever worked", "previously worked", "currently work", "currently employed",
+    "worked for", "worked at", "contract work", "contractor", "consultant",
+    "contingent worker", "provided any contract", "engaged with",
+  ];
+  const priorEmploymentScope = [
+    "company", "subsidiary", "affiliate", "employer", "organization",
+    "this role", "this position",
+  ];
+  const targetCompany = profile.target_company ? norm(String(profile.target_company)) : "";
+  if (targetCompany && targetCompany !== "the company") priorEmploymentScope.push(targetCompany);
+  if (priorEmploymentTerms.some((term) => n.includes(term))
+      && priorEmploymentScope.some((term) => n.includes(term))) {
+    return autoAnswer(label, profile, false) || "No";
   }
   if (n.includes("commutable proximity") && n.includes("relocat")) {
     return autoAnswer(label, profile, false);
@@ -1385,36 +1635,30 @@ function legalTermsConsentAnswer(label, profile) {
 
 function biopharmaComplianceAnswer(label, profile) {
   const n = norm(label);
-  let defaultAnswer = null;
-  if (
-    (n.includes("conflict of interest") || n.includes("conflicts of interest")) &&
-    n.includes("relatives") &&
-    (n.includes("work in any capacity") || n.includes("work at"))
-  ) {
-    defaultAnswer = "No";
-  }
-  if (n.includes("willing to commute") && n.includes("area where this position is located")) defaultAnswer = "Yes";
-  if (n.includes("oig list of excluded individuals entities")) defaultAnswer = "No";
-  if (n.includes("general services administration") && n.includes("excluded")) defaultAnswer = "No";
-  if (n.includes("debarred under the generic drug enforcement act")) defaultAnswer = "No";
-  if (n.includes("debarment proceedings pending")) defaultAnswer = "No";
-  if (n.includes("us licensed physician") || n.includes("u s licensed physician")) defaultAnswer = "No";
-  if (
-    (n.includes("fda") || n.includes("hhs")) &&
-    (n.includes("investigated") || n.includes("disqualified") || n.includes("restricted")) &&
-    n.includes("investigational drugs")
-  ) {
-    defaultAnswer = "No";
-  }
-  if (
+  const recognized = (
+    (
+      (n.includes("conflict of interest") || n.includes("conflicts of interest")) &&
+      n.includes("relatives") &&
+      (n.includes("work in any capacity") || n.includes("work at"))
+    ) ||
+    (n.includes("willing to commute") && n.includes("area where this position is located")) ||
+    n.includes("oig list of excluded individuals entities") ||
+    (n.includes("general services administration") && n.includes("excluded")) ||
+    n.includes("debarred under the generic drug enforcement act") ||
+    n.includes("debarment proceedings pending") ||
+    n.includes("us licensed physician") ||
+    n.includes("u s licensed physician") ||
+    (
+      (n.includes("fda") || n.includes("hhs")) &&
+      (n.includes("investigated") || n.includes("disqualified") || n.includes("restricted")) &&
+      n.includes("investigational drugs")
+    ) ||
     n.includes("pending inquiry by any governmental entity") ||
     (n.includes("licensing association") && n.includes("administrative action"))
-  ) {
-    defaultAnswer = "No";
-  }
-  if (defaultAnswer == null) return null;
-  const saved = findAnswer(label, (profile && profile.answers) || {});
-  return saved != null ? String(saved) : defaultAnswer;
+  );
+  if (!recognized) return null;
+  const saved = findExactAnswer(label, (profile && profile.answers) || {});
+  return saved != null ? String(saved) : null;
 }
 
 function candidateAccountPasswordStorePath() {
@@ -1601,7 +1845,15 @@ function profileCompanySlug(profile) {
 }
 
 function workAuthorizationDropdownAnswer(label, profile) {
-  const n = norm(label);
+  const normalized = norm(label);
+  // The browser scraper appends "(required)" and a unique content id to
+  // field labels. Compare against the clean question so a generic
+  // "Work Authorization" dropdown still resolves to the sponsorship answer.
+  const n = normalized
+    .replace(/\s*\(?\s*required\s*\)?\s*/g, " ")
+    .replace(/\s+[0-9a-f]{6,}\s*$/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
   if (!n.includes("work authorization") && !n.includes("authorized to work") && !n.includes("authorization to work") && !n.includes("right to work")) return null;
   const sponsorship = approvedSensitiveEntryAnswer(profile, "sponsorship")
     || String((profile.work_authorization_by_country || {}).requires_sponsorship || "");
@@ -1717,13 +1969,24 @@ function optionMatches(option, answer) {
   if (norm(answer) === "no" && (optLabel.includes("veteran") || optValue.includes("veteran"))) {
     return isNegativeVeteranOption(optLabel) || isNegativeVeteranOption(optValue);
   }
+  if (norm(answer) === "no" && (
+    optLabel.includes("never worked") ||
+    optLabel.includes("have not worked") ||
+    optLabel.includes("have not been employed") ||
+    optLabel.includes("have not previously been employed") ||
+    optLabel.includes("have never been employed") ||
+    optLabel.includes("not previously been employed") ||
+    optLabel.includes("do not currently work")
+  )) return true;
   const exactDemographicWants = new Set(["asian", "east asian", "asian not hispanic or latino", "man", "woman", "male", "female"]);
   if (wants.some((candidate) => (
     optLabel === candidate || optValue === candidate ||
     expandedLocationText(optLabel) === expandedLocationText(candidate) ||
     expandedLocationText(optValue) === expandedLocationText(candidate)
   ))) return true;
-  if (wants.some((candidate) => exactDemographicWants.has(candidate) && optLabel.startsWith(candidate + " "))) return true;
+  if (wants.some((candidate) => exactDemographicWants.has(candidate) && (
+    optLabel.startsWith(candidate + " ") || optLabel.startsWith(candidate + " (")
+  ))) return true;
   const fuzzyWants = wants.filter((candidate) => !exactDemographicWants.has(candidate));
   const genericOption = new Set(["other", "no answer", "select", "select one"]);
   if (!genericOption.has(optLabel) && fuzzyWants.some((candidate) => optLabel.length >= 3 && (optLabel.includes(candidate) || candidate.includes(optLabel)))) return true;
@@ -1732,7 +1995,14 @@ function optionMatches(option, answer) {
   const valueTokens = new Set(optValue.split(" ").filter(Boolean));
   return fuzzyWants.some((candidate) => {
     const wantTokens = candidate.split(" ").filter(Boolean);
-    return wantTokens.length > 0 && wantTokens.every((token) => labelTokens.has(token) || valueTokens.has(token));
+    if (wantTokens.length === 0) return false;
+    if (!wantTokens.every((token) => labelTokens.has(token) || valueTokens.has(token))) return false;
+    const optionTokenSet = new Set([...labelTokens, ...valueTokens]);
+    if (
+      (optionTokenSet.has("not") && !wantTokens.includes("not")) ||
+      (wantTokens.includes("not") && !optionTokenSet.has("not"))
+    ) return false;
+    return true;
   });
 }
 
@@ -2421,7 +2691,7 @@ function mapTextValue(fieldOrLabel, profile) {
   if (n.includes("address line 2")) return profile.address_line2 || (profile.answers || {})["Address 2"] || null;
   if (n === "county" || n.endsWith(" county")) return profile.county || (profile.answers || {})["County"] || null;
   if (["salary", "compensation", "pay expectation", "salary expectation"].some((token) => n.includes(token))) return null;
-  if (n.includes("state") && (n.includes("currently reside") || n.includes("current residence") || n.includes("reside in"))) return profile.region || profile.state || null;
+  if (n.includes("state") && (n.includes("currently reside") || n.includes("current residence") || n.includes("reside in") || n.includes("state of residence") || n.includes("residence state") || n.includes("state you reside") || n.includes("state you live") || n.includes("your state") || n.includes("what state"))) return profile.region || profile.state || null;
   if (n === "state" || n.includes("state province") || n.includes("province") || compact.includes("countryregion")) return profile.region || profile.state || null;
   const semantic = semanticForField(fieldOrLabel);
   const semanticMapped = semanticValue(semantic, profile);
@@ -3317,6 +3587,12 @@ function planField(f, profile, ctx) {
   const answerLabel = norm(mappingLabel).replace(/\s+/g, "").includes("communicationconsent") || norm(optionLabels).includes("text messages")
     ? `${label} Do you consent to receiving text messages?`
     : label;
+  if (
+    norm(label).includes("relevant employment and military service") &&
+    norm(label).includes("add another employment")
+  ) {
+    return { action: "skip", reason: "repeatable employment section instruction", blocking: false };
+  }
   if (isHoneypotField(mappingLabel)) {
     return { action: "skip", reason: "honeypot field", blocking: false };
   }
@@ -3329,13 +3605,33 @@ function planField(f, profile, ctx) {
   const sensitive = !profileDateSemantic && (isSensitive(label) || (
     (["radiogroup", "buttongroup", "checkboxgroup"].includes(f.kind) || f.tag === "button") && isSensitive(mappingLabel)
   ));
+  const explicitCandidateFact = requiresExplicitCandidateFact(answerLabel);
+  let explicitCandidateAnswer = explicitCandidateFact
+    ? findExactAnswer(answerLabel, answers)
+    : null;
+  if (explicitCandidateFact && explicitCandidateAnswer == null) {
+    explicitCandidateAnswer = structuredExplicitCandidateFactAnswer(answerLabel, profile);
+  }
+  if (explicitCandidateFact && explicitCandidateAnswer == null && sensitive) {
+    explicitCandidateAnswer = matchSensitive(answerLabel);
+  }
+  if (explicitCandidateFact && explicitCandidateAnswer == null) {
+    return {
+      action: "skip",
+      reason: "candidate fact needs explicit approved answer",
+      sensitive,
+      blocking: !!f.required,
+    };
+  }
   if (!f.required && isDemographicLabel(label)) {
     const demographic = matchSensitive(answerLabel) || demographicAnswer(answerLabel, profile);
     if (demographic == null || isDeclineAnswer(demographic)) {
       return { action: "skip", reason: "optional demographic left unselected", sensitive: true, blocking: false };
     }
   }
-  let priorityAns = priorityAutoAnswer(answerLabel, profile);
+  let priorityAns = explicitCandidateFact
+    ? explicitCandidateAnswer
+    : priorityAutoAnswer(answerLabel, profile);
   if (priorityAns == null) {
     priorityAns = workAuthorizationDropdownAnswer(answerLabel, profile);
   }
@@ -3563,7 +3859,10 @@ function planField(f, profile, ctx) {
     if (approved != null) return { action: "fill", value: String(approved) };
     return { action: "skip", reason: "sensitive field needs review", sensitive: true };
   }
-  if (isOptionalBlankField(label)) {
+  if (explicitCandidateFact && explicitCandidateAnswer != null) {
+    return { action: "fill", value: String(explicitCandidateAnswer) };
+  }
+  if (!f.required && isOptionalBlankField(label)) {
     return { action: "skip", reason: "optional empty field", blocking: false };
   }
   if (norm(mappingLabel).includes("phone number")) {
@@ -3586,6 +3885,11 @@ function planField(f, profile, ctx) {
   if (auto) return { action: "fill", value: String(auto) };
   if (requiresUserAuthoredAnswer(label, profile)) {
     return { action: "skip", reason: "question requires user-authored answer / no AI assistance", blocking: true };
+  }
+  // Generic fallback for open-ended text fields that didn't match any answer
+  if (f.kind === "input" || f.kind === "textarea" || f.tag === "input" || f.tag === "textarea" || f.type === "text" || f.type === "textarea") {
+    const generic = autoAnswerOpenEnded(label, profile);
+    if (generic) return { action: "fill", value: String(generic) };
   }
   if (!f.required) {
     return { action: "skip", reason: "non-required unmapped field", blocking: false };

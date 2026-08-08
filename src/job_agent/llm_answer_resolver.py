@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from job_agent.application_answers import _profile_fact_summary
@@ -94,12 +95,19 @@ def _option_text(option: Any) -> str:
 class LLMAnswerResolver:
     """Bounded, cached LLM fallback for non-sensitive screening questions."""
 
-    def __init__(self, llm: Any | None = None, *, max_calls: int | None = None) -> None:
+    def __init__(
+        self,
+        llm: Any | None = None,
+        *,
+        max_calls: int | None = None,
+        answer_validator: Callable[[Mapping[str, Any]], Any] | Any | None = None,
+    ) -> None:
         self._llm = llm
         self._llm_initialized = llm is not None
         self._max_calls = max_calls if max_calls is not None else llm_answers_max_calls()
         self._calls = 0
         self._cache: dict[tuple[Any, ...], str | list[str] | None] = {}
+        self._answer_validator = answer_validator
 
     # -- public API ---------------------------------------------------------
 
@@ -125,6 +133,21 @@ class LLMAnswerResolver:
             for option in field.get("options") or []
             if _option_text(option)
         ]
+        # The browser observer represents native selects and many custom
+        # comboboxes as ``kind=single`` with their real control type in
+        # ``tag``/``role``. Treat those as option fields so the resolver
+        # returns the original option object instead of free text that the
+        # runtime cannot commit.
+        control_kind = str(
+            field.get("tag") or field.get("role") or field.get("type") or ""
+        ).strip().lower()
+        if option_pairs and kind not in _OPTION_KINDS and control_kind in {
+            "select",
+            "combobox",
+            "listbox",
+            "button",
+        }:
+            kind = control_kind
         options = [text for _raw, text in option_pairs]
         cache_key = (
             _norm_token(question),
@@ -132,12 +155,20 @@ class LLMAnswerResolver:
             tuple(_norm_token(option) for option in options[:40]),
         )
         if cache_key in self._cache:
-            return self._cache[cache_key]
+            cached = self._cache[cache_key]
+            if cached is not None:
+                return cached
         try:
             raw = self._ask(question, kind, options, profile)
         except Exception:
             raw = ""
         answer = self._validate(raw, kind, option_pairs)
+        if (
+            isinstance(answer, str)
+            and kind not in _OPTION_KINDS
+            and not self._free_text_answer_validated(question, answer, profile)
+        ):
+            answer = None
         self._cache[cache_key] = answer
         if answer:
             if isinstance(answer, str):
@@ -179,19 +210,24 @@ class LLMAnswerResolver:
             numbered = "\n".join(f"{index + 1}. {option}" for index, option in enumerate(options[:40]))
             if kind in _MULTI_SELECT_KINDS:
                 instruction = (
-                    "Choose EVERY option that truthfully applies (usually just one). "
+                    "Choose EVERY option that truthfully applies to the candidate "
+                    "from the candidate facts below, including stated skills, "
+                    "projects, education, and preferences (usually just one). "
                     'Reply with ONLY JSON: {"answers": ["<exact option text>", ...]}.'
                 )
             else:
                 instruction = (
-                    "Choose the single most truthful option. "
+                    "Choose the single option that best matches the candidate from "
+                    "the candidate facts below, including stated skills, projects, "
+                    "education, and preferences. "
                     'Reply with ONLY JSON: {"answer": "<exact option text>"}.'
                 )
             prompt = (
                 "You are completing a job application on behalf of the candidate. "
-                "Answer ONLY from the candidate facts below; never invent experience, "
-                "credentials, citizenship, clearance, or work authorization. "
-                "If the facts cannot support any option, reply with "
+                "Choose the most truthful option using the candidate facts below. "
+                "Never invent employment history, credentials, citizenship, "
+                "clearance, salary, or work authorization facts. "
+                "If no option can be supported, reply with "
                 '{"answer": ""} (or {"answers": []}).\n\n'
                 f"Company: {company}\nRole: {title}\n\n"
                 f"Application question: {question}\n\n"
@@ -203,21 +239,103 @@ class LLMAnswerResolver:
             prompt = (
                 "You are completing a job application on behalf of the candidate. "
                 "Write a concise, truthful first-person answer to the application "
-                "question below, using ONLY the candidate facts provided. Never invent "
-                "experience, credentials, citizenship, clearance, or work "
-                "authorization. Keep it under 60 words. If the facts cannot support a "
-                'truthful answer, reply with {"answer": ""}. '
+                "question below. Base your answer on the candidate facts provided, "
+                "including stated skills, projects, education, and preferences; "
+                "preference, opinion, and open-ended questions should get a "
+                "reasonable answer grounded in those facts. Never invent "
+                "employment history, credentials, citizenship, clearance, salary, "
+                "or work authorization facts. If the question asks you to type a "
+                "specific verification code or word, reply with exactly that code "
+                "or word. Keep the answer under 60 words. Only reply with an empty "
+                'answer when no truthful response is possible. '
                 'Reply with ONLY JSON: {"answer": "..."}.\n\n'
                 f"Company: {company}\nRole: {title}\n\n"
                 f"Application question: {question}\n\n"
                 f"Candidate facts:\n{facts}"
             )
-        response = llm.invoke(
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Always respond with valid JSON only, no prose, no commentary."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = llm.invoke(
+                messages,
+                temperature=0,
+                max_completion_tokens=2000,
+            )
+        except TypeError:
+            # Providers that only accept the legacy output-token parameter.
+            response = llm.invoke(
+                messages,
+                temperature=0,
+                max_tokens=2000,
+            )
+        return str(response or "")
+
+    def _free_text_answer_validated(
+        self,
+        question: str,
+        answer: str,
+        profile: dict[str, Any],
+    ) -> bool:
+        validator = self._answer_validator
+        if validator is None:
+            return True
+        if validator is self._llm:
+            return False
+        payload = {
+            "question": question,
+            "answer": answer,
+            "candidate_facts": _profile_fact_summary(profile),
+        }
+        try:
+            verdict = (
+                validator(payload)
+                if callable(validator)
+                else self._invoke_validator_model(validator, payload)
+            )
+        except Exception:
+            return False
+        if isinstance(verdict, bool):
+            return verdict
+        if isinstance(verdict, Mapping):
+            raw = str(
+                verdict.get("verdict")
+                or verdict.get("status")
+                or verdict.get("decision")
+                or ""
+            ).strip().lower()
+            return raw in {"pass", "passed", "allow", "allowed", "yes", "true"}
+        return False
+
+    @staticmethod
+    def _invoke_validator_model(
+        validator: Any,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any] | bool:
+        if not hasattr(validator, "invoke"):
+            return False
+        prompt = (
+            "You are an independent factual entailment validator for a job "
+            "application answer. Decide only whether the answer is entailed by "
+            "the candidate facts. Ignore writing quality. Reply with ONLY JSON: "
+            '{"verdict":"pass"|"deny","reason":"short"}.\n\n'
+            f"Question: {payload.get('question')}\n\n"
+            f"Answer: {payload.get('answer')}\n\n"
+            f"Candidate facts:\n{payload.get('candidate_facts')}"
+        )
+        raw = validator.invoke(
             [{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=300,
+            max_tokens=120,
         )
-        return str(response or "")
+        parsed = _parse_json_object(str(raw or ""))
+        return parsed if parsed is not None else False
 
     def _validate(
         self,

@@ -128,6 +128,37 @@ def test_resolver_returns_short_text_for_free_text():
     assert resolver.answer_for_field(field, profile, label="Describe your experience") == "I have built production AI agents."
 
 
+def test_resolver_rejects_free_text_when_validator_denies():
+    fake = FakeLLM('{"answer": "I built AWS data platforms."}')
+    resolver = LLMAnswerResolver(
+        llm=fake,
+        max_calls=5,
+        answer_validator=lambda _payload: {
+            "verdict": "deny",
+            "reason": "AWS is unsupported.",
+        },
+    )
+
+    field = {"kind": "single", "tag": "textarea", "label": "Describe cloud work"}
+    profile = {"target_company": "Acme", "target_title": "SDE"}
+
+    assert resolver.answer_for_field(field, profile, label="Describe cloud work") is None
+
+
+def test_resolver_rejects_self_validation():
+    fake = FakeLLM('{"answer": "I have built production AI agents."}')
+    resolver = LLMAnswerResolver(
+        llm=fake,
+        max_calls=5,
+        answer_validator=fake,
+    )
+
+    field = {"kind": "single", "tag": "textarea", "label": "Describe your experience"}
+    profile = {"target_company": "Acme", "target_title": "SDE"}
+
+    assert resolver.answer_for_field(field, profile, label="Describe your experience") is None
+
+
 def test_resolver_respects_max_calls():
     fake = FakeLLM('{"answer": "A"}')
     resolver = LLMAnswerResolver(llm=fake, max_calls=1)

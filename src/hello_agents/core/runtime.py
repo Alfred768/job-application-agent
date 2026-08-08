@@ -279,7 +279,9 @@ class AgentCore:
                 round_index=index,
                 observation=initial_observation,
                 remaining_actions=(action,),
-                short_term_observations=memory.observations,
+                short_term_observations=memory.planning_observations(
+                    initial_observation
+                ),
                 tool_results=memory.tool_results,
                 long_term_memory_hits=long_term_hits,
             )
@@ -584,7 +586,9 @@ class AgentCore:
                 round_index=len(rounds) + 1,
                 observation=current_observation,
                 remaining_actions=tuple(pending),
-                short_term_observations=memory.observations,
+                short_term_observations=memory.planning_observations(
+                    current_observation
+                ),
                 tool_results=memory.tool_results,
                 long_term_memory_hits=long_term_hits,
             )

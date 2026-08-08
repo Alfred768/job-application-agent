@@ -154,7 +154,8 @@ class JobApplicationRecoveryExecutor:
             },
         )
         for action in plan.actions:
-            if action.requires_user or not action.automatic:
+            handler_available = action.action in self.handlers
+            if (action.requires_user or not action.automatic) and not handler_available:
                 action_results.append(
                     RecoveryActionResult(
                         action=action.action,
@@ -286,7 +287,7 @@ class JobApplicationRecoveryExecutor:
                 RecoveryActionResult(
                     action=action.action,
                     status=str(output.get("status") or "pending"),
-                    automatic=True,
+                    automatic=action.automatic,
                     evidence=action_evidence,
                     message=str(output.get("message") or ""),
                     details=(
@@ -768,15 +769,27 @@ def execute_audit_recovery(
         )
         counts[result.status] = counts.get(result.status, 0) + 1
         if result.retry_ready and int(record.get("recovery_attempt") or 0) < 1:
+            serialized_actions = serialized.get("actions")
+            replacement_summary = _replacement_summary_from_actions(
+                serialized_actions,
+                run_dir=run_dir,
+            )
             verified_targets.append(
                 {
                     "company": str(record.get("company") or "unknown"),
                     "title": str(record.get("title") or "unknown"),
-                    "package_dir": str(record.get("package_dir") or ""),
+                    "source_package_dir": str(record.get("package_dir") or ""),
+                    "package_dir": str(
+                        (replacement_summary or {}).get("package_dir")
+                        or record.get("package_dir")
+                        or ""
+                    ),
                     "application_id": str(record.get("application_id") or ""),
                     "terminal_status": str(record.get("status") or ""),
+                    "recovery_strategy": result.strategy,
                     "recovery_verified": True,
                     "retry_scope": result.retry_scope,
+                    "replacement_summary": replacement_summary,
                 }
             )
     audit["recovery"] = {
@@ -844,7 +857,11 @@ def write_recovery_retry_batch(
         return None
     targets = {
         (
-            str(item.get("package_dir") or ""),
+            str(
+                item.get("source_package_dir")
+                or item.get("package_dir")
+                or ""
+            ),
             str(item.get("application_id") or ""),
             str(item.get("company") or "").casefold(),
             str(item.get("title") or "").casefold(),
@@ -874,6 +891,9 @@ def write_recovery_retry_batch(
         target = next((targets[key] for key in keys if key in targets), None)
         if target is None:
             continue
+        replacement_summary = target.get("replacement_summary")
+        if isinstance(replacement_summary, Mapping):
+            item.update(dict(replacement_summary))
         item.update(
             {
                 "retry": True,
@@ -893,3 +913,36 @@ def write_recovery_retry_batch(
     temporary.write_text(json.dumps(selected, indent=2, ensure_ascii=True) + "\n")
     temporary.replace(output_path)
     return output_path
+
+
+def _replacement_summary_from_actions(
+    actions: Any,
+    *,
+    run_dir: Path,
+) -> dict[str, Any] | None:
+    if not isinstance(actions, list):
+        return None
+    for item in actions:
+        if not isinstance(item, Mapping) or item.get("action") != "rebuild_scoped_application":
+            continue
+        details = item.get("details")
+        if not isinstance(details, Mapping):
+            continue
+        summary_value = str(details.get("replacement_summary_path") or "").strip()
+        if not summary_value:
+            continue
+        summary_path = Path(summary_value)
+        if not summary_path.is_absolute():
+            summary_path = run_dir / summary_path
+        try:
+            summary_path = summary_path.resolve()
+            summary_path.relative_to(run_dir.resolve())
+        except (OSError, ValueError):
+            continue
+        try:
+            payload = json.loads(summary_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None

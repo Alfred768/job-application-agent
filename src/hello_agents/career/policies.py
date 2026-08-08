@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from hello_agents.core.contracts import PolicyDecision, ToolCall, ToolEffect
@@ -44,6 +45,13 @@ _RECOVERY_STATUSES = {
 class JobApplicationPolicyGate:
     """Central policy for career reads, writes, submissions, and repairs."""
 
+    def __init__(
+        self,
+        *,
+        semantic_answer_validator: Callable[[Mapping[str, Any]], Any] | None = None,
+    ) -> None:
+        self.semantic_answer_validator = semantic_answer_validator
+
     def evaluate(
         self,
         call: ToolCall,
@@ -71,6 +79,28 @@ class JobApplicationPolicyGate:
                 "The application already has a tracked matching record.",
             )
 
+        if bool(context.get("anti_spam_cooldown_active")) and call.effect in {
+            ToolEffect.WRITE,
+            ToolEffect.SUBMIT,
+        }:
+            return self._deny(
+                "anti_spam_cooldown_active",
+                "The affected company or ATS tenant is in an active anti-spam cooldown.",
+            )
+
+        if bool(context.get("failure_circuit_breaker_active")) and call.effect in {
+            ToolEffect.WRITE,
+            ToolEffect.SUBMIT,
+        }:
+            return self._deny(
+                "failure_circuit_breaker_active",
+                "The affected company or ATS adapter has an active ordinary-failure circuit breaker.",
+            )
+
+        answer_decision = self._evaluate_candidate_answer_validations(context)
+        if answer_decision is not None:
+            return answer_decision
+
         terminal_status = str(context.get("terminal_status") or "").lower()
         if bool(context.get("retry")) and terminal_status:
             if any(marker in terminal_status for marker in _PROTECTED_TERMINAL_MARKERS):
@@ -92,6 +122,75 @@ class JobApplicationPolicyGate:
         if call.tool_name == "job_application_recovery":
             return self._evaluate_recovery(context)
         return self._allow()
+
+    def _evaluate_candidate_answer_validations(
+        self,
+        context: Mapping[str, Any],
+    ) -> PolicyDecision | None:
+        for item in self._validation_items(
+            context.get("candidate_answer_validations")
+        ):
+            kind = str(item.get("kind") or "").strip().lower()
+            label = str(item.get("label") or item.get("field") or "field")
+            value = str(item.get("value") or "")
+            expected = item.get("approved_value")
+            if kind in {"exact", "boolean", "category", "profile_fact"}:
+                if expected is None or str(value) != str(expected):
+                    return self._deny(
+                        "candidate_fact_mismatch",
+                        f"{label} must exactly match the approved candidate fact.",
+                    )
+            if kind == "email" and not self._valid_email(value):
+                return self._deny(
+                    "candidate_email_invalid",
+                    f"{label} must be a valid approved email address.",
+                )
+            if kind == "phone" and not self._valid_phone(value):
+                return self._deny(
+                    "candidate_phone_invalid",
+                    f"{label} must be a valid approved phone number.",
+                )
+            if kind == "url" and not self._valid_url(value):
+                return self._deny(
+                    "candidate_url_invalid",
+                    f"{label} must be a valid approved URL.",
+                )
+
+        for item in self._validation_items(
+            context.get("semantic_answer_validations")
+        ):
+            generator_id = str(item.get("generator_id") or "").strip()
+            validator_id = str(item.get("validator_id") or "").strip()
+            if generator_id and validator_id and generator_id == validator_id:
+                return self._deny(
+                    "self_validation_forbidden",
+                    "Generated open-text answers must be checked by an independent validator.",
+                )
+            evidence = item.get("evidence")
+            if not evidence:
+                return self._deny(
+                    "semantic_validation_evidence_missing",
+                    "Open-text answers require candidate fact evidence.",
+                )
+            if self.semantic_answer_validator is None:
+                if bool(item.get("validator_required", False)):
+                    return self._deny(
+                        "semantic_validator_unavailable",
+                        "An open-text answer requires independent semantic validation.",
+                    )
+                continue
+            verdict = self.semantic_answer_validator(item)
+            if self._validator_denied(verdict):
+                reason = (
+                    verdict.get("reason")
+                    if isinstance(verdict, Mapping)
+                    else "The generated answer is not entailed by candidate facts."
+                )
+                return self._deny(
+                    "semantic_validation_failed",
+                    str(reason),
+                )
+        return None
 
     def _evaluate_submission(self, context: Mapping[str, Any]) -> PolicyDecision:
         if not bool(context.get("submit_complete")):
@@ -222,6 +321,51 @@ class JobApplicationPolicyGate:
         ):
             return list(value)
         return [value] if value else []
+
+    @classmethod
+    def _validation_items(cls, value: Any) -> list[Mapping[str, Any]]:
+        return [
+            item
+            for item in cls._items(value)
+            if isinstance(item, Mapping)
+        ]
+
+    @staticmethod
+    def _valid_email(value: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
+                value.strip(),
+                flags=re.I,
+            )
+        )
+
+    @staticmethod
+    def _valid_phone(value: str) -> bool:
+        digits = re.sub(r"\D", "", value or "")
+        return 8 <= len(digits) <= 15
+
+    @staticmethod
+    def _valid_url(value: str) -> bool:
+        parsed = urlparse(value.strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    @staticmethod
+    def _validator_denied(verdict: Any) -> bool:
+        if isinstance(verdict, bool):
+            return not verdict
+        if isinstance(verdict, Mapping):
+            raw = str(
+                verdict.get("verdict")
+                or verdict.get("status")
+                or verdict.get("decision")
+                or ""
+            ).strip().lower()
+            if raw in {"pass", "passed", "allow", "allowed", "yes", "true"}:
+                return False
+            if raw in {"deny", "denied", "fail", "failed", "no", "false"}:
+                return True
+        return True
 
     def _allow(self, reason: str = "Career policy allowed the tool call.") -> PolicyDecision:
         return PolicyDecision(

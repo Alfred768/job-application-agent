@@ -103,6 +103,49 @@ def test_recovery_planner_requests_missing_candidate_facts():
     }
 
 
+def test_recovery_planner_routes_explicit_candidate_fact_gate_to_human():
+    label = "Are you excited to work in-office five days a week?"
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": label,
+                    "reason": "candidate fact needs explicit approved answer",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "candidate_fact_resolution"
+    assert plan.actions[0].requires_user is True
+    assert plan.actions[0].parameters == {"field_labels": [label]}
+
+
+def test_recovery_planner_routes_saved_answer_option_mismatch_to_candidate_fact():
+    label = "Are you currently located in the San Francisco, Bay Area?"
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": label,
+                    "reason": "no option matches saved answer",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "candidate_fact_resolution"
+    assert plan.actions[0].parameters == {"field_labels": [label]}
+
+
 def test_recovery_planner_routes_user_authored_reading_answer_to_candidate():
     label = (
         "What's the most interesting paper, blog post, or documentation "
@@ -127,6 +170,54 @@ def test_recovery_planner_routes_user_authored_reading_answer_to_candidate():
     assert plan.actions[0].requires_user is True
     assert plan.actions[0].parameters == {"field_labels": [label]}
     assert "not code or an LLM" in plan.reason
+
+
+def test_recovery_planner_routes_high_school_history_to_candidate():
+    labels = ["High School Name", "Year of High School Graduation"]
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": labels[0],
+                    "reason": "unmapped field",
+                    "sensitive": False,
+                    "blocking": True,
+                },
+                {
+                    "label": labels[1],
+                    "reason": "no matching option / answer",
+                    "sensitive": False,
+                    "blocking": True,
+                },
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "candidate_fact_resolution"
+    assert plan.actions[0].parameters == {"field_labels": labels}
+
+
+def test_recovery_planner_routes_candidate_preferences_to_candidate():
+    label = "What are your preferred Palantir product(s)?"
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": label,
+                    "reason": "unmapped field",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "candidate_fact_resolution"
+    assert plan.actions[0].parameters == {"field_labels": [label]}
 
 
 def test_recovery_planner_reconciles_unconfirmed_click_without_retry():

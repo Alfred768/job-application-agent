@@ -15,6 +15,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.parse import urlparse
 
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.career.policies import JobApplicationPolicyGate
@@ -41,6 +42,7 @@ from hello_agents.tools.registry import ToolRegistry
 from job_agent.llm_answer_resolver import llm_answers_enabled
 from job_agent.memory import SQLiteApplicationMemory
 from job_agent.agent_session import DeterministicSessionLLM
+from job_agent.db import connect, init_db
 from job_agent.python_runtime import (
     RuntimeActionDenied,
     RuntimeActionRunner,
@@ -60,6 +62,12 @@ CANDIDATE_ACCOUNT_REQUIRED_STDOUT_MARKER = "Candidate account required:"
 APPLICATION_FORM_UNAVAILABLE_STDOUT_MARKER = "Application form unavailable:"
 REVIEW_ITEM_STDOUT_MARKER = "Review item:"
 NODE_PLAYWRIGHT_MISSING = "node_playwright_missing_used_python_runtime"
+
+
+def _runtime_timeout_flag_triggered() -> bool:
+    from job_agent import python_runtime
+
+    return bool(python_runtime._RUNTIME_TIMEOUT_TRIGGERED)
 TERMINAL_EVIDENCE_FILENAMES = {
     "submission-confirmation.txt",
     "submission-confirmation.png",
@@ -73,6 +81,34 @@ TERMINAL_EVIDENCE_FILENAMES = {
     "review-required.txt",
     "review-required.png",
 }
+ORDINARY_FAILURE_CIRCUIT_STATUSES = frozenset(
+    {
+        "application_form_unavailable",
+        "autofill_completed_blocked",
+        "autofill_failed",
+        "autofill_timed_out",
+        "submission_processing_error",
+    }
+)
+FAILURE_CIRCUIT_OUTCOME_STATUSES = ORDINARY_FAILURE_CIRCUIT_STATUSES | frozenset(
+    {
+        "candidate_account_required",
+        "email_verification_required",
+        "submission_blocked_by_anti_spam",
+        "submit_clicked_unconfirmed",
+        "submitted",
+    }
+)
+PRE_ACTION_BROWSER_RETRY_DELAY_SECONDS = 1.0
+PRE_ACTION_BROWSER_RETRYABLE_ERRORS = frozenset(
+    {
+        "browser_launch_error",
+        "browser_navigation_network_error",
+        "browser_session_closed",
+        "browser_timeout",
+        "playwright_runtime_error",
+    }
+)
 
 TIMEOUT_EVIDENCE_PREFIXES = (
     "Autofill progress:",
@@ -344,6 +380,7 @@ def _execute_application_batch_direct(
                         script_path,
                         runtime_env=runtime_env,
                         action_runner=runtime_action_runner,
+                        timeout_seconds=timeout_seconds,
                     )
                 elif runtime_uses_node_playwright and llm_answers_enabled():
                     print("LLM fallback answers are configured; using Python Playwright.")
@@ -398,12 +435,54 @@ def _execute_application_batch_direct(
             publish_terminal(records[-1], position)
             continue
         except OSError as exc:
-            records.append(_record(item, script_path, "autofill_failed", None, type(exc).__name__))
+            records.append(
+                _record(
+                    item,
+                    script_path,
+                    "autofill_failed",
+                    None,
+                    _runtime_exception_code(exc),
+                )
+            )
             publish_terminal(records[-1], position)
             continue
         except Exception as exc:
+            if (
+                "wall-clock deadline exceeded" in str(exc)
+                or _runtime_timeout_flag_triggered()
+            ):
+                timeout_exc = subprocess.TimeoutExpired(
+                    [sys.executable, "-m", "job_agent.python_runtime", script_path],
+                    timeout_seconds,
+                )
+                stats = _parse_autofill_stats(None)
+                evidence = _write_timeout_evidence(
+                    script_path,
+                    timeout_seconds,
+                    timeout_exc,
+                )
+                records.append(
+                    _record(
+                        item,
+                        script_path,
+                        "autofill_timed_out",
+                        None,
+                        "watchdog_deadline",
+                        filled_count=stats[0] if stats else None,
+                        review_count=stats[1] if stats else None,
+                        evidence=evidence,
+                    )
+                )
+                publish_terminal(records[-1], position)
+                continue
             records.append(
-                _record(item, script_path, "autofill_failed", None, type(exc).__name__)
+                _record(
+                    item,
+                    script_path,
+                    "autofill_failed",
+                    None,
+                    _runtime_exception_code(exc),
+                )
             )
             publish_terminal(records[-1], position)
             continue
@@ -617,7 +696,18 @@ class _RuntimeCallableTool(Tool):
         self.private_output: Any = None
 
     def run(self, _parameters: dict[str, Any]) -> dict[str, Any]:
-        self.private_output = self._callback()
+        attempts = 2 if self.name in {"ats_observe_page", "ats_fill_fields"} else 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                self.private_output = self._callback()
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt + 1 >= attempts or not _retryable_runtime_action_error(exc):
+                    raise
+        if last_error is not None and self.private_output is None:
+            raise last_error
         return _sanitize_runtime_action_output(self.name, self.private_output)
 
     def get_parameters(self) -> list[ToolParameter]:
@@ -843,23 +933,13 @@ class _ApplicationRuntimeController:
             "ats_submit_application": "ats_stop_before_submit",
         }.get(action_name)
 
-    @staticmethod
+    @classmethod
     def _action_prerequisites_met(
+        cls,
         action_name: str,
         context: Mapping[str, Any],
     ) -> bool:
-        if action_name == "ats_advance_page":
-            return int(context.get("blocking_review_count") or 0) == 0
-        if action_name == "ats_submit_application":
-            return (
-                bool(context.get("submit_complete"))
-                and bool(context.get("facts_verified"))
-                and not bool(context.get("blocking_review_items"))
-                and not bool(context.get("unapproved_sensitive_fields"))
-                and bool(context.get("resume_verified"))
-                and bool(context.get("confirmation_required", True))
-            )
-        return True
+        return cls._pre_click_assertion_error(action_name, context) is None
 
     @classmethod
     def _stop_reason(
@@ -867,44 +947,63 @@ class _ApplicationRuntimeController:
         action_name: str,
         context: Mapping[str, Any],
     ) -> str:
-        if cls._action_prerequisites_met(action_name, context):
+        assertion_error = cls._pre_click_assertion_error(action_name, context)
+        if assertion_error is None:
             return "agent_core_selected_stop"
+        return assertion_error
+
+    @staticmethod
+    def _pre_click_assertion_error(
+        action_name: str,
+        context: Mapping[str, Any],
+    ) -> str | None:
         if action_name == "ats_advance_page":
+            if "blocking_review_count" not in context:
+                return "missing_navigation_state_assertion"
+            return (
+                None
+                if int(context.get("blocking_review_count") or 0) == 0
+                else "blocking_review_items"
+            )
+        if action_name != "ats_submit_application":
+            return None
+        required_keys = {
+            "submit_complete",
+            "facts_verified",
+            "blocking_review_items",
+            "unapproved_sensitive_fields",
+            "resume_verified",
+            "confirmation_required",
+        }
+        if any(key not in context for key in required_keys):
+            return "missing_submit_state_assertion"
+        if not bool(context.get("submit_complete")):
+            return "submission_disabled"
+        if not bool(context.get("facts_verified")):
+            return "unverified_candidate_facts"
+        if bool(context.get("blocking_review_items")):
             return "blocking_review_items"
-        if action_name == "ats_submit_application":
-            if not bool(context.get("submit_complete")):
-                return "submission_disabled"
-            if not bool(context.get("facts_verified")):
-                return "unverified_candidate_facts"
-            if bool(context.get("blocking_review_items")):
-                return "blocking_review_items"
-            if bool(context.get("unapproved_sensitive_fields")):
-                return "unapproved_sensitive_fields"
-            if not bool(context.get("resume_verified")):
-                return "resume_provenance_unverified"
-            if not bool(context.get("confirmation_required", True)):
-                return "submission_confirmation_not_required"
-        return "agent_core_selected_stop"
+        if bool(context.get("unapproved_sensitive_fields")):
+            return "unapproved_sensitive_fields"
+        if not bool(context.get("resume_verified")):
+            return "resume_provenance_unverified"
+        if not bool(context.get("confirmation_required", True)):
+            return "submission_confirmation_not_required"
+        return None
 
 
 def _sanitize_runtime_action_output(name: str, output: Any) -> dict[str, Any]:
     if name == "ats_observe_page":
         fields = output if isinstance(output, list) else []
+        compact_fields = [
+            _runtime_field_projection(field)
+            for field in fields
+            if isinstance(field, Mapping)
+        ]
         return {
             "status": "observed",
-            "field_count": len(fields),
-            "fields": [
-                {
-                    "type": str(field.get("type") or ""),
-                    "required": bool(field.get("required")),
-                    "sensitive": bool(
-                        field.get("sensitive")
-                        or field.get("isSensitive")
-                    ),
-                }
-                for field in fields
-                if isinstance(field, Mapping)
-            ],
+            "field_count": len(compact_fields),
+            "fields": compact_fields,
         }
     if name == "ats_fill_fields" and isinstance(output, Mapping):
         filled = output.get("filled")
@@ -920,6 +1019,90 @@ def _sanitize_runtime_action_output(name: str, output: Any) -> dict[str, Any]:
             ) if isinstance(review, list) else 0,
         }
     return {"status": "completed"}
+
+
+def _retryable_runtime_action_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}:{exc}".casefold()
+    return any(
+        marker in text
+        for marker in (
+            "timeout",
+            "detached",
+            "not attached",
+            "target closed",
+            "execution context was destroyed",
+            "element is not visible",
+        )
+    )
+
+
+def _runtime_exception_code(exc: Exception) -> str:
+    """Reduce a runtime exception to a privacy-safe operational code."""
+    name = type(exc).__name__
+    if name != "Error":
+        return name
+    text = str(exc).casefold()
+    if (
+        "using playwright sync api inside the asyncio loop" in text
+        or "playwright sync api inside the asyncio loop" in text
+    ):
+        return "playwright_sync_api_context_error"
+    if "executable doesn't exist" in text:
+        return "browser_executable_missing"
+    if "host system is missing dependencies" in text:
+        return "browser_dependencies_missing"
+    if any(
+        marker in text
+        for marker in (
+            "target page, context or browser has been closed",
+            "browser has been closed",
+            "target closed",
+        )
+    ):
+        return "browser_session_closed"
+    if "net::err_" in text:
+        return "browser_navigation_network_error"
+    if "timeout" in text:
+        return "browser_timeout"
+    if "browsertype.launch" in text:
+        return "browser_launch_error"
+    return "playwright_runtime_error"
+
+
+def _runtime_field_projection(field: Mapping[str, Any]) -> dict[str, Any]:
+    options = field.get("options")
+    option_labels: list[str] = []
+    if isinstance(options, list):
+        for option in options[:12]:
+            if isinstance(option, Mapping):
+                raw = option.get("label") or option.get("text") or option.get("value")
+            else:
+                raw = option
+            option_labels.append(_compact_runtime_text(raw, 100))
+    return {
+        "label": _compact_runtime_text(
+            field.get("label")
+            or field.get("ariaLabel")
+            or field.get("placeholder")
+            or field.get("name")
+            or "",
+            180,
+        ),
+        "type": _compact_runtime_text(field.get("type") or "", 40),
+        "role": _compact_runtime_text(field.get("role") or "", 40),
+        "kind": _compact_runtime_text(field.get("kind") or "", 40),
+        "required": bool(field.get("required")),
+        "sensitive": bool(field.get("sensitive") or field.get("isSensitive")),
+        "options": option_labels,
+        "option_count": len(options) if isinstance(options, list) else 0,
+    }
+
+
+def _compact_runtime_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
 
 
 class _BrowserApplicationTool(Tool):
@@ -963,7 +1146,32 @@ class _BrowserApplicationTool(Tool):
         self.runtime_controller = controller
 
     def run(self, _parameters: dict[str, Any]) -> dict[str, Any]:
-        records = _execute_application_batch_direct(
+        records = self._execute_once()
+        if (
+            len(records) == 1
+            and self.runtime_controller is not None
+            and not self.runtime_controller.loops
+            and records[0].get("status") == "autofill_failed"
+            and records[0].get("error")
+            in PRE_ACTION_BROWSER_RETRYABLE_ERRORS
+        ):
+            first_error = str(records[0].get("error") or "")
+            print(
+                "Browser runtime failed before any ATS action; "
+                "retrying once with a fresh browser session."
+            )
+            time.sleep(PRE_ACTION_BROWSER_RETRY_DELAY_SECONDS)
+            records = self._execute_once()
+            if len(records) == 1:
+                records[0]["runtime_retry_count"] = 1
+                records[0]["runtime_retry_reason"] = first_error
+        if len(records) != 1:
+            raise RuntimeError("Browser runtime did not return one terminal record.")
+        self.record = records[0]
+        return self.record
+
+    def _execute_once(self) -> list[dict[str, Any]]:
+        return _execute_application_batch_direct(
             [self._item],
             node_binary=self._node_binary,
             timeout_seconds=self._timeout_seconds,
@@ -980,10 +1188,6 @@ class _BrowserApplicationTool(Tool):
                 else None
             ),
         )
-        if len(records) != 1:
-            raise RuntimeError("Browser runtime did not return one terminal record.")
-        self.record = records[0]
-        return self.record
 
     def get_parameters(self) -> list[ToolParameter]:
         return [
@@ -1124,6 +1328,10 @@ def execute_application_batch(
     """Execute every real browser mutation through an auditable Agent Core loop."""
     records: list[dict[str, Any]] = []
     total = len(summary_items)
+    blocked_companies, blocked_tenants = _active_anti_spam_scopes(database_path)
+    failure_company_sequences, failure_adapter_sequences = (
+        _active_failure_circuit_sequences(database_path)
+    )
     runtime_env = None
     if browser_headless is not None:
         runtime_env = os.environ.copy()
@@ -1143,6 +1351,49 @@ def execute_application_batch(
             real_runtime=runner is None,
             environ=runtime_env,
         )
+        company_scope = _company_scope(item.get("company"))
+        tenant_scope = _anti_spam_tenant_scope(
+            item.get("apply_url"),
+            item.get("company"),
+        )
+        failure_adapter_scope = _failure_adapter_scope(
+            item.get("apply_url"),
+            item.get("company"),
+        )
+        if (
+            company_scope in blocked_companies
+            or tenant_scope in blocked_tenants
+        ):
+            call = replace(
+                call,
+                context={
+                    **dict(call.context),
+                    "anti_spam_cooldown_active": True,
+                    "anti_spam_scope": tenant_scope or company_scope,
+                },
+            )
+        company_failure_status = _open_failure_circuit_status(
+            failure_company_sequences.get(company_scope)
+        )
+        adapter_failure_status = _open_failure_circuit_status(
+            failure_adapter_sequences.get(failure_adapter_scope)
+        )
+        if company_failure_status or adapter_failure_status:
+            call = replace(
+                call,
+                context={
+                    **dict(call.context),
+                    "failure_circuit_breaker_active": True,
+                    "failure_circuit_scope": (
+                        failure_adapter_scope
+                        if adapter_failure_status
+                        else company_scope
+                    ),
+                    "failure_circuit_status": (
+                        adapter_failure_status or company_failure_status
+                    ),
+                },
+            )
         registry = ToolRegistry()
         long_term_memory = (
             SQLiteApplicationMemory(database_path)
@@ -1339,6 +1590,23 @@ def execute_application_batch(
                 "agent_browser_tool_failed",
             )
 
+        if record.get("status") == "submission_blocked_by_anti_spam":
+            if company_scope:
+                blocked_companies.add(company_scope)
+            if tenant_scope:
+                blocked_tenants.add(tenant_scope)
+        terminal_status = str(record.get("status") or "")
+        _advance_failure_circuit_sequence(
+            failure_company_sequences,
+            company_scope,
+            terminal_status,
+        )
+        _advance_failure_circuit_sequence(
+            failure_adapter_sequences,
+            failure_adapter_scope,
+            terminal_status,
+        )
+
         trace = agent_loop_result_to_dict(loop_result)
         trace["preflight"] = agent_loop_result_to_dict(preflight_loop)
         trace["runtime_steps"] = [
@@ -1365,6 +1633,224 @@ def execute_application_batch(
         if on_record is not None:
             on_record(record, position, total)
     return records
+
+
+def _company_scope(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _anti_spam_tenant_scope(
+    application_url: Any,
+    company: Any,
+) -> str:
+    raw = str(application_url or "").strip()
+    if not raw:
+        return _company_scope(company)
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    host = (parsed.hostname or "").casefold()
+    segments = [segment.casefold() for segment in parsed.path.split("/") if segment]
+    if host == "job-boards.greenhouse.io":
+        if segments and segments[0] not in {"jobs", "v1"}:
+            return f"{host}/{segments[0]}"
+    elif host in {"jobs.lever.co", "jobs.eu.lever.co", "jobs.ashbyhq.com"}:
+        if segments:
+            return f"{host}/{segments[0]}"
+    return host or _company_scope(company)
+
+
+def _failure_adapter_scope(
+    application_url: Any,
+    company: Any,
+) -> str:
+    tenant_scope = _anti_spam_tenant_scope(application_url, company)
+    if not tenant_scope:
+        return ""
+    host = tenant_scope.split("/", 1)[0]
+    if host in {
+        "job-boards.greenhouse.io",
+        "jobs.lever.co",
+        "jobs.eu.lever.co",
+        "jobs.ashbyhq.com",
+    } and "/" in tenant_scope:
+        return tenant_scope
+    company_scope = _company_scope(company)
+    return (
+        f"{tenant_scope}/{company_scope}"
+        if company_scope
+        else tenant_scope
+    )
+
+
+def _failure_circuit_breaker_hours() -> int:
+    try:
+        value = int(
+            os.getenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_HOURS")
+            or "6"
+        )
+    except ValueError:
+        value = 6
+    return max(1, value)
+
+
+def _failure_circuit_breaker_threshold() -> int:
+    try:
+        value = int(
+            os.getenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD")
+            or "2"
+        )
+    except ValueError:
+        value = 2
+    return max(2, value)
+
+
+def _open_failure_circuit_status(
+    sequence: tuple[str, int] | None,
+) -> str:
+    if sequence is None:
+        return ""
+    status, consecutive = sequence
+    if (
+        status in ORDINARY_FAILURE_CIRCUIT_STATUSES
+        and consecutive >= _failure_circuit_breaker_threshold()
+    ):
+        return status
+    return ""
+
+
+def _advance_failure_circuit_sequence(
+    sequences: dict[str, tuple[str, int]],
+    scope: str,
+    status: str,
+) -> None:
+    if not scope or status not in FAILURE_CIRCUIT_OUTCOME_STATUSES:
+        return
+    previous_status, previous_count = sequences.get(scope, ("", 0))
+    sequences[scope] = (
+        (status, previous_count + 1)
+        if status == previous_status
+        else (status, 1)
+    )
+
+
+def _active_failure_circuit_sequences(
+    database_path: str | Path | None,
+) -> tuple[dict[str, tuple[str, int]], dict[str, tuple[str, int]]]:
+    if database_path is None:
+        return {}, {}
+    path = Path(database_path)
+    if not path.is_file():
+        return {}, {}
+    conn = connect(path)
+    try:
+        init_db(conn)
+        placeholders = ",".join(
+            "?" for _ in FAILURE_CIRCUIT_OUTCOME_STATUSES
+        )
+        rows = conn.execute(
+            f"""
+            select id, company, apply_url, status
+            from applications
+            where status in ({placeholders})
+              and datetime(updated_at) >= datetime('now', ?)
+            order by datetime(updated_at) desc, id desc
+            """,
+            (
+                *sorted(FAILURE_CIRCUIT_OUTCOME_STATUSES),
+                f"-{_failure_circuit_breaker_hours()} hours",
+            ),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    grouped_companies: dict[str, list[str]] = {}
+    grouped_adapters: dict[str, list[str]] = {}
+    for row in rows:
+        status = str(row["status"] or "")
+        company_scope = _company_scope(row["company"])
+        if company_scope:
+            grouped_companies.setdefault(company_scope, []).append(status)
+        adapter_scope = _failure_adapter_scope(
+            row["apply_url"],
+            row["company"],
+        )
+        if adapter_scope:
+            grouped_adapters.setdefault(adapter_scope, []).append(status)
+
+    def latest_sequences(
+        grouped: Mapping[str, list[str]],
+    ) -> dict[str, tuple[str, int]]:
+        sequences: dict[str, tuple[str, int]] = {}
+        for scope, statuses in grouped.items():
+            latest = statuses[0] if statuses else ""
+            consecutive = 0
+            for status in statuses:
+                if status != latest:
+                    break
+                consecutive += 1
+            if latest:
+                sequences[scope] = (latest, consecutive)
+        return sequences
+
+    return latest_sequences(grouped_companies), latest_sequences(grouped_adapters)
+
+
+def _active_anti_spam_scopes(
+    database_path: str | Path | None,
+) -> tuple[set[str], set[str]]:
+    if database_path is None:
+        return set(), set()
+    path = Path(database_path)
+    if not path.is_file():
+        return set(), set()
+    try:
+        cooldown_hours = max(
+            1,
+            int(os.getenv("JOB_AGENT_ANTI_SPAM_COOLDOWN_HOURS") or "24"),
+        )
+    except ValueError:
+        cooldown_hours = 24
+    conn = connect(path)
+    try:
+        init_db(conn)
+        rows = conn.execute(
+            """
+            select id, company, apply_url, status
+            from applications
+            where status in ('submission_blocked_by_anti_spam', 'submitted')
+              and datetime(updated_at) >= datetime('now', ?)
+            order by datetime(updated_at) desc, id desc
+            """,
+            (f"-{cooldown_hours} hours",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    latest_company_status: dict[str, str] = {}
+    latest_tenant_status: dict[str, str] = {}
+    for row in rows:
+        status = str(row["status"] or "")
+        company_scope = _company_scope(row["company"])
+        if company_scope and company_scope not in latest_company_status:
+            latest_company_status[company_scope] = status
+        tenant_scope = _anti_spam_tenant_scope(
+            row["apply_url"],
+            row["company"],
+        )
+        if tenant_scope and tenant_scope not in latest_tenant_status:
+            latest_tenant_status[tenant_scope] = status
+
+    return (
+        {
+            scope
+            for scope, status in latest_company_status.items()
+            if status == "submission_blocked_by_anti_spam"
+        },
+        {
+            scope
+            for scope, status in latest_tenant_status.items()
+            if status == "submission_blocked_by_anti_spam"
+        },
+    )
 
 
 def _configured_bool(raw: str | None, *, default: bool) -> bool:
@@ -1694,17 +2180,45 @@ class _TeeText(io.StringIO):
         return super().write(value)
 
 
+def _wall_clock_runtime_deadline(timeout_seconds: int | None) -> int | None:
+    """Give in-process runtimes a slightly larger wall-clock safety margin."""
+    if timeout_seconds is None or timeout_seconds <= 0:
+        return None
+    return timeout_seconds + 60
+
+
 def _run_python_runtime_in_process(
     script_path: str,
     *,
     runtime_env: Mapping[str, str] | None,
     action_runner: RuntimeActionRunner,
+    timeout_seconds: int | None = None,
 ) -> subprocess.CompletedProcess:
     """Run Playwright in-process so the original Agent Core owns live actions."""
     payload = load_runtime_payload(script_path)
     stdout = _TeeText(sys.stdout)
     stderr = _TeeText(sys.stderr)
     prior_headless = os.environ.get("BROWSER_HEADLESS")
+    previous_alarm_handler: Any = None
+    deadline_set = False
+    if (
+        timeout_seconds is not None
+        and timeout_seconds > 0
+        and hasattr(signal, "alarm")
+        and threading.current_thread() is threading.main_thread()
+    ):
+        previous_alarm_handler = signal.getsignal(signal.SIGALRM)
+
+        def _raise_runtime_timeout(signum: int, frame: Any) -> None:
+            raise subprocess.TimeoutExpired(
+                ["python_runtime_in_process", script_path],
+                timeout_seconds,
+            )
+
+        signal.signal(signal.SIGALRM, _raise_runtime_timeout)
+        signal.alarm(timeout_seconds)
+        deadline_set = True
+    watchdog_deadline_seconds = _wall_clock_runtime_deadline(timeout_seconds)
     try:
         if runtime_env is not None and "BROWSER_HEADLESS" in runtime_env:
             os.environ["BROWSER_HEADLESS"] = str(
@@ -1714,8 +2228,13 @@ def _run_python_runtime_in_process(
             return_code = run_runtime_payload(
                 payload,
                 action_runner=action_runner,
+                watchdog_deadline_seconds=watchdog_deadline_seconds,
             )
     finally:
+        if deadline_set:
+            signal.alarm(0)
+            if previous_alarm_handler is not None:
+                signal.signal(signal.SIGALRM, previous_alarm_handler)
         if prior_headless is None:
             os.environ.pop("BROWSER_HEADLESS", None)
         else:

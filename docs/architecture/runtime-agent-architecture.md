@@ -102,10 +102,10 @@ flowchart LR
 | 层 | 当前实现 | 职责 |
 | --- | --- | --- |
 | Environment adapters | `job_agent/jobs.py`, `source_config.py`, `python_runtime.py`, `chrome_runtime.py`, `gmail_verification.py` | 与岗位源、ATS、浏览器和邮箱交互 |
-| Perception | `hello_agents/core/perception.py`, `job_agent/field_semantics.py`, `ats_adapters.py` | 把 JD、DOM、表单与 Tool Result 转为结构化 Observation |
+| Perception | `hello_agents/core/perception.py`, `job_agent/field_semantics.py`, `ats_adapters.py` | 把 JD、DOM、表单与 Tool Result 转为结构化 Observation；ATS 页面先降维成 label/type/role/required/options 的可访问字段投影，不把 HTML、页面正文、字段值或 readback 送入 Thought |
 | Trace / Handoff | `hello_agents/core/trace.py`, `job_agent/cli.py`, `daily_sop.py` | 脱敏序列化 AgentRound，跨进程恢复 Observation，索引阶段连续性 |
 | Agent Core | `hello_agents/core/runtime.py`, `agents/job_application_agent.py`, `agents/*_agent.py` | 创建有界 Plan，选择推理策略，管理会话、ToolChain、只读并发、恢复规划和每轮考核 |
-| Short-term Memory | `hello_agents/core/memory.py::ShortTermMemory` | 保存当前任务的 Observation、Tool Result 和 Policy Decision |
+| Short-term Memory | `hello_agents/core/memory.py::ShortTermMemory` | 保存当前任务的 Observation、Tool Result 和 Policy Decision；给 Thought 的投影只包含当前 Observation 和最近轮次的一句话滑窗摘要 |
 | Long-term Memory | `job_agent/memory.py`, `job_agent/db.py`, `profile_vector_store.py` | 查询历史申请并保存脱敏 Agent 摘要；候选人事实仍由批准档案提供 |
 | Conversation Memory | `hello_agents/core/conversation.py`, `conversation_manager.py` | 管理消息历史、分支和显式 JSON 持久化；不替代候选人事实库 |
 | Policy / Safety Gate | `hello_agents/career/policies.py` | 强制执行来源、事实、敏感字段、去重、终态重试、简历和提交确认策略 |
@@ -149,11 +149,14 @@ Plan 声明与 Tool 自身声明中风险更高者，因此 LLM 或调用方不�
 ## Main Loop
 
 1. Perception 把用户 JD、ATS 表单或 Tool Result 转为 Observation，并先写入
-   Short-term Memory。
+   Short-term Memory。真实 ATS DOM 必须先经过降维层，只保留可交互控件的安全字段摘要；
+   原始 HTML、页面正文、截图二进制、候选人答案值和 readback 不得成为 Observation payload。
 2. Agent Core 从当前 Observation、Short-term Memory 和 Long-term Memory 构建
    `AgentLoopContext`。Plan-and-Solve 给出剩余有界步骤；LLM 可在这些步骤中选择下一动作，
    但不能生成 Plan 外动作。发送给外部 LLM 的记忆投影只包含工具成功/失败/策略码和历史
    公司、岗位、状态等白名单摘要，不包含 Tool 参数、表单答案、档案值、路径或凭证。
+   STM 对 Thought 使用滑窗：当前页面/工具 Observation 保留，历史 ToolResult 压缩为
+   `memory_summary`，避免多页面 ATS 的上下文爆炸。
 3. Core 生成 `AgentThought`，只记录决策摘要、Reflection 和 Self-criticism。LLM
    不可用或返回无效选择时，Simple 确定性策略选择 Plan 中下一步。
 4. 选中的结构化 ToolCall 作为 Action，先进入职业 Policy Gate，再由
@@ -170,7 +173,15 @@ Plan 声明与 Tool 自身声明中风险更高者，因此 LLM 或调用方不�
 10. 实时 Next 和 Submit 不是运行时直接决定后再通知 Core。Core 分别从
     `ats_advance_page / ats_stop_page_navigation` 与
     `ats_submit_application / ats_stop_before_submit` 两个候选中选择一项，只执行一轮。
-    选择停止时原浏览器回调不会运行；选择执行后仍必须通过 Policy Gate。
+    选择停止时原浏览器回调不会运行；选择执行后仍必须通过 Policy Gate。不可逆 click
+    还必须携带当前状态断言；缺少导航阻塞计数或提交前事实/简历/确认门断言时选择 stop，
+    不调用浏览器回调。只读 observe 和字段 fill 可以做局部重试，Next/Submit 不盲重试。
+    浏览器启动或首次导航异常仅在尚未产生任何 `ats_*` AgentRound 时允许新会话重试一次；
+    一旦已有页面观察或动作，整份申请不自动重启。异常只持久化白名单故障码，不保存可能
+    包含页面内容的原始 Playwright message。
+    CAPTCHA 或服务端验证后的字段复核先读取 combobox 的已提交状态；只有读回值与批准答案
+    匹配时才复用，包括未暴露 ARIA role 的 Greenhouse 控件。无法验证或值不匹配时仍进入
+    有界填写和 no-progress 终态，不能把视觉文本当作提交证据。
 11. 有界 Plan 完成、被策略门终止或耗尽后生成 `AgentLoopResult`。Recovery Planner 只提出
    计划，自动动作仍必须由已注册 Recovery Executor 转成 ToolCall 并通过 Gate。
 12. 聚合执行轮结束后，注册的 evaluator 读取状态、manifest 和审计，返回结构化考核结果；
@@ -188,7 +199,9 @@ Plan 声明与 Tool 自身声明中风险更高者，因此 LLM 或调用方不�
 - `ReflectionAgent`：在限定轮数内生成、评审和改进结果，不把反思文字当成环境事实。
 
 `JobApplicationAgent.run()` 使用 `AgentCore.run_loop()` 执行一个统一状态机，不再把 review、
-persistence、form 和 submit-policy 拆成彼此不可追踪的 `run_plan()` 片段。其组合策略为：
+persistence、form 和 submit-policy 拆成彼此不可追踪的 `run_plan()` 片段。语义评估与结构化
+包构建保持拆分：`evaluate_fit` 只返回匹配分数和缺失信号，`build_application_package`
+只组装申请包文件；旧 `fit_scorer` / `application_package` 名称保留兼容。其组合策略为：
 
 - Plan-and-Solve 保存完整有界步骤；
 - ReAct 在每个 ToolResult 后重新进入 Perception 和 Thought；
@@ -220,8 +233,8 @@ Core 拥有的 `ConversationManager`，不会为同一次任务建立相互隔�
 
 - 样本规模：本轮原始导入数与配置的 cohort 目标。
 - 完整性：准备岗位是否都有终态审计，且审计是否标记 complete。
-- 质量：页面确认提交数除以执行后未被安全跳过的最终合格岗位。
-- 漏斗监测：原始导入到确认提交率，仅作来源质量观察。
+- 主质量目标：当日页面确认提交数除以本轮原始导入岗位数，默认至少 80%。
+- 执行诊断：本批页面确认提交数除以执行后未被安全跳过的最终合格岗位，仅作观察。
 - 不确定性：`submit_clicked_unconfirmed` 必须为 0。
 
 Core 为每轮生成 evaluation ID、总体状态、指标和建议，保留有界内存历史，并把摘要写入
@@ -244,12 +257,27 @@ Short-term Memory。每日 SOP 将同一结果写入 `evaluation-metrics.json`�
 - 支持的 CAPTCHA：配置了 CapMonster 时最多处理一次新 challenge；不支持时请求候选人交互。
 - 邮箱验证：使用只读 Gmail token 查找请求之后的 code/link；未授权时请求候选人授权。
 - 候选人账户：使用外部凭证存储完成登录、创建和邮箱验证；凭证不进入审计。
-- 缺少候选人事实：请求候选人批准答案，更新事实源后只重建该岗位；LLM 不生成事实。
+- 缺少候选人事实：请求候选人批准答案，更新事实源后只重建该岗位；高中名称和毕业年份、
+  其他 offer 及其截止日期、母语/本地文字法定姓名、产品/地点/工作方向偏好等字段不得由
+  LLM 推断或默认选择。
 - 点击未确认：先查页面证据、门户、邮箱和 application ID；确认存在时只更新跟踪记录，
   未证明首次点击失败前不再次点击。
 
+事实门把过往/当前任职、承包或投递面试经历，亲属关系与利益冲突，雇主限制与便利需求，
+母语/本地文字法定姓名，以及明确的每周到岗承诺视为不可推断字段。只有规范化后与问题精确对应的 profile answer，
+或该字段适用且已批准的 sensitive KB 可以通过；简历缺失不蕴含 `No`，一般搬迁、远程偏好
+或低频到岗意愿也不蕴含固定到岗承诺。
+
 `retry_allowed` 只表示计划中的动作和证据全部满足后，可以考虑单岗位恢复。Policy Gate
 仍要求 `recovery_verified=true` 和 `retry_scope=single_application`；原始整批重放会拒绝。
+
+表单计划在发现必填字段没有批准事实时会先生成 `escalate_to_human` ToolCall，记录
+`waiting_for_user` checkpoint 和字段标签，再由 Recovery 的 `candidate_fact_resolution`
+继续处理。这个 handoff 是 AgentRound 的 ToolResult，不允许以 LLM 猜测答案替代。
+
+Policy Gate 使用混合校验：结构化事实走 exact/regex/schema 硬规则；开放文本答案可携带
+`semantic_answer_validations` 交给独立 validator 做蕴含/矛盾判断。生成模型和验证模型的
+同一 ID 会被拒绝，避免自我验证偏差。
 
 内置执行器支持 Gmail 请求后 code/link 查询、SQLite 提交结果 reconciliation、保存证据检查
 和 tenant 冷却。CAPTCHA、账户或浏览器恢复依赖显式配置的外部适配器；没有适配器时返回
@@ -259,7 +287,13 @@ Short-term Memory。每日 SOP 将同一结果写入 `evaluation-metrics.json`�
 浏览器。它会覆盖审计中陈旧的计划分类并写入 `recovery-execution.json`；只有显式
 `--retry-verified` 且证据齐全时才执行生成的单岗位 retry。候选人普通事实及自定义答案以
 配置的 profile/`answers` 为权威源，敏感和法律答案以 approved sensitive KB 为权威源；
-profile vector DB 只是派生长期检索索引。
+多次 execution attempt 先按 application ID 合并终态再规划，且 recovery 元数据只写回
+该岗位最后出现的原 attempt 审计，不能让窄 retry 指针遮住早期未解决岗位或改写尝试边界。
+profile vector DB 只是派生长期检索索引。候选人补完事实后，Recovery 会先验证原
+`review_items` 均可从当前权威源解析，再在 `recovery/` 下重建新包并保留旧包；事实验证、
+新包字段门和单岗位 retry 都各自形成可审计 ToolResult。普通事实恢复要求字段标签精确命中
+且当前答案相对旧包发生真实变化；占位答案、旧包已有但无效的答案或混有非事实阻塞的申请
+继续保持 `waiting_for_user`/`pending`，不得生成恢复批次。
 
 ## Repair Orchestration
 
@@ -274,9 +308,10 @@ cycle，也不重复同一确定性 401。`daily_sop repair` 可在环境恢复�
 浏览器；`--retry-verified` 只执行已生成且带 `repair_verified=true`、
 `retry_scope=single_application` 的 batch。
 
-恢复 retained repair 时先用当前完整审计重建 fingerprints，旧 request 只作兜底。要求
-候选人原创或批准事实的字段即使原始原因是 `unmapped field` 也不会进入 repair。若当前代码
-已经修复且 Codex 不产生 diff，冻结测试和离线验证全部通过后返回
+恢复 retained repair 时先用当前完整审计重建 fingerprints，旧 request 只在审计不可用或
+不完整时兜底。完整审计确认已无 coding-repair 范围时持久化空范围、废止旧指针并回到
+`executed_with_blockers`，不再检查 Repair Agent。要求候选人原创或批准事实的字段即使
+原始原因是 `unmapped field` 也不会进入 repair。若当前代码已经修复且 Codex 不产生 diff，冻结测试和离线验证全部通过后返回
 `already_fixed_verified`，与已提升修复一样只能生成 scoped retry。
 
 `daily_sop repair` 会在 Codex readiness 之前持久化上述重建结果，生成不可覆盖的
@@ -295,11 +330,18 @@ readiness 使用与正式 repair 相同认证环境的只读远程 `codex exec`�
 `execute` 在完整终态审计后默认继续准备合格新候选直到达到每日目标或候选池为空；
 `--one-batch` 才明确停止。缺少完整审计始终停止连续循环。
 
+`latest.json` 的归属按运行创建时间单调前进。历史 Recovery/Repair 可追加旧运行证据和更新
+其 `updated_at`，但不能覆盖一个创建时间更晚的调度指针。
+
 ## Non-bypassable Policies
 
 - LinkedIn 远程抓取与浏览器自动投递永远拒绝。
 - `WRITE` / `SUBMIT` 不得绕过数据库重复记录或受保护终态；受保护终态只有在恢复证据已
   验证且范围是单岗位时才可重新进入执行。
+- 执行批次对公司和 ATS adapter 维护普通失败连续序列；连续相同终态达到配置阈值后，
+  后续同范围 `browser_execute` 由 Policy Gate 以
+  `failure_circuit_breaker_active` 拒绝，其他范围继续。成功、不同终态或窗口过期关闭该
+  熔断。
 - `SUBMIT` 必须由显式配置开启，并满足候选人事实、批准敏感答案、无 blocking review、
   原始 PDF 来源和页面确认证据要求。
 - Tool 声明的副作用高于 Plan 声明时，以 Tool 为准。

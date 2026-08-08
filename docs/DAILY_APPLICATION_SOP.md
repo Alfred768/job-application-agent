@@ -21,15 +21,17 @@ cp ops/daily.example.json ops/daily.local.json
 - `resume_source_dir` 或 `required_resume_pdf`：原始 PDF 的唯一来源。
 - `limit`：每个准备批次最多生成的岗位数；当前配置为 100，脚本硬限制为 100。
   这是批次尝试上限，不是确认提交数量保证；资格、去重、反垃圾和真实答案门仍然生效。
-- `daily_submit_target`：本地自然日内需要达到的页面确认提交数；当前为 100。只有数据库
+- `daily_submit_target`：本地自然日内页面确认提交数的绝对下限；当前为 100。实际目标取
+  该下限与 `ceil(本轮原始导入数 * min_confirmed_submission_rate)` 的较大值。只有数据库
   中写入 `submitted_at` 的确认成功才计数，填写完成、点击未确认、阻塞和失败均不计数。
 - `empty_wake_minutes`：空候选后由外部调度启动新批次的间隔，默认 15 分钟。
 - `submit_complete`：是否允许在无阻塞项时点击最终提交。
 - `require_gmail_token`：是否把 Gmail OAuth token 设为执行前硬门槛。
 - `evaluation`：每轮考核目标。`imported_cohort_target` 是样本规模门槛；
-  `min_confirmed_submission_rate` 以最终合格执行岗位为分母，默认 80%；
-  `min_terminal_audit_coverage` 默认要求 100% 完整终态审计。导入到确认提交率只作来源质量
-  漏斗监测，不能作为绕过资格、去重或安全门的配额。
+  `confirmation_rate_denominator` 必须为 `raw_imported`；
+  `min_confirmed_submission_rate` 严格以本轮原始导入岗位为分母，默认 80%；
+  `min_terminal_audit_coverage` 默认要求 100% 完整终态审计。最终合格执行岗位的确认率只作
+  诊断；原始导入目标也不能作为绕过资格、去重或安全门的理由。
 - `auto_repair`：受控 coding repair 策略。`enabled` 决定是否自动启动隔离修复，
   `max_cycles` 限制修复轮数，`combobox_no_progress_seconds` 是单个下拉字段的无进展上限，
   `retry_after_verified_repair` 决定验证通过后是否只重试受影响岗位。
@@ -94,7 +96,7 @@ output/daily/YYYY-MM-DD/HHMMSS/
   RUN_SUMMARY.md
 ```
 
-`run-state.json` 记录配置文件哈希、档案/答案/岗位源输入哈希、明确的提交模式、命令、阶段和时间；`latest.json` 指向本次运行。后续 Agent 不再猜测“上次执行到哪里”。准备后若配置、真实档案、敏感答案或指定简历发生变化，`execute` 会拒绝混用旧包，必须重新准备。
+`run-state.json` 记录配置文件哈希、档案/答案/岗位源输入哈希、明确的提交模式、命令、阶段和时间；`latest.json` 指向创建时间最新的运行。历史 `recover`/`repair` 只更新所选运行自身，不能因旧运行的 `updated_at` 较新而让该指针倒退。后续 Agent 不再猜测“上次执行到哪里”。准备后若配置、真实档案、敏感答案或指定简历发生变化，`execute` 会拒绝混用旧包，必须重新准备。
 
 准备阶段验收：
 
@@ -143,6 +145,8 @@ Policy Gate；LinkedIn 自动访问、未验证档案、重复/受保护终态�
 1. 依据真实档案、approved sensitive KB 和受约束的非敏感 LLM 回答填写字段；
 2. 对动态字段、读回失败和可恢复的普通填写错误执行最多
    `JOB_AGENT_SELF_HEAL_PASSES` 次有界重检，即使同页另有人工阻塞字段也继续修复可恢复项；
+   CAPTCHA 或服务端校验后的重检会先验证并复用与批准答案匹配的已提交 combobox 值，
+   包括未暴露 ARIA `combobox` role 的 Greenhouse 控件；不匹配或无法读回时仍重新受控填写；
    每个 combobox 同时受 `auto_repair.combobox_no_progress_seconds` 限制，超过后立即生成
    明确的 no-progress blocker，不再耗满岗位级超时；
 3. 若仍有 blocking review，保存结构化 `review_items` 和 `review-required.txt` 并停止提交；
@@ -225,7 +229,8 @@ Codex 认证/配置/网络/限流错误属于 repair 基础设施不可用：记
 ```
 
 该命令先从当前完整审计重新生成脱敏 fingerprints 和 scoped targets；旧 request 只在当前
-审计无法重建时兜底。重建结果会在 Codex readiness 检查前写入新的
+审计不可用或不完整时兜底。完整审计若确认只剩候选人事实等非代码阻塞，会持久化空 repair
+范围、废止旧指针并回到 `executed_with_blockers`，不检查 Codex readiness。其他重建结果会在 Codex readiness 检查前写入新的
 `repair-request-refresh-NN-cycle-NN.json`，同步更新 state/manifest 指针；因此即使认证仍
 不可用，当前完整范围也会保留，同时不启动 Codex、不新增 repair attempt、不消耗逻辑
 cycle。新的 refresh/attempt 文件都不覆盖旧 request/result，且默认不打开浏览器。若
@@ -265,6 +270,15 @@ Codex Repair，但每条执行审计必须包含 `recovery_plan`。SOP 会把其
 6. 点击未确认先核对页面证据、门户、邮箱和 application ID；已有确认时只更新 SQLite，
    未证明首次点击失败前不再次点击。
 
+教育经历（包括高中名称和毕业年份），过往/当前任职、承包或投递面试经历，其他 offer
+及其截止日期，亲属关系与利益冲突，雇主限制与便利需求，母语/本地文字法定姓名，以及
+产品/地点/工作方向等个人偏好和明确的每周到岗承诺必须视为候选人事实。
+只有规范化后与表单字段精确对应的 profile answer，或该
+字段适用且已批准的 sensitive KB 才能作答；不得把简历缺失解释为 `No`，也不得从一般搬迁、
+远程偏好或低频到岗意愿推导固定到岗承诺。缺少精确答案时保持 `waiting_for_user`。
+运行时明确返回 `candidate fact needs explicit approved answer` 时必须走同一
+`candidate_fact_resolution`，不能误分流到 coding repair。
+
 Gmail 查询、SQLite reconciliation、证据检查和 tenant 冷却有内置执行器；账户、
 CAPTCHA 或浏览器恢复只有在对应外部适配器和所需上下文已配置时才能完成，否则保持
 `pending`。需要候选人事实或授权的动作必须是 `waiting_for_user`，LLM 不得代填。
@@ -279,6 +293,16 @@ CAPTCHA 或浏览器恢复只有在对应外部适配器和所需上下文已配
 `recover` 会使用当前分类规则重新生成每条 Recovery Plan，通过 Agent Core 回放自动动作，
 更新原审计并写入 `recovery-execution.json`。默认不打开浏览器，也不会重投；只有恢复证据
 已经完整并显式增加 `--retry-verified` 时，才执行生成的单岗位 retry batch。
+存在多次 execution attempt 时，Recovery 按 application ID 合并全部完整审计，以最后一次
+终态覆盖同一岗位，同时保留只出现在早期批次的岗位；重新规划后的 recovery 注解写回该岗位
+最后出现的原始 attempt 审计，不把合并视图覆写成某一次浏览器执行的证据。
+对于 `candidate_fact_resolution`，候选人补全答案后，`recover` 会从当前 profile 或
+approved sensitive KB 验证原阻塞字段，在原运行的 `recovery/` 子目录重建一个新申请包，
+保留旧包和旧审计，并记录事实源哈希。只有新包通过事实门时才会生成带
+`recovery_verified=true`、`retry_scope=single_application` 的恢复批次；仍缺答案时继续
+保持 `waiting_for_user`。普通事实必须与原阻塞字段精确对应，且相对于旧申请包确实是新增
+或变更的已批准答案；`N/A` 等占位值、旧包中已经存在但未解决阻塞的答案，以及同时包含
+非候选人事实阻塞的申请都不能借此恢复通道重试。
 
 普通自定义答案写入 `ops/daily.local.json` 中 `profile` 指向文件的 `answers`；敏感、法律、
 身份、授权和人口统计答案写入 `sensitive_kb` 并设为 `approved: true`。配置中的
@@ -304,7 +328,7 @@ CAPTCHA 或浏览器恢复只有在对应外部适配器和所需上下文已配
 - `RUN_SUMMARY.md`：当日数量、每个岗位终态、结构化 Recovery Plans 和下一步。
 - `recovery-execution.json`：每个受保护终态的实际恢复动作、证据和是否满足单岗位重试条件。
 - `evaluation-metrics.json`：可机读的每轮考核记录，包含导入漏斗、终态审计覆盖、
-  最终合格岗位的确认提交率、原始导入漏斗率和点击未确认数。
+  作为 80% 主目标的原始导入确认率、诊断用最终合格岗位确认率和点击未确认数。
 - `agent-runtime-trace.json`：Pipeline、浏览器、Recovery、Repair、Evaluation 的统一索引，
   并统计每岗位 prepare/execute Observation handoff。实际执行岗位必须为 `continuous`。
 - `applications/*/agent-trajectory.json`：同一 `agent_runtime_id` 的脱敏 AgentRound；
@@ -314,9 +338,11 @@ CAPTCHA 或浏览器恢复只有在对应外部适配器和所需上下文已配
 等待时间和本批确认成功率。确认成功率只以 `submitted / total` 计算，不把“填写完成”、
 点击未确认或前一天的提交算入本批成功。
 
-`Agent Evaluation` 区域和 `evaluation-metrics.json` 是每轮考核依据：只有执行后未被安全
-跳过的岗位进入 `confirmed_submission_rate_final_eligible` 的分母；`submitted` 只计页面确认
-并写入数据库的投递。每轮还要求完整终态审计，并将 `submit_clicked_unconfirmed` 维持为 0。
+`Agent Evaluation` 区域和 `evaluation-metrics.json` 是每轮考核依据：
+`raw_import_to_confirmed_rate = 当日页面确认提交数 / 本轮原始导入岗位数`，该值必须达到
+`min_confirmed_submission_rate`。`confirmed_submission_rate_final_eligible` 继续保留，
+但只作执行质量诊断，不再缩小 80% 主目标的分母。`submitted` 只计页面确认并写入数据库的
+投递。每轮还要求完整终态审计，并将 `submit_clicked_unconfirmed` 维持为 0。
 单轮导入数达到 `imported_cohort_target` 前，样本规模状态为 `insufficient_cohort`；该状态
 不授权降低资格、去重、反垃圾或候选人事实门。
 
@@ -336,6 +362,9 @@ Policy Gate 和 ControlledExecution 获得结构化终态 ToolResult；该结果
 填表、Next 和 Submit 也必须作为同一 Agent Core 的 `ats_*` ToolCall；Next/Submit 必须从
 “执行/停止”两个候选中选择，不能先点击再补记轨迹。旧 Node/Chrome 脚本只用于兼容或离线
 fixture，不是每日生产入口。
+Playwright 启动或首次导航失败且尚未产生任何 `ats_*` 轮次时，可用全新浏览器会话重试一次；
+一旦出现页面观察、填写、Next 或 Submit 轮次，整份申请不得自动重启。审计只记录分类后的
+故障码和有界重试次数，不保存原始异常中的页面内容。
 
 运行目录日期只表示准备时间。跨午夜批次的 `daily_target`、日报和考核会读取最新
 `execution_attempt.finished_at`，按实际执行本地日期查询 SQLite；结构化指标同时记录
@@ -361,7 +390,9 @@ fixture，不是每日生产入口。
 
 当日完成定义：
 
-- 当天数据库确认提交数达到 `daily_submit_target`；
+- 当天数据库确认提交数达到
+  `max(daily_submit_target, ceil(本轮原始导入数 * min_confirmed_submission_rate))`；
+- `raw_import_to_confirmed_rate` 达到配置的 80% 主目标；
 - 每个准备岗位都有一个审计终态；
 - 每个非 `submitted` 状态都有明确分流；
 - 日报已生成；
@@ -474,7 +505,11 @@ Lever 和 Ashby 按公司或 board 隔离。CAPTCHA solver 的 unsupported/error
 在时间窗口内，同公司或同 ATS tenant/adapter 连续两次出现相同的
 `application_form_unavailable`、`autofill_completed_blocked`、`autofill_failed`、
 `autofill_timed_out` 或 `submission_processing_error` 后，只暂停对应范围并转向其他
-来源。不同失败状态、后续确认成功或窗口过期会关闭熔断；不得借此重投已有终态。
+来源。执行器在当前批次每个终态增量落盘后立即更新连续计数；达到阈值时，后续同范围岗位
+仍生成完整 Agent 轨迹和 `skipped_policy_denied` 终态，但
+`JobApplicationPolicyGate` 必须以 `failure_circuit_breaker_active` 拒绝
+`browser_execute`，不再打开浏览器。不同失败状态、后续确认成功或窗口过期会关闭熔断；
+不得借此重投已有终态。
 
 ## 8. 改代码后的额外门槛
 

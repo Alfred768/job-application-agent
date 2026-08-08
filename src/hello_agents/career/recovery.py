@@ -15,10 +15,12 @@ from hello_agents.core.trace import agent_loop_result_to_dict
 
 
 _MISSING_FACT_MARKERS = (
+    "candidate fact needs explicit approved answer",
     "needs saved answer",
     "no approved answer",
     "profile has no approved",
     "missing candidate fact",
+    "no option matches saved answer",
     "truthfulness gate",
     "user-authored",
 )
@@ -31,6 +33,18 @@ _USER_AUTHORED_FIELD_MARKERS = (
     "you have read",
     "read in the past month",
     "recently read",
+)
+_CANDIDATE_FACT_FIELD_MARKERS = (
+    "high school name",
+    "high school graduation",
+    "secondary school name",
+    "secondary school graduation",
+    "preferred ",
+    "preference",
+    "would you prefer",
+    "which of these roles resonates",
+    "resonates the most",
+    "where are you spending summer",
 )
 _CAPTCHA_MARKERS = (
     "captcha blocked automatic submission",
@@ -127,7 +141,13 @@ def requires_approved_candidate_fact(item: Mapping[str, Any]) -> bool:
     reason = str(item.get("reason") or "").casefold()
     return bool(item.get("sensitive")) or any(
         marker in reason for marker in _MISSING_FACT_MARKERS
-    ) or any(marker in label for marker in _USER_AUTHORED_FIELD_MARKERS)
+    ) or any(
+        marker in label
+        for marker in (
+            *_USER_AUTHORED_FIELD_MARKERS,
+            *_CANDIDATE_FACT_FIELD_MARKERS,
+        )
+    )
 
 
 def recovery_plan_to_dict(plan: RecoveryPlan) -> dict[str, Any]:

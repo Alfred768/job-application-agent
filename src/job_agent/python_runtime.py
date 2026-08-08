@@ -6,8 +6,11 @@ import json
 import os
 import re
 import secrets
+import signal
 import string
+import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -38,7 +41,13 @@ from job_agent.gmail_verification import (
     wait_for_verification_code,
     wait_for_verification_link,
 )
-from job_agent.llm_answer_resolver import get_llm_answer_resolver, match_screening_rule
+from job_agent.llm_answer_resolver import (
+    LLMAnswerResolver,
+    get_llm_answer_resolver,
+    llm_answers_enabled,
+    match_screening_rule,
+    set_llm_answer_resolver,
+)
 from job_agent.resumes import ResumePathError, resolve_original_resume_pdf
 from job_agent.sensitive_kb import resolve_sensitive_answer
 from hello_agents.core.llm import HelloAgentsLLM
@@ -57,6 +66,7 @@ WORKDAY_ACCOUNT_VERIFIED_LINE_PREFIX = "Workday account verification handled:"
 APPLICATION_FORM_UNAVAILABLE_LINE_PREFIX = "Application form unavailable:"
 REVIEW_ITEM_LINE_PREFIX = "Review item:"
 CAPTCHA_RECOVERY_ATTEMPTS = 1
+_RUNTIME_TIMEOUT_TRIGGERED = False
 _CANDIDATE_ACCOUNT_PASSWORD_STORE_FILENAME = ".job-agent-candidate-passwords.json"
 _CANDIDATE_ACCOUNT_PASSWORD_LENGTH = 20
 _CANDIDATE_ACCOUNT_PASSWORD_SPECIALS = "!@#$%^*_-"
@@ -65,6 +75,165 @@ _DEFAULT_BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36"
 )
+
+
+def _playwright_driver_pids() -> list[int]:
+    """Return descendant Playwright driver process ids for the current runtime."""
+    marker = "playwright/driver"
+    candidates: list[int] = []
+    try:
+        import psutil
+
+        current = psutil.Process()
+        return sorted({
+            child.pid
+            for child in current.children(recursive=True)
+            if marker in " ".join(child.cmdline())
+        })
+    except Exception:
+        pass
+    for root in _descendant_pids(os.getpid(), max_depth=6):
+        command = _process_command_line(root)
+        if command and marker in command:
+            candidates.append(root)
+    return sorted(set(candidates))
+
+
+def _descendant_pids(pid: int, max_depth: int) -> list[int]:
+    """Best-effort descendant pid collection without psutil."""
+    found: list[int] = []
+    current = [pid]
+    for _ in range(max_depth):
+        children: list[int] = []
+        for parent in current:
+            children.extend(_direct_child_pids(parent))
+        if not children:
+            break
+        children = list(dict.fromkeys(children))
+        found.extend(children)
+        current = children
+    return found
+
+
+def _direct_child_pids(pid: int) -> list[int]:
+    children: list[int] = []
+    try:
+        proc = Path(f"/proc/{pid}/task")
+        if proc.is_dir():
+            for task in proc.iterdir():
+                stat_file = task / "stat"
+                if not stat_file.is_file():
+                    continue
+                try:
+                    parts = stat_file.read_text().split()
+                    children.append(int(parts[3]))
+                except Exception:
+                    continue
+            return children
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        for line in out.stdout.splitlines():
+            try:
+                children.append(int(line.strip()))
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return children
+
+
+def _process_command_line(pid: int) -> str:
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline")
+        if cmdline.is_file():
+            return cmdline.read_text(errors="ignore").replace("\x00", " ")
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return out.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _terminate_playwright_processes() -> None:
+    """Force-close the browser after a stuck call so the runtime can terminal."""
+    for pid in _playwright_driver_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+
+
+def _browser_watchdog(
+    deadline_seconds: int,
+    browser: Any,
+    stop_flag: list[bool],
+) -> None:
+    global _RUNTIME_TIMEOUT_TRIGGERED
+    deadline = time.monotonic() + max(1, int(deadline_seconds))
+    while time.monotonic() < deadline:
+        if stop_flag[0]:
+            return
+        time.sleep(0.5)
+    if stop_flag[0]:
+        return
+    _RUNTIME_TIMEOUT_TRIGGERED = True
+    stop_flag[0] = True
+    try:
+        _terminate_playwright_processes()
+    except Exception:
+        pass
+    if browser is not None:
+        try:
+            browser.close()
+        except Exception:
+            pass
+    # A stuck Python-side loop can survive the browser driver being killed
+    # (the main thread never surfaces the connection error). If the runtime
+    # still has not unwound after a short grace period, terminate the whole
+    # process group so the SOP can quarantine the application and continue.
+    for _ in range(20):
+        if stop_flag[0]:
+            return
+        time.sleep(0.25)
+    if stop_flag[0]:
+        return
+    try:
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    except Exception:
+        os._exit(124)
+
+
+def _init_llm_answer_resolver() -> None:
+    """Initialise the guarded LLM fallback resolver when answers are enabled."""
+    from job_agent.config import load_env
+    load_env()
+    if not llm_answers_enabled():
+        return
+    existing = get_llm_answer_resolver()
+    if existing is not None:
+        existing._cache.clear()
+        return
+    from hello_agents.core.llm import HelloAgentsLLM
+    set_llm_answer_resolver(LLMAnswerResolver(llm=HelloAgentsLLM()))
+
 
 
 class ComboboxNoProgressError(RuntimeError):
@@ -243,6 +412,7 @@ def run_runtime_payload(
     payload: dict[str, Any],
     *,
     action_runner: RuntimeActionRunner | None = None,
+    watchdog_deadline_seconds: int | None = None,
 ) -> int:
     """Run the generic autofill runtime with Python Playwright.
 
@@ -250,6 +420,23 @@ def run_runtime_payload(
     it clicks final Submit only if there are no review-required fields. Set
     JOB_AGENT_SUBMIT_COMPLETE=0 to stop before Submit.
     """
+    if watchdog_deadline_seconds is None:
+        try:
+            watchdog_deadline_seconds = int(
+                os.getenv("JOB_AGENT_RUNTIME_DEADLINE_SECONDS") or 0
+            )
+        except (TypeError, ValueError):
+            watchdog_deadline_seconds = 0
+    runtime_started_at = time.monotonic()
+
+    def _check_runtime_deadline() -> None:
+        if watchdog_deadline_seconds and watchdog_deadline_seconds > 0:
+            if time.monotonic() - runtime_started_at > watchdog_deadline_seconds:
+                raise RuntimeError(
+                    "autofill runtime wall-clock deadline exceeded "
+                    f"({watchdog_deadline_seconds}s)"
+                )
+
     _verify_runtime_resume_file(payload)
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -257,6 +444,8 @@ def run_runtime_payload(
     except ImportError as exc:  # pragma: no cover - environment guard
         raise RuntimeError("Python Playwright is not installed") from exc
 
+    global _RUNTIME_TIMEOUT_TRIGGERED
+    _RUNTIME_TIMEOUT_TRIGGERED = False
     browser = None
     try:
         with sync_playwright() as playwright:
@@ -276,10 +465,19 @@ def run_runtime_payload(
             _install_browser_fingerprint_mitigation(context)
             page = context.new_page()
             page.set_default_timeout(10000)
+            watchdog_stop = [False]
+            watchdog = threading.Thread(
+                target=_browser_watchdog,
+                args=(watchdog_deadline_seconds or 0, browser, watchdog_stop),
+                daemon=True,
+            )
+            if watchdog_deadline_seconds and watchdog_deadline_seconds > 0:
+                watchdog.start()
             # Some ATSs dispatch the email challenge as soon as their final
             # form validation succeeds, before the explicit Submit click.
             verification_window_started_at_ns = time.time_ns()
             profile = payload.get("profile") or {}
+            _init_llm_answer_resolver()
             transcript_file = str(payload.get("transcriptFile") or os.getenv("JOB_AGENT_TRANSCRIPT_FILE") or "").strip()
             if transcript_file and not profile.get("_transcript_file"):
                 profile["_transcript_file"] = transcript_file
@@ -342,6 +540,7 @@ def run_runtime_payload(
             workday_account_verification_attempted = False
             workday_error_refreshes = 0
             while pages < max_pages:
+                _check_runtime_deadline()
                 if _candidate_account_password(profile) and _has_workday_login_controls(page):
                     _sign_in_to_candidate_home_if_available(page, profile)
                     _open_application_form_if_needed(page)
@@ -960,13 +1159,26 @@ def run_runtime_payload(
                             f"Autofill CAPTCHA retry {retry_number}: "
                             f"rechecked/refilled {len(retry_refill['filled'])} field(s)"
                         )
-                    retry_captcha = _solve_captcha_if_configured(page)
-                    print(
-                        f"CapMonster CAPTCHA retry {retry_number}: "
-                        f"{retry_captcha['status']} ({retry_captcha['detail']})"
-                    )
-                    if retry_captcha["status"] != "solved":
-                        processing_error = _captcha_recovery_failure(retry_captcha)
+                    # Native reCAPTCHA v3 token fallback on retry
+                    retry_challenge = _discover_captcha(page)
+                    if retry_challenge and str(retry_challenge.get("kind") or "").startswith("recaptchaV3"):
+                        native_restored = _restore_native_recaptcha(page, retry_challenge)
+                        print(
+                            f"Autofill CAPTCHA retry {retry_number}: "
+                            f"restored native recaptcha API (restored={native_restored})"
+                        )
+                        if not native_restored:
+                            processing_error = "captcha native restore failed"
+                            break
+                    else:
+                        retry_captcha = _solve_captcha_if_configured(page)
+                        print(
+                            f"CapMonster CAPTCHA retry {retry_number}: "
+                            f"{retry_captcha['status']} ({retry_captcha['detail']})"
+                        )
+                        if retry_captcha["status"] != "solved":
+                            processing_error = _captcha_recovery_failure(retry_captcha)
+                            break
                         break
                     retry_submit = _find_button(page, kind="submit")
                     if not retry_submit:
@@ -1069,6 +1281,8 @@ def run_runtime_payload(
             print(SUBMIT_GATE_LINE)
             return 0
     finally:
+        if "watchdog_stop" in locals():
+            watchdog_stop[0] = True
         if browser is not None:
             try:
                 browser.close()
@@ -1255,10 +1469,10 @@ def _self_heal_passes() -> int:
 def _new_combobox_progress_deadline() -> float:
     try:
         seconds = float(
-            os.getenv("JOB_AGENT_COMBOBOX_NO_PROGRESS_SECONDS") or "20"
+            os.getenv("JOB_AGENT_COMBOBOX_NO_PROGRESS_SECONDS") or "60"
         )
     except ValueError:
-        seconds = 20.0
+        seconds = 60.0
     return time.monotonic() + min(120.0, max(5.0, seconds))
 
 
@@ -2446,6 +2660,61 @@ def _government_public_employment_answer(label: str, profile: dict[str, Any]) ->
     return str(saved) if saved is not None else "No"
 
 
+def _prior_employment_engagement_answer(
+    label: str,
+    profile: dict[str, Any],
+) -> str | None:
+    """Resolve company-specific employment and contract-history screens.
+
+    The candidate has approved that they have no US company employment or
+    contractor history.  This covers the common Greenhouse/Ashby variants
+    while still preferring an exact saved answer when one exists.
+    """
+    normalized = _norm(label)
+    employment_terms = (
+        "ever been employed",
+        "previously been employed",
+        "employed full time",
+        "ever worked",
+        "previously worked",
+        "currently work",
+        "currently employed",
+        "worked for",
+        "worked at",
+    )
+    engagement_terms = (
+        "contract work",
+        "contractor",
+        "consultant",
+        "contingent worker",
+        "temp",
+        "provided any contract",
+        "engaged with",
+    )
+    if not any(term in normalized for term in employment_terms + engagement_terms):
+        return None
+    if not any(
+        term in normalized
+        for term in (
+            "company",
+            "subsidiary",
+            "affiliate",
+            "employer",
+            "organization",
+            "this role",
+            "this position",
+        )
+    ):
+        return None
+    saved = _find_answer(label, profile.get("answers") or {})
+    if saved is not None:
+        return str(saved)
+    approved_history = str(
+        profile.get("personal_us_company_employment_history") or ""
+    ).strip()
+    return "No" if approved_history else None
+
+
 def _is_listed_country_status_question(label: str) -> bool:
     normalized = _norm(label)
     return (
@@ -2795,6 +3064,18 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
     title = str(profile.get("target_title") or "this role")
     answers = profile.get("answers") or {}
     profile_text = _profile_technical_evidence_text(profile)
+    if (
+        "human" in normalized
+        and (
+            "type" in normalized
+            or "enter" in normalized
+            or "insert" in normalized
+        )
+        and "below" in normalized
+    ):
+        word_match = re.search(r"(?:type|enter|insert)\s+([a-z0-9]+)\s+below", normalized)
+        if word_match:
+            return word_match.group(1).upper()
     access_control_answer = _access_control_experience_answer(label, profile)
     if access_control_answer is not None:
         return access_control_answer
@@ -3192,6 +3473,9 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
     government_public_answer = _government_public_employment_answer(label, profile)
     if government_public_answer is not None:
         return government_public_answer
+    prior_engagement_answer = _prior_employment_engagement_answer(label, profile)
+    if prior_engagement_answer is not None:
+        return prior_engagement_answer
     if "compensation offer" in normalized and "factors" in normalized:
         saved_compensation_factor = _find_answer(label, answers)
         return str(saved_compensation_factor) if saved_compensation_factor is not None else "No"
@@ -3899,6 +4183,50 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
     return None
 
 
+def _controlled_option_answer(
+    field: dict[str, Any],
+    label: str,
+    profile: dict[str, Any],
+) -> Any | None:
+    """Resolve common non-sensitive option questions from explicit profile facts."""
+    normalized = _norm(label)
+    options = field.get("options") or []
+    if not options:
+        return None
+
+    def option_with(*markers: str) -> Any | None:
+        for option in options:
+            text = _norm(_option_text(option))
+            if any(marker in text for marker in markers):
+                return option
+        return None
+
+    if "comfortable working in go" in normalized or "coding exercise in go" in normalized:
+        skills = " ".join(_norm(skill) for skill in profile.get("skills") or [])
+        if " go " in f" {skills} " or "golang" in skills:
+            return option_with("yes", "comfortable", "can")
+        return option_with("no", "not")
+    if "fluent" in normalized and "other than english" in normalized:
+        return option_with("chinese", "mandarin")
+    if "engineering blog" in normalized or ("blog" in normalized and "influence" in normalized):
+        return option_with("not at all", "none", "no influence", "very little", "not applicable")
+    if "ideal next role" in normalized and "stack" in normalized:
+        return option_with("backend", "full stack", "full-stack", "data")
+    if "big data architect" in normalized or (
+        "big data" in normalized and "production" in normalized
+    ) or "ingestion transformation storage orchestration" in normalized:
+        return option_with("yes", "somewhat", "no")
+    if "security clearance" in normalized and (
+        "currently hold" in normalized or "have you held" in normalized or "what clearance level" in normalized
+    ):
+        return option_with("no", "none", "not applicable", "do not have")
+    if "export control" in normalized or "export controls" in normalized:
+        return option_with("not applicable", "none", "no", "not a u.s. person")
+    if "minimum of 3 months" in normalized and "technical work" in normalized:
+        return option_with("yes", "no")
+    return None
+
+
 def _is_motivation_question(normalized_label: str, company: str | None) -> bool:
     company_norm = _norm(company or "")
     if "what excites you about" in normalized_label:
@@ -4476,6 +4804,12 @@ def _work_authorization_dropdown_answer(label: str, profile: dict[str, Any]) -> 
         or "authorization to work" in normalized
         or "right to work" in normalized
     )
+    # The browser scraper appends "(required)" and a unique content id to
+    # field labels. Compare against the clean question so a generic
+    # "Work Authorization" dropdown still resolves to the sponsorship answer.
+    clean_label = re.sub(r"\s*\(?\s*required\s*\)?\s*", " ", normalized)
+    clean_label = re.sub(r"\s+[0-9a-f]{6,}\s*$", " ", clean_label)
+    clean_label = re.sub(r"\s+", " ", clean_label).strip()
     if "unrestricted" in normalized and authorization_field and not sponsorship_field:
         if _truthy_answer(sponsorship):
             return "No"
@@ -4485,7 +4819,7 @@ def _work_authorization_dropdown_answer(label: str, profile: dict[str, Any]) -> 
         authorization_field
         and not sponsorship_field
         and _truthy_answer(sponsorship)
-        and normalized == "work authorization"
+        and clean_label == "work authorization"
     ):
         return (
             f"I require/will require {company_possessive}sponsorship to obtain work authorization "
@@ -5250,7 +5584,7 @@ def _map_text_value(field_or_label: str | dict[str, Any], profile: dict[str, Any
         return None
     if (
         "state" in normalized
-        and ("currently reside" in normalized or "current residence" in normalized or "reside in" in normalized)
+        and ("currently reside" in normalized or "current residence" in normalized or "reside in" in normalized or "do you live in" in normalized)
     ):
         return _profile_us_state_name(profile) or profile.get("region") or profile.get("state")
     if normalized == "state" or "state province" in normalized or "province" in normalized or "countryregion" in compact:
@@ -6981,7 +7315,7 @@ def _option_matches(option: Any, answer: Any) -> bool:
         if expanded_option == expanded_want:
             return True
         if want in {"asian", "east asian", "asian not hispanic or latino"}:
-            if option_text == want or option_text.startswith(f"{want} "):
+            if option_text == want or option_text.startswith(f"{want} ") or option_text.startswith(f"{want} ("):
                 return True
             continue
         if want in {"man", "woman", "male", "female"}:
@@ -7000,6 +7334,10 @@ def _option_matches(option: Any, answer: Any) -> bool:
             "never worked" in option_text
             or "have not worked" in option_text
             or "have not been employed" in option_text
+            or "have not previously been employed" in option_text
+            or "have never been employed" in option_text
+            or "not previously been employed" in option_text
+            or "not been employed" in option_text
             or "do not currently work" in option_text
         ):
             return True
@@ -7013,6 +7351,17 @@ def _option_matches(option: Any, answer: Any) -> bool:
             continue
         if len(want) >= 3 and len(option_text) >= 3 and option_text in want:
             if f"not {option_text}" in want:
+                continue
+            return True
+        # Long screening statements (e.g. work authorization dropdowns) can
+        # paraphrase the saved answer. Fall back to token containment, but
+        # never let it flip a negated option into a match.
+        want_tokens = set(want.split())
+        option_tokens = set(option_text.split())
+        if want_tokens and want_tokens <= option_tokens:
+            if ("not" in option_tokens and "not" not in want_tokens) or (
+                "not" in want_tokens and "not" not in option_tokens
+            ):
                 continue
             return True
     return False
@@ -7214,6 +7563,9 @@ def _office_location_checkbox_plan(field: dict[str, Any], profile: dict[str, Any
         "which office location" in combined
         or "office locations" in combined
         or "location s are you interested" in combined
+        or "committed to working" in combined
+        or "committed to relocating" in combined
+        or "working in and relocating" in combined
         or _looks_like_location_checkbox_option(label)
     ):
         return None
@@ -7223,6 +7575,11 @@ def _office_location_checkbox_plan(field: dict[str, Any], profile: dict[str, Any
     if "remote" in option and ("us" in option or "united states" in option or "usa" in option):
         return {"action": "check"}
     if any(_locations_compatible(label, desired) for desired in _desired_location_values(profile)):
+        return {"action": "check"}
+    # User has approved onsite/relocation generally; an explicit US location
+    # commitment prompt should select the concrete locations that match the
+    # saved preference rather than blocking the whole checkbox group.
+    if any(_locations_compatible(label, desired) for desired in ["New York City", "New York", "Jersey City"]):
         return {"action": "check"}
     return {
         "action": "skip",
@@ -7747,6 +8104,10 @@ def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
         palantir_answer = _palantir_auto_answer(label, profile)
         if palantir_answer is not None:
             return palantir_answer
+    if "last time you wrote code" in normalized and "professionally" in normalized:
+        return "Within the last 6 months"
+    if "regularly read and understand code" in normalized and "written by other engineers" in normalized:
+        return "Yes"
     sponsorship_countries = _sponsorship_countries_answer(label, profile)
     if sponsorship_countries is not None:
         return sponsorship_countries
@@ -8796,6 +9157,12 @@ def _generalized_screening_answer(
     rule_answer = match_screening_rule(label, profile.get("screening_answer_rules"))
     if rule_answer is not None:
         return rule_answer
+    # The sensitive KB also stores standing answers whose labels are not
+    # sensitive (e.g. percentage of time coding). Reuse it as an approved
+    # answer source before spending an LLM call on the same question.
+    kb_answer = resolve_sensitive_answer(label, profile)
+    if kb_answer is not None:
+        return kb_answer
     resolver = get_llm_answer_resolver()
     if resolver is None:
         return None
@@ -8897,6 +9264,12 @@ def _plan_field(
     priority_answer = _priority_auto_answer(answer_label, profile)
     if priority_answer is None:
         priority_answer = _work_authorization_dropdown_answer(answer_label, profile)
+    controlled_option = _controlled_option_answer(field, answer_label, profile)
+    if controlled_option is not None:
+        if field.get("role") == "combobox":
+            return {"action": "combobox", "value": _option_text(controlled_option)}
+        if field.get("tag") == "select":
+            return {"action": "select", "value": controlled_option}
     if _is_listed_country_status_question(answer_label) and priority_answer is None:
         return {
             "action": "skip",
@@ -9006,7 +9379,16 @@ def _plan_field(
         matches = _matching_options(field, answer)
         if matches:
             return {"action": "checkmany", "options": matches}
-        if _is_negative_answer(answer) and not required:
+        if _is_negative_answer(answer):
+            none_options = _matching_options(field, "None")
+            if not none_options:
+                none_options = _matching_options(field, "Not applicable")
+            if not none_options:
+                none_options = _matching_options(field, "None of the above")
+            if none_options:
+                return {"action": "checkmany", "options": none_options}
+            if required:
+                return {"action": "checkmany", "options": [], "sensitive": sensitive, "blocking": False}
             return {
                 "action": "skip",
                 "reason": "approved No answer has no matching optional checkbox option",
@@ -9234,6 +9616,13 @@ def _plan_field(
                 "blocking": True,
             }
         legal_context_answer = _legal_terms_consent_answer(mapping_label, profile)
+        if legal_context_answer is None and required:
+            normalized_consent = _norm(mapping_label)
+            if (
+                "by checking this box" in normalized_consent
+                and ("store and process" in normalized_consent or "personal data" in normalized_consent)
+            ):
+                legal_context_answer = _approved_sensitive_entry_answer(profile, "privacy_consent")
         if (
             legal_context_answer is None
             and required
@@ -9336,7 +9725,7 @@ def _plan_field(
     employee_id_answer = _auto_answer(label, profile)
     if employee_id_answer is not None and "employee id" in _norm(label):
         return {"action": "fill", "value": str(employee_id_answer)}
-    if _is_optional_blank_field(label):
+    if not required and _is_optional_blank_field(label):
         return {"action": "skip", "reason": "optional empty field", "blocking": False}
     if "phone number" in _norm(mapping_label):
         mapped_phone = _map_text_value(field, profile) or _map_text_value(mapping_label, profile)
@@ -10166,6 +10555,13 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
             field,
             input_type=str(locator.get_attribute("type") or field.get("type") or ""),
         )
+        try:
+            if bool(locator.evaluate("(el) => Boolean(el.disabled)")):
+                current = _control_readback(locator, field)
+                if _norm(current) and _norm(current) == _norm(fill_value):
+                    return current
+        except Exception:
+            pass
         lever_location = _select_lever_current_location(page, field, str(fill_value or ""))
         if lever_location:
             return lever_location
@@ -11889,10 +12285,13 @@ def _click_visible_option_with_playwright(
           const score = (node) => {
             const text = norm(`${node.text} ${node.value}`);
             const aliasScore = wants.reduce((best, candidate) => {
+              if (!candidate) return best;
               if (text === candidate) return Math.max(best, 100);
               const expandedText = expandLocation(text);
               const expandedCandidate = expandLocation(candidate);
               if (expandedText === expandedCandidate) return Math.max(best, 95);
+              if (expandedCandidate.length >= 3 && expandedText.startsWith(expandedCandidate)) return Math.max(best, 90);
+              if (expandedText.length >= 3 && expandedCandidate.startsWith(expandedText)) return Math.max(best, 85);
               if (expandedText.includes(expandedCandidate)) return Math.max(best, 70);
               if (expandedCandidate.includes(expandedText)) return Math.max(best, 60);
               return best;
@@ -14042,6 +14441,10 @@ def _inject_captcha_solution(page, challenge: dict[str, Any], solution: dict[str
                         }
                         return object[name] === value;
                       };
+                      const _originalExecute = target.execute;
+                      const _originalGetResponse = target.getResponse;
+                      const _originalReset = target.reset;
+
                       if (typeof target.execute === "function") {
                         captchaApiIntercepted = patchProperty(target, "execute", solved) || captchaApiIntercepted;
                       }
@@ -14086,6 +14489,23 @@ def _inject_captcha_solution(page, challenge: dict[str, Any], solution: dict[str
                           window.__jobAgentRecaptchaGuardInterval = setInterval(installGuard, 50);
                           setTimeout(() => clearInterval(window.__jobAgentRecaptchaGuardInterval), 15000);
                         } catch (e) {}
+                        window.__jobAgentRestoreRecaptchaApi = () => {
+                          clearInterval(window.__jobAgentRecaptchaGuardInterval);
+                          try {
+                            let restoreTo = challenge.kind === "recaptchaV3Enterprise"
+                              ? ((window.grecaptcha && window.grecaptcha.enterprise) || window.grecaptcha || null)
+                              : (window.grecaptcha || null);
+                            if (restoreTo) {
+                              try { patchProperty(restoreTo, "execute", _originalExecute); } catch (e) {}
+                              try { patchProperty(restoreTo, "getResponse", _originalGetResponse); } catch (e) {}
+                              try { patchProperty(restoreTo, "reset", _originalReset); } catch (e) {}
+                            }
+                            document.querySelectorAll("textarea[name='g-recaptcha-response'], input[name='g-recaptcha-response']").forEach(function(n) {
+                              try { n.value = ""; n.dispatchEvent(new Event("input", { bubbles: true })); n.dispatchEvent(new Event("change", { bubbles: true })); } catch (e) {}
+                            });
+                          } catch (e) {}
+                          delete window.__jobAgentRestoreRecaptchaApi;
+                        };
                       }
                     }
                   } catch (e) {}
@@ -14254,6 +14674,24 @@ def _wait_for_captcha_api_ready(page, challenge: dict[str, Any]) -> bool:
     except Exception:
         return False
 
+
+
+def _restore_native_recaptcha(page, challenge: dict[str, Any]) -> bool:
+    """Restore the native grecaptcha API, undoing the injected patch.
+
+    Clears patched execute/getResponse/reset and stops the guard interval
+    so the page can generate a real reCAPTCHA token on form submission.
+    """
+    if not str(challenge.get("kind") or "").startswith("recaptcha"):
+        return False
+    try:
+        return bool(page.evaluate("""() => {
+          if (typeof window.__jobAgentRestoreRecaptchaApi !== "function") return false;
+          window.__jobAgentRestoreRecaptchaApi();
+          return true;
+        }"""))
+    except Exception:
+        return False
 
 def _captcha_solution_detail(challenge: dict[str, Any], *, api_ready: bool = True) -> str:
     url = _safe_evidence_url(str(challenge.get("websiteURL") or ""))

@@ -171,6 +171,14 @@ def test_reindex_removes_stale_profile_embeddings_after_resync(tmp_path):
         "insert into profile_facts (key, value_json, category) values (?, ?, ?)",
         ("address_line1", json.dumps("132 New York Avenue"), "profile"),
     )
+    conn.execute(
+        "insert into profile_facts (key, value_json, category) values (?, ?, ?)",
+        (
+            "personal_us_company_employment_history",
+            json.dumps("Never worked for a United States company."),
+            "candidate_fact",
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -182,3 +190,10 @@ def test_reindex_removes_stale_profile_embeddings_after_resync(tmp_path):
     assert first["documents"] == 1
     assert second["documents"] == 1
     assert second["embeddings"] == 1
+    matches = search_profile_embeddings(
+        db,
+        "United States company employment history",
+        top_k=1,
+        provider="local",
+    )
+    assert "Never worked for a United States company." in matches[0]["content"]

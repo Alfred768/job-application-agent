@@ -111,6 +111,67 @@ def test_candidate_fact_recovery_waits_without_executing_a_tool(
     )
 
 
+def test_candidate_fact_recovery_runs_verified_user_fact_handlers(
+    tmp_path: Path,
+) -> None:
+    def completed(action, _context, _private):
+        evidence = {
+            "request_candidate_facts": ["approved_candidate_facts"],
+            "update_approved_fact_source": ["approved_candidate_facts"],
+            "rebuild_scoped_application": ["field_gate_passed"],
+        }[action.action]
+        return {
+            "status": "completed",
+            "evidence": evidence,
+            "message": "verified",
+        }
+
+    executor = JobApplicationRecoveryExecutor(
+        run_dir=tmp_path,
+        handlers={
+            "request_candidate_facts": completed,
+            "update_approved_fact_source": completed,
+            "rebuild_scoped_application": completed,
+        },
+    )
+    core = _core(executor)
+    plan = core.plan_recovery(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": "Relationship disclosure",
+                    "reason": "no approved answer",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ]
+        },
+        planner="job_application",
+    )
+    assert plan is not None
+
+    result = core.execute_recovery(
+        "job_application",
+        plan,
+        {
+            "terminal_status": plan.status,
+            "retry_scope": "single_application",
+        },
+    )
+
+    assert result.status == "verified"
+    assert result.retry_ready is True
+    assert set(result.evidence) == {
+        "approved_candidate_facts",
+        "field_gate_passed",
+    }
+    assert len(result.agent_loops) == 3
+    assert result.actions[0].automatic is False
+    assert result.actions[1].automatic is False
+    assert result.actions[2].automatic is True
+
+
 def test_injected_email_adapters_can_verify_a_scoped_recovery(
     tmp_path: Path,
 ) -> None:
@@ -248,3 +309,63 @@ def test_verified_recovery_batch_is_scoped_and_policy_annotated(
     assert items[0]["recovery_verified"] is True
     assert items[0]["retry_scope"] == "single_application"
     assert items[0]["recovery_attempt"] == 1
+
+
+def test_verified_recovery_batch_can_use_rebuilt_package_summary(
+    tmp_path: Path,
+) -> None:
+    original_package = tmp_path / "applications" / "one"
+    rebuilt_package = tmp_path / "recovery" / "application-42"
+    batch_path = tmp_path / "batch-summary.json"
+    batch_path.write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Example",
+                    "title": "Engineer",
+                    "application_id": "42",
+                    "package_dir": str(original_package),
+                    "runtime_script_path": str(
+                        original_package / "autofill-runtime.js"
+                    ),
+                }
+            ]
+        )
+    )
+    output_path = tmp_path / "recovery" / "retry.json"
+
+    written = write_recovery_retry_batch(
+        batch_path,
+        verified_targets=(
+            {
+                "company": "Example",
+                "title": "Engineer",
+                "application_id": "42",
+                "source_package_dir": str(original_package),
+                "package_dir": str(rebuilt_package),
+                "terminal_status": "autofill_completed_blocked",
+                "recovery_verified": True,
+                "retry_scope": "single_application",
+                "replacement_summary": {
+                    "company": "Example",
+                    "title": "Engineer",
+                    "application_id": "42",
+                    "package_dir": str(rebuilt_package),
+                    "runtime_script_path": str(
+                        rebuilt_package / "autofill-runtime.js"
+                    ),
+                },
+            },
+        ),
+        output_path=output_path,
+    )
+
+    assert written == output_path
+    item = json.loads(output_path.read_text())[0]
+    assert item["package_dir"] == str(rebuilt_package)
+    assert item["runtime_script_path"] == str(
+        rebuilt_package / "autofill-runtime.js"
+    )
+    assert item["terminal_status"] == "autofill_completed_blocked"
+    assert item["recovery_verified"] is True
+    assert item["retry_scope"] == "single_application"

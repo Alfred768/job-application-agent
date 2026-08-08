@@ -259,6 +259,35 @@ def test_clearance_eligibility_no_takes_priority_over_clearance_role_interest_ye
     assert match_sensitive_answer("Due to contractual requirements, only US Citizens will be considered for this position.", kb) == "No"
 
 
+def test_export_control_status_takes_priority_over_generic_citizenship():
+    kb = {
+        "citizenship": {
+            "patterns": [
+                "citizen",
+                "citizenship",
+                "u.s. citizen",
+                "only u.s. citizens will be considered",
+            ],
+            "answer": "No",
+            "approved": True,
+        },
+        "us_export_control_status": {
+            "patterns": ["u.s. person", "export control"],
+            "answer": "N/A",
+            "approved": True,
+        },
+    }
+
+    assert (
+        match_sensitive_answer(
+            "A U.S. person is a citizen or permanent resident. "
+            "Which U.S. person status describes you?",
+            kb,
+        )
+        == "N/A"
+    )
+
+
 def test_sponsorship_type_opt_takes_priority_only_for_option_style_question():
     kb = {
         "sponsorship": {

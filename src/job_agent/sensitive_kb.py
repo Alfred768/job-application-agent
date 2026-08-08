@@ -287,6 +287,9 @@ def _sensitive_pattern_matches(label: str, pattern: str) -> bool:
 
 def _entry_priority(key: str, entry: dict[str, Any]) -> tuple[int, int]:
     """Prefer specific eligibility/identity answers over broad preferences."""
+    highest_priority_keys = {
+        "us_export_control_status",
+    }
     specific_keys = {
         "citizenship",
         "active_security_clearance",
@@ -298,7 +301,9 @@ def _entry_priority(key: str, entry: dict[str, Any]) -> tuple[int, int]:
         "ai_notetaker_consent",
     }
     broad_preference_keys = {"security_clearance_interest"}
-    if key in specific_keys:
+    if key in highest_priority_keys:
+        group = -1
+    elif key in specific_keys:
         group = 0
     elif key in broad_preference_keys:
         group = 2

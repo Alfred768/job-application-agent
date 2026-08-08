@@ -120,7 +120,7 @@ SEMANTIC_RULES: tuple[SemanticRule, ...] = (
     SemanticRule("address.line2", any_of=("address line 2", "addressline2"), max_tokens=8),
     SemanticRule("address.postal_code", any_of=("postal code", "zip code", "postcode", "zipcode"), max_tokens=8),
     SemanticRule("address.city", any_of=("city",), max_tokens=8),
-    SemanticRule("address.region", any_of=("state province", "province", "countryregion", "state region"), max_tokens=8),
+    SemanticRule("address.region", any_of=("state province", "province", "countryregion", "state region", "state of residence", "residence state", "state you reside", "state you live", "your state"), max_tokens=8),
     SemanticRule(
         "employment.eligible_country",
         any_of=("employment eligible countries", "employment eligible country", "countries are you seeking to work", "country are you seeking to work"),

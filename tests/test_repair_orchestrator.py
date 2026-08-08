@@ -195,6 +195,25 @@ def test_build_repair_request_excludes_user_authored_candidate_answers(
                     }
                 ],
             },
+            {
+                "company": "Palantir",
+                "title": "Software Engineer, New Grad",
+                "status": "autofill_completed_blocked",
+                "review_items": [
+                    {
+                        "label": "High School Name",
+                        "reason": "unmapped field",
+                        "sensitive": False,
+                        "blocking": True,
+                    },
+                    {
+                        "label": "Year of High School Graduation",
+                        "reason": "no matching option / answer",
+                        "sensitive": False,
+                        "blocking": True,
+                    },
+                ],
+            },
         ]
     }
 
@@ -205,6 +224,7 @@ def test_build_repair_request_excludes_user_authored_candidate_answers(
         "Stripe"
     ]
     assert label not in json.dumps(request)
+    assert "High School" not in json.dumps(request)
 
 
 def test_repair_readiness_reports_expired_authentication(
@@ -359,6 +379,42 @@ def test_repair_readiness_projects_selected_custom_provider_without_secret_leak(
     assert readiness.code == "ready"
     assert "provider custom" in readiness.message
     assert len(commands) == 1
+
+
+def test_repair_readiness_retries_isolated_directory_cleanup_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = tmp_path / "codex"
+    agent.write_text("#!/bin/sh\n")
+    agent.chmod(0o755)
+    original_rmtree = __import__("shutil").rmtree
+    cleanup_attempts = 0
+
+    def flaky_rmtree(path, *args, **kwargs):
+        nonlocal cleanup_attempts
+        cleanup_attempts += 1
+        if cleanup_attempts == 1:
+            raise OSError(66, "Directory not empty", str(path))
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "job_agent.repair_orchestrator.shutil.rmtree",
+        flaky_rmtree,
+    )
+
+    readiness = check_repair_agent_readiness(
+        RepairPolicy(enabled=True, agent_binary=str(agent)),
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="READY",
+            stderr="",
+        ),
+    )
+
+    assert readiness.ready is True
+    assert cleanup_attempts == 2
 
 
 def test_repair_readiness_does_not_fall_back_when_custom_provider_key_is_missing(

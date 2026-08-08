@@ -46,15 +46,21 @@
 - 唯一入口：`.venv/bin/python scripts/daily_sop.py <command>`。
 - 单批准备上限：`ops/daily.local.json` 的 `limit`，当前为 100，脚本硬限制为 100。
   该值不绕过资格、去重、反垃圾、候选人事实或最终提交确认门。
-- 每日确认目标：`ops/daily.local.json` 的 `daily_submit_target`，当前为 100。只有带
+- 每日确认目标：`ops/daily.local.json` 的 `daily_submit_target` 是绝对数量下限，当前为
+  100；实际目标取该下限与
+  `ceil(本轮原始导入数 * evaluation.min_confirmed_submission_rate)` 的较大值。只有带
   `submitted_at` 的页面确认成功计数；批次阻塞或失败时继续新候选，但没有完整终态审计时
   必须停止。跨午夜运行按最新一次 `execution_attempt.finished_at` 的本地日期统计和考核，
   不按准备目录日期归属。
 - 最新运行指针：`output/daily/latest.json`。
+- 历史 `recover`/`repair` 只能更新所选运行自身；不得把 `latest.json` 从创建时间更晚的运行
+  倒退到旧运行。
 - 每次运行状态：`output/daily/YYYY-MM-DD/<run-id>/run-state.json`。
 - 每次运行结论：同目录下的 `RUN_SUMMARY.md`。
-- 每轮考核：同目录下的 `evaluation-metrics.json`；80% 确认提交目标以执行后未被安全跳过的
-  最终合格岗位为分母，原始导入到确认提交率只作漏斗监测，不得驱动绕过资格、去重或安全门。
+- 每轮考核：同目录下的 `evaluation-metrics.json`；80% 确认提交目标严格使用
+  `当日页面确认提交数 / 本轮原始导入岗位数`。`evaluation.confirmation_rate_denominator`
+  必须为 `raw_imported`。最终合格执行岗位的确认率只作诊断；主目标未达成也不得驱动绕过
+  资格、去重、反垃圾、候选人事实或确认门。
 - 每轮考核必须通过 Agent Core 注册的 `job_application_round` evaluator，记录 evaluation
   ID、轮次、总状态、指标和建议，并生成只读 `agent_evaluation` Observation。考核器不得
   调用 LLM、Tool 或浏览器，也不得直接改变准备、提交、恢复或 repair 决策。
@@ -85,7 +91,8 @@
   repair 认证/配置/网络/限流不可用只记录
   `repair_unavailable` 警告并保留 scoped request，不阻断无关岗位，也不消耗 coding repair
   周期。`repair` 必须在 readiness 前从当前完整审计重建并持久化 request，旧 request
-  只作兜底；readiness 失败不得让旧窄范围继续作为当前指针。恢复认证后使用
+  只作兜底；当前完整审计已无 coding-repair 范围时必须持久化空范围并废止旧指针，不得
+  继续要求恢复 Repair Agent；readiness 失败不得让旧窄范围继续作为当前指针。恢复认证后使用
   `scripts/daily_sop.py repair --run-dir <run>`；该命令默认不打开
   浏览器，只有显式 `--retry-verified` 才执行已验证的单岗位 retry batch。
   只刷新 request 范围时使用 `repair --refresh-request-only`；该模式不得检查 Codex
@@ -93,7 +100,9 @@
 - 历史完整审计中的 Recovery Plan 使用
   `scripts/daily_sop.py recover --run-dir <run>` 回放。该命令会从当前审计重新规划并写入
   `recovery-execution.json`，默认不打开浏览器；只有显式 `--retry-verified` 且恢复证据
-  完整时才执行生成的单岗位 retry batch。
+  完整时才执行生成的单岗位 retry batch。存在多次 execution attempt 时必须按 application
+  ID 合并全部完整终态再规划，但 recovery 注解只写回岗位最后出现的原 attempt 审计，不能
+  用最近一次窄 retry 指针遮住早期未解决岗位或覆写执行证据边界。
 
 不要临时拼接一条新的 `pipeline run-execute` 命令。需要改变来源、上限、分数、简历策略或
 提交模式时，先改 `ops/daily.local.json`，再执行 `check`，让状态文件记录配置哈希。
@@ -104,6 +113,13 @@
 - 简历只能从配置指定的原始 PDF 或 PDF 目录选择并原样上传，不生成或改写经历。
 - 敏感、法律、授权、薪资、人口统计等答案只能来自已批准的 sensitive KB。
 - LLM 只能补充未知的非敏感问题，并且只能依据候选人已保存的事实。
+- 教育经历（包括高中名称和毕业年份），过往/当前任职、承包或投递面试经历，其他 offer
+  及其截止日期，亲属关系与利益冲突，雇主限制与便利需求，母语/本地文字法定姓名，以及
+  产品/地点/工作方向等个人偏好和明确的每周到岗承诺都属于候选人事实。
+  只能使用与字段规范化后精确对应的 profile answer，或该
+  字段适用且已批准的 sensitive KB；简历中没有记录不能推导为 `No`，一般的搬迁意愿、
+  远程偏好或低频到岗意愿也不能推导固定到岗承诺。缺少精确事实时必须进入
+  `candidate_fact_resolution`。
 - 配置中的 `profile` JSON 和其中的 `answers` 是普通事实与自定义答案的权威源；
   `sensitive_kb` 是敏感、法律、身份和授权答案的权威源。`profile_vector_db` 只是由批准事实
   生成的长期检索索引，不得绕过 JSON 权威源直接加入未经批准的答案；`database` 只记录投递
@@ -115,6 +131,9 @@
 - 生产 Python Playwright 内部的页面观察、字段填写、Next 和 Submit 必须分别作为同一
   JobApplicationAgent 的 `ats_*` ToolCall。Next/Submit 各自必须在执行与停止候选间选择；
   选择停止不得调用浏览器回调。旧 Node/Chrome 路径只可用于兼容、fixture 或独立诊断。
+- Playwright 启动或首次页面导航异常只有在尚未产生任何 `ats_*` AgentRound 时才允许用新
+  浏览器会话局部重试一次，并记录隐私安全的故障码和重试次数。出现任何页面观察、填写、
+  Next 或 Submit 轮次后，不得重启整份申请。
 - 禁止 LinkedIn 抓取和 LinkedIn 自动投递。
 - 是否最终提交由 `ops/daily.local.json` 的 `submit_complete` 明确决定；不要依赖记忆或
   隐含环境默认值。
@@ -184,7 +203,8 @@ coding repair。后续岗位继续执行；候选修复只能在浏览器批次�
 逻辑修复周期，也不得用同一个确定性 401 重复耗尽 `max_cycles`。
 
 手动恢复 retained repair 时必须先从当前完整审计重建 fingerprints，旧 request 仅在审计
-不可用或无法产生范围时兜底。若当前代码已修好且 Codex 不产生 diff，仍必须完成受影响测试、
+不可用或不完整时兜底。完整审计确认没有 coding-repair 范围时，刷新并持久化空范围后回到
+字段阻塞状态。若当前代码已修好且 Codex 不产生 diff，仍必须完成受影响测试、
 冻结全量测试和离线验证；全部通过后记录 `already_fixed_verified`，不得记为
 `repair_agent_made_no_changes` 失败。
 
@@ -199,8 +219,10 @@ coding repair。后续岗位继续执行；候选修复只能在浏览器批次�
 - 没有对同一终态进行盲目重试。
 
 吞吐保护：反垃圾冷却按时间窗口和 ATS tenant 隔离；普通表单/适配器失败按配置窗口内
-连续相同状态触发公司或 tenant/adapter 熔断。有限批次先覆盖不同公司，再用同公司的
-其他岗位补足。两者都不得累计终身封死候选池。
+连续相同状态触发公司或 tenant/adapter 熔断。普通失败计数必须在当前批次每个终态增量
+落盘后立即更新；达到阈值后，后续同范围 `browser_execute` 必须由 Policy Gate 拒绝，
+其他公司继续。有限批次先覆盖不同公司，再用同公司的其他岗位补足。两者都不得累计终身
+封死候选池。
 
 ## 6. 代码修改完成标准
 

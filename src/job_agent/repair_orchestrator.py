@@ -8,7 +8,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -146,6 +148,31 @@ _ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PROVIDER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
+@contextmanager
+def _repair_temporary_directory(*, prefix: str):
+    """Create an isolated directory and tolerate short-lived Codex write races."""
+    temporary = Path(
+        tempfile.mkdtemp(
+            prefix=prefix,
+            dir=_REPAIR_TEMP_ROOT,
+        )
+    )
+    try:
+        yield str(temporary)
+    finally:
+        for attempt in range(8):
+            try:
+                shutil.rmtree(temporary)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                if attempt == 7:
+                    shutil.rmtree(temporary, ignore_errors=True)
+                    break
+                time.sleep(0.05 * (attempt + 1))
+
+
 def check_repair_agent_readiness(
     policy: RepairPolicy,
     *,
@@ -222,9 +249,8 @@ def check_repair_agent_readiness(
             return _readiness_failure(discovered, login_status)
 
     try:
-        with tempfile.TemporaryDirectory(
+        with _repair_temporary_directory(
             prefix="job-agent-repair-readiness-",
-            dir=_REPAIR_TEMP_ROOT,
         ) as temporary:
             if not requires_login:
                 isolated_codex_home = Path(temporary) / "codex-home"
@@ -572,9 +598,8 @@ def _run_repair_cycle_direct(
         and not agent_env.get("CODEX_API_KEY")
     )
 
-    with tempfile.TemporaryDirectory(
+    with _repair_temporary_directory(
         prefix=f"job-agent-repair-cycle-{cycle:02d}-",
-        dir=_REPAIR_TEMP_ROOT,
     ) as temporary:
         if not requires_login:
             isolated_codex_home = Path(temporary) / "codex-home"

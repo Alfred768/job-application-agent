@@ -2077,6 +2077,99 @@ def test_cli_applications_prepare_shortlist_skips_prior_terminal_outcomes(tmp_pa
     assert [item["title"] for item in summary] == ["Backend Engineer"]
 
 
+def test_cli_terminal_outcomes_include_email_verification_and_candidate_account(tmp_path):
+    jobs_path = tmp_path / "shortlist.json"
+    jobs_path.write_text(
+        """[
+          {
+            "title": "Agent Engineer",
+            "company": "Acme AI",
+            "location": "Remote",
+            "raw_jd": "Build LLM agents.",
+            "source": "greenhouse:acme",
+            "source_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "apply_url": "https://boards.greenhouse.io/acme/jobs/1",
+            "remote_policy": null,
+            "fit_score": 88
+          },
+          {
+            "title": "Backend Engineer",
+            "company": "WebCo",
+            "location": "Remote",
+            "raw_jd": "Build backend APIs.",
+            "source": "lever:webco",
+            "source_url": "https://jobs.lever.co/webco/1",
+            "apply_url": "https://jobs.lever.co/webco/1",
+            "remote_policy": null,
+            "fit_score": 76
+          }
+        ]"""
+    )
+    db_path = tmp_path / "agent.db"
+    _write_application_status(
+        db_path,
+        Job(
+            title="Agent Engineer",
+            company="Acme AI",
+            raw_jd="Build LLM agents.",
+            source="test",
+            apply_url="https://boards.greenhouse.io/acme/jobs/1",
+        ),
+        "email_verification_required",
+    )
+    _write_application_status(
+        db_path,
+        Job(
+            title="Backend Engineer",
+            company="WebCo",
+            raw_jd="Build backend APIs.",
+            source="test",
+            apply_url="https://jobs.lever.co/webco/1",
+        ),
+        "candidate_account_required",
+    )
+
+    outcomes = cli._terminal_application_outcomes(db_path)
+    acme_key = cli._normalized_application_url("https://boards.greenhouse.io/acme/jobs/1")
+    webco_key = cli._normalized_application_url("https://jobs.lever.co/webco/1")
+    assert outcomes[acme_key] == "email_verification_required"
+    assert outcomes[webco_key] == "candidate_account_required"
+
+    prepared = []
+
+    def fake_prepare(job, package_dir, **kwargs):
+        prepared.append(job.title)
+        package_dir.mkdir(parents=True)
+        return {
+            "company": job.company,
+            "title": job.title,
+            "package_dir": str(package_dir),
+            "runtime_script_path": str(package_dir / "autofill-runtime.js"),
+        }
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("job_agent.cli._prepare_application_package", fake_prepare)
+    out_dir = tmp_path / "batch"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "applications",
+            "prepare-shortlist",
+            str(jobs_path),
+            "--out-dir",
+            str(out_dir),
+            "--db",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert prepared == []
+    assert "prior terminal outcome skipped" in result.output
+    monkeypatch.undo()
+
+
 def test_cli_execute_batch_skips_previously_submitted_db_application(tmp_path):
     db_path = tmp_path / "agent.db"
     application_id = _write_submitted_application(
@@ -5044,6 +5137,7 @@ def test_cli_pipeline_run_execute_writes_manifest_and_audit(tmp_path, monkeypatc
         *,
         runtime_env,
         action_runner,
+        timeout_seconds=None,
     ):
         from subprocess import CompletedProcess
 
@@ -5173,6 +5267,7 @@ def test_cli_pipeline_run_execute_uses_configured_resume_source_dir_for_prefligh
         *,
         runtime_env,
         action_runner,
+        timeout_seconds=None,
     ):
         from subprocess import CompletedProcess
 

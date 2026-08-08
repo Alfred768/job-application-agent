@@ -4,13 +4,25 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
 
 import pytest
 
-from job_agent.execution import execute_application_batch
+from job_agent.db import (
+    connect,
+    create_application,
+    create_job,
+    init_db,
+    update_application_execution_status,
+)
+from job_agent.execution import (
+    _sanitize_runtime_action_output,
+    execute_application_batch,
+)
+from job_agent.models import Job
 from job_agent.python_runtime import RuntimeActionDenied
 from job_agent.runtime_filler import render_runtime_autofill_script
 
@@ -418,6 +430,370 @@ def test_execute_application_batch_distinguishes_anti_spam_rejection(tmp_path):
         records[0]["recovery_plan"]["strategy"]
         == "tenant_cooldown_then_scoped_resume"
     )
+
+
+def test_execute_application_batch_skips_same_tenant_after_anti_spam(tmp_path):
+    blocked = tmp_path / "blocked-runtime.js"
+    same_tenant = tmp_path / "same-tenant-runtime.js"
+    other_tenant = tmp_path / "other-tenant-runtime.js"
+    for script in (blocked, same_tenant, other_tenant):
+        script.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        if command[1] == str(blocked):
+            return CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "Autofill stats: filled=12 review=0\n"
+                    "Submission processing error: matched "
+                    "'flagged as possible spam'"
+                ),
+                stderr="",
+            )
+        return CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Autofill stats: filled=18 review=0\n"
+                "Submission confirmed: matched 'thank you for applying'"
+            ),
+            stderr="",
+        )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "BlockedCo",
+                "title": "First Role",
+                "apply_url": "https://jobs.ashbyhq.com/blockedco/first/application",
+                "runtime_script_path": str(blocked),
+            },
+            {
+                "company": "BlockedCo",
+                "title": "Second Role",
+                "apply_url": "https://jobs.ashbyhq.com/blockedco/second/application",
+                "runtime_script_path": str(same_tenant),
+            },
+            {
+                "company": "NextCo",
+                "title": "Third Role",
+                "apply_url": "https://jobs.ashbyhq.com/nextco/third/application",
+                "runtime_script_path": str(other_tenant),
+            },
+        ],
+        runner=fake_run,
+    )
+
+    assert calls == [str(blocked), str(other_tenant)]
+    assert [record["status"] for record in records] == [
+        "submission_blocked_by_anti_spam",
+        "skipped_policy_denied",
+        "submitted",
+    ]
+    assert records[1]["error"] == "anti_spam_cooldown_active"
+    assert records[1]["submit_gate"] == (
+        "policy_denied:anti_spam_cooldown_active"
+    )
+
+
+def test_execute_application_batch_restores_anti_spam_cooldown_from_db(
+    tmp_path,
+):
+    db_path = tmp_path / "tracking.db"
+    conn = connect(db_path)
+    init_db(conn)
+    blocked_job = Job(
+        title="Blocked Role",
+        company="BlockedCo",
+        raw_jd="Role",
+        apply_url="https://jobs.ashbyhq.com/blockedco/blocked/application",
+    )
+    application_id = create_application(
+        conn,
+        create_job(conn, blocked_job),
+        blocked_job,
+    )
+    assert update_application_execution_status(
+        conn,
+        application_id,
+        "submission_blocked_by_anti_spam",
+    )
+    conn.close()
+
+    same_tenant = tmp_path / "same-tenant-runtime.js"
+    other_tenant = tmp_path / "other-tenant-runtime.js"
+    same_tenant.write_text("console.log('runtime')")
+    other_tenant.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        return CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Autofill stats: filled=18 review=0\n"
+                "Submission confirmed: matched 'thank you for applying'"
+            ),
+            stderr="",
+        )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "BlockedCo",
+                "title": "Later Role",
+                "apply_url": (
+                    "https://jobs.ashbyhq.com/blockedco/later/application"
+                ),
+                "runtime_script_path": str(same_tenant),
+            },
+            {
+                "company": "NextCo",
+                "title": "Other Role",
+                "apply_url": (
+                    "https://jobs.ashbyhq.com/nextco/other/application"
+                ),
+                "runtime_script_path": str(other_tenant),
+            },
+        ],
+        runner=fake_run,
+        database_path=db_path,
+    )
+
+    assert calls == [str(other_tenant)]
+    assert [record["status"] for record in records] == [
+        "skipped_policy_denied",
+        "submitted",
+    ]
+    assert records[0]["error"] == "anti_spam_cooldown_active"
+
+
+def test_execute_application_batch_opens_ordinary_failure_circuit_in_batch(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD", "2")
+    acme_first = tmp_path / "acme-first.js"
+    other_first = tmp_path / "other-first.js"
+    acme_second = tmp_path / "acme-second.js"
+    acme_third = tmp_path / "acme-third.js"
+    other_second = tmp_path / "other-second.js"
+    for script in (
+        acme_first,
+        other_first,
+        acme_second,
+        acme_third,
+        other_second,
+    ):
+        script.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        if command[1] in {str(acme_first), str(acme_second)}:
+            return CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "Autofill stats: filled=12 review=1\n"
+                    "Submit gate: STOPPED before final Submit"
+                ),
+                stderr="",
+            )
+        return CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Autofill stats: filled=18 review=0\n"
+                "Submission confirmed: matched 'thank you for applying'"
+            ),
+            stderr="",
+        )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": "First Role",
+                "apply_url": "https://jobs.ashbyhq.com/acme/first/application",
+                "runtime_script_path": str(acme_first),
+            },
+            {
+                "company": "Other",
+                "title": "First Role",
+                "apply_url": "https://jobs.ashbyhq.com/other/first/application",
+                "runtime_script_path": str(other_first),
+            },
+            {
+                "company": "Acme",
+                "title": "Second Role",
+                "apply_url": "https://jobs.ashbyhq.com/acme/second/application",
+                "runtime_script_path": str(acme_second),
+            },
+            {
+                "company": "Acme",
+                "title": "Third Role",
+                "apply_url": "https://jobs.ashbyhq.com/acme/third/application",
+                "runtime_script_path": str(acme_third),
+            },
+            {
+                "company": "Other",
+                "title": "Second Role",
+                "apply_url": "https://jobs.ashbyhq.com/other/second/application",
+                "runtime_script_path": str(other_second),
+            },
+        ],
+        runner=fake_run,
+    )
+
+    assert calls == [
+        str(acme_first),
+        str(other_first),
+        str(acme_second),
+        str(other_second),
+    ]
+    assert [record["status"] for record in records] == [
+        "autofill_completed_blocked",
+        "submitted",
+        "autofill_completed_blocked",
+        "skipped_policy_denied",
+        "submitted",
+    ]
+    assert records[3]["error"] == "failure_circuit_breaker_active"
+    assert records[3]["submit_gate"] == (
+        "policy_denied:failure_circuit_breaker_active"
+    )
+
+
+def test_execute_application_batch_resets_ordinary_failure_sequence_on_success(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD", "2")
+    scripts = [tmp_path / f"acme-{index}.js" for index in range(4)]
+    for script in scripts:
+        script.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        if command[1] in {str(scripts[0]), str(scripts[2])}:
+            return CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "Autofill stats: filled=12 review=1\n"
+                    "Submit gate: STOPPED before final Submit"
+                ),
+                stderr="",
+            )
+        return CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Autofill stats: filled=18 review=0\n"
+                "Submission confirmed: matched 'thank you for applying'"
+            ),
+            stderr="",
+        )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": f"Role {index}",
+                "apply_url": (
+                    f"https://jobs.ashbyhq.com/acme/{index}/application"
+                ),
+                "runtime_script_path": str(script),
+            }
+            for index, script in enumerate(scripts)
+        ],
+        runner=fake_run,
+    )
+
+    assert calls == [str(script) for script in scripts]
+    assert [record["status"] for record in records] == [
+        "autofill_completed_blocked",
+        "submitted",
+        "autofill_completed_blocked",
+        "submitted",
+    ]
+
+
+def test_execute_application_batch_restores_ordinary_failure_sequence_from_db(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD", "2")
+    db_path = tmp_path / "tracking.db"
+    conn = connect(db_path)
+    init_db(conn)
+    prior_job = Job(
+        title="Prior Role",
+        company="Acme",
+        raw_jd="Role",
+        apply_url="https://jobs.ashbyhq.com/acme/prior/application",
+    )
+    application_id = create_application(
+        conn,
+        create_job(conn, prior_job),
+        prior_job,
+    )
+    assert update_application_execution_status(
+        conn,
+        application_id,
+        "autofill_completed_blocked",
+    )
+    conn.close()
+
+    first = tmp_path / "first.js"
+    second = tmp_path / "second.js"
+    first.write_text("console.log('runtime')")
+    second.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        return CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Autofill stats: filled=12 review=1\n"
+                "Submit gate: STOPPED before final Submit"
+            ),
+            stderr="",
+        )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": "First Role",
+                "apply_url": "https://jobs.ashbyhq.com/acme/first/application",
+                "runtime_script_path": str(first),
+            },
+            {
+                "company": "Acme",
+                "title": "Second Role",
+                "apply_url": "https://jobs.ashbyhq.com/acme/second/application",
+                "runtime_script_path": str(second),
+            },
+        ],
+        runner=fake_run,
+        database_path=db_path,
+    )
+
+    assert calls == [str(first)]
+    assert [record["status"] for record in records] == [
+        "autofill_completed_blocked",
+        "skipped_policy_denied",
+    ]
+    assert records[1]["error"] == "failure_circuit_breaker_active"
 
 
 def test_execute_application_batch_records_unsupported_captcha_as_processing_error(tmp_path):
@@ -874,6 +1250,68 @@ def test_execute_application_batch_times_out_and_recovers_process(tmp_path):
     assert records[0]["evidence"] == str(evidence)
     assert evidence.exists()
     assert "status: autofill_timed_out" in evidence.read_text()
+
+
+def test_python_runtime_in_process_enforces_timeout(tmp_path, monkeypatch):
+    from job_agent import execution
+
+    script = tmp_path / "autofill-runtime.js"
+    script.write_text("// runtime payload fixture")
+
+    monkeypatch.setattr(execution, "load_runtime_payload", lambda _path: {})
+    monkeypatch.setattr(
+        execution,
+        "run_runtime_payload",
+        lambda payload, action_runner=None, watchdog_deadline_seconds=None: time.sleep(5),
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        execution._run_python_runtime_in_process(
+            str(script),
+            runtime_env=None,
+            action_runner=lambda name, effect, context, callback: None,
+            timeout_seconds=1,
+        )
+    if hasattr(signal, "getalarm"):
+        assert signal.getalarm() == 0
+
+
+def test_execute_application_batch_maps_watchdog_triggered_exception_to_timeout(
+    tmp_path,
+    monkeypatch,
+):
+    from job_agent import execution
+    from job_agent import python_runtime
+
+    script = tmp_path / "autofill-runtime.js"
+    script.write_text("// runtime payload fixture")
+
+    monkeypatch.setattr(execution, "load_runtime_payload", lambda _path: {})
+    python_runtime._RUNTIME_TIMEOUT_TRIGGERED = True
+    try:
+        monkeypatch.setattr(
+            execution,
+            "run_runtime_payload",
+            lambda payload, action_runner=None, watchdog_deadline_seconds=None: (
+                (_ for _ in ()).throw(RuntimeError("browser closed by watchdog"))
+            ),
+        )
+        records = execution._execute_application_batch_direct(
+            [
+                {
+                    "company": "SlowCo",
+                    "title": "Agent Engineer",
+                    "runtime_script_path": str(script),
+                }
+            ],
+            timeout_seconds=2,
+            runtime_action_runner=lambda name, effect, context, callback: None,
+        )
+    finally:
+        python_runtime._RUNTIME_TIMEOUT_TRIGGERED = False
+
+    assert records[0]["status"] == "autofill_timed_out"
+    assert records[0]["error"] == "watchdog_deadline"
+    assert (tmp_path / "execution-timeout.txt").exists()
 
 
 def test_execute_application_batch_continues_after_block_and_reports_progress(
@@ -1387,6 +1825,7 @@ def test_live_runtime_actions_return_to_same_agent_core(
         *,
         runtime_env,
         action_runner,
+        timeout_seconds=None,
     ):
         action_runner(
             "ats_observe_page",
@@ -1417,7 +1856,7 @@ def test_live_runtime_actions_return_to_same_agent_core(
         action_runner(
             "ats_advance_page",
             "write",
-            {"phase": "page_navigation"},
+            {"phase": "page_navigation", "blocking_review_count": 0},
             lambda: None,
         )
         action_runner(
@@ -1507,6 +1946,248 @@ def test_live_runtime_actions_return_to_same_agent_core(
     assert '"parameters"' not in serialized
 
 
+def test_live_runtime_retries_transient_playwright_error_before_any_ats_action(
+    tmp_path,
+    monkeypatch,
+):
+    from job_agent import execution
+
+    script = tmp_path / "autofill-runtime.js"
+    script.write_text(
+        render_runtime_autofill_script(
+            profile={"name": "Candidate"},
+            application_url="https://jobs.example.com/apply",
+            max_pages=1,
+        )
+    )
+    calls = []
+
+    class Error(Exception):
+        pass
+
+    def fake_in_process(
+        script_path,
+        *,
+        runtime_env,
+        action_runner,
+        timeout_seconds=None,
+    ):
+        calls.append(script_path)
+        if len(calls) == 1:
+            raise Error(
+                "Target page, context or browser has been closed; "
+                "private page content must not be persisted"
+            )
+        return CompletedProcess(
+            [sys.executable, script_path],
+            0,
+            stdout=(
+                "Autofill stats: filled=1 review=1\n"
+                "Submit gate: automatic submission not performed"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        execution,
+        "_run_python_runtime_in_process",
+        fake_in_process,
+    )
+    monkeypatch.setattr(
+        execution,
+        "PRE_ACTION_BROWSER_RETRY_DELAY_SECONDS",
+        0,
+    )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": "Agent Engineer",
+                "runtime_script_path": str(script),
+                "agent_runtime_id": "application-42",
+                "application_id": "42",
+                "agent_handoff": {
+                    "observation_id": "prepare-observation",
+                    "kind": "tool_result",
+                    "source": "runtime_package_builder",
+                },
+            }
+        ],
+    )
+
+    assert len(calls) == 2
+    assert records[0]["status"] == "autofill_completed_blocked"
+    assert records[0]["runtime_retry_count"] == 1
+    assert records[0]["runtime_retry_reason"] == "browser_session_closed"
+    assert "private page content" not in str(records[0])
+
+
+def test_live_runtime_does_not_restart_after_an_ats_action(
+    tmp_path,
+    monkeypatch,
+):
+    from job_agent import execution
+
+    script = tmp_path / "autofill-runtime.js"
+    script.write_text(
+        render_runtime_autofill_script(
+            profile={"name": "Candidate"},
+            application_url="https://jobs.example.com/apply",
+            max_pages=1,
+        )
+    )
+    calls = []
+
+    class Error(Exception):
+        pass
+
+    def fake_in_process(
+        script_path,
+        *,
+        runtime_env,
+        action_runner,
+        timeout_seconds=None,
+    ):
+        calls.append(script_path)
+        action_runner(
+            "ats_observe_page",
+            "observe",
+            {"phase": "page_observation"},
+            lambda: [],
+        )
+        raise Error("Target page, context or browser has been closed")
+
+    monkeypatch.setattr(
+        execution,
+        "_run_python_runtime_in_process",
+        fake_in_process,
+    )
+    monkeypatch.setattr(
+        execution,
+        "PRE_ACTION_BROWSER_RETRY_DELAY_SECONDS",
+        0,
+    )
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": "Agent Engineer",
+                "runtime_script_path": str(script),
+                "agent_runtime_id": "application-42",
+                "application_id": "42",
+                "agent_handoff": {
+                    "observation_id": "prepare-observation",
+                    "kind": "tool_result",
+                    "source": "runtime_package_builder",
+                },
+            }
+        ],
+    )
+
+    assert len(calls) == 1
+    assert records[0]["status"] == "autofill_failed"
+    assert records[0]["error"] == "browser_session_closed"
+    assert "runtime_retry_count" not in records[0]
+
+
+def test_runtime_observation_projection_keeps_labels_without_values():
+    observed = _sanitize_runtime_action_output(
+        "ats_observe_page",
+        [
+            {
+                "label": "Email",
+                "type": "email",
+                "required": True,
+                "value": "candidate@example.com",
+                "options": [{"label": "Yes", "value": "private"}],
+            }
+        ],
+    )
+
+    assert observed["field_count"] == 1
+    assert observed["fields"][0]["label"] == "Email"
+    assert observed["fields"][0]["type"] == "email"
+    assert observed["fields"][0]["options"] == ["Yes"]
+    serialized = json.dumps(observed)
+    assert "candidate@example.com" not in serialized
+    assert "private" not in serialized
+
+
+def test_live_runtime_advance_requires_state_assertion(
+    tmp_path,
+    monkeypatch,
+):
+    from job_agent import execution
+
+    script = tmp_path / "autofill-runtime.js"
+    script.write_text(
+        render_runtime_autofill_script(
+            profile={"name": "Candidate"},
+            application_url="https://jobs.example.com/apply",
+            max_pages=1,
+        )
+    )
+    callback_calls = []
+    denied_reasons = []
+
+    def fake_in_process(
+        script_path,
+        *,
+        runtime_env,
+        action_runner,
+        timeout_seconds=None,
+    ):
+        try:
+            action_runner(
+                "ats_advance_page",
+                "write",
+                {
+                    "phase": "page_navigation",
+                    "application_url": "https://jobs.example.com/apply",
+                },
+                lambda: callback_calls.append("clicked"),
+            )
+        except RuntimeActionDenied as exc:
+            denied_reasons.append(str(exc))
+        return CompletedProcess(
+            [sys.executable, script_path],
+            0,
+            stdout=(
+                "Autofill stats: filled=0 review=1\n"
+                "Submit gate: automatic submission not performed"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(
+        execution,
+        "_run_python_runtime_in_process",
+        fake_in_process,
+    )
+
+    execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": "Agent Engineer",
+                "runtime_script_path": str(script),
+                "agent_runtime_id": "application-42",
+                "application_id": "42",
+                "agent_handoff": {
+                    "observation_id": "prepare-observation",
+                    "kind": "tool_result",
+                    "source": "runtime_package_builder",
+                },
+            }
+        ],
+    )
+
+    assert callback_calls == []
+    assert denied_reasons == ["missing_navigation_state_assertion"]
+
+
 def test_live_runtime_submit_stop_is_selected_without_clicking(
     tmp_path,
     monkeypatch,
@@ -1530,6 +2211,7 @@ def test_live_runtime_submit_stop_is_selected_without_clicking(
         *,
         runtime_env,
         action_runner,
+        timeout_seconds=None,
     ):
         try:
             action_runner(

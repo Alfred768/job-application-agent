@@ -21,3 +21,7 @@ applications/
 # Local SOP inputs and cross-session task state.
 ops/daily.local.json
 ops/CURRENT_TASK.md
+
+# Runtime artifacts and backups
+job-agent.db
+*.bak

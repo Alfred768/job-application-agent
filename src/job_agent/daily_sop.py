@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -27,6 +28,7 @@ from hello_agents.career.evaluation import (
 from hello_agents.career.recovery import (
     JobApplicationRecoveryPlanner,
     recovery_plan_to_dict,
+    requires_approved_candidate_fact,
 )
 from hello_agents.core.execution import ControlledExecution
 from hello_agents.core.contracts import ToolCall, ToolEffect
@@ -61,6 +63,10 @@ STATE_FILE_NAME = "run-state.json"
 REPORT_FILE_NAME = "RUN_SUMMARY.md"
 LATEST_FILE_NAME = "latest.json"
 APPLICATION_LEDGER_FILE_NAME = "APPLICATION_LEDGER.csv"
+HEARTBEAT_STATE_FILE_NAME = "heartbeat-state.json"
+HEARTBEAT_MAX_EMPTY_BACKOFF_MINUTES = 180
+HEARTBEAT_MAX_NO_PROGRESS_BATCHES = 3
+HEARTBEAT_NO_PROGRESS_PAUSE_MINUTES = 60
 EVALUATION_METRICS_FILE_NAME = "evaluation-metrics.json"
 RECOVERY_EXECUTION_FILE_NAME = "recovery-execution.json"
 AGENT_RUNTIME_TRACE_FILE_NAME = "agent-runtime-trace.json"
@@ -255,6 +261,9 @@ class DailyConfig:
             "require_gmail_token": self.require_gmail_token,
             "evaluation": {
                 "imported_cohort_target": self.evaluation.imported_cohort_target,
+                "confirmation_rate_denominator": (
+                    self.evaluation.confirmation_rate_denominator
+                ),
                 "min_confirmed_submission_rate": (
                     self.evaluation.min_confirmed_submission_rate
                 ),
@@ -631,6 +640,7 @@ def daily_submission_progress(
     config: DailyConfig,
     *,
     now: datetime | None = None,
+    raw_imported: int | None = None,
 ) -> dict[str, object]:
     local_now = (now or datetime.now().astimezone()).astimezone()
     local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -657,15 +667,80 @@ def daily_submission_progress(
         connection.close()
 
     submitted = int(row["count"] if row is not None else 0)
-    target = config.daily_submit_target
+    imported = (
+        max(0, int(raw_imported))
+        if raw_imported is not None
+        else None
+    )
+    rate_target = (
+        math.ceil(
+            imported * config.evaluation.min_confirmed_submission_rate
+        )
+        if imported is not None
+        else None
+    )
+    target = max(
+        config.daily_submit_target,
+        rate_target if rate_target is not None else 0,
+    )
     return {
         "local_date": local_start.date().isoformat(),
         "timezone": str(local_now.tzinfo),
+        "base_target": config.daily_submit_target,
+        "raw_imported": imported,
+        "min_confirmation_rate": (
+            config.evaluation.min_confirmed_submission_rate
+        ),
+        "rate_target": rate_target,
+        "confirmed_rate": (
+            submitted / imported
+            if imported is not None and imported > 0
+            else None
+        ),
         "target": target,
         "submitted": submitted,
         "remaining": max(0, target - submitted),
         "reached": submitted >= target,
     }
+
+
+def _run_raw_imported(run_dir: Path) -> int | None:
+    manifest_path = run_dir / "pipeline-manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = _read_json_object(manifest_path, "pipeline manifest")
+    counts = manifest.get("counts")
+    if not isinstance(counts, Mapping):
+        return None
+    try:
+        return max(0, int(counts.get("imported", 0) or 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_raw_imported_for_date(
+    config: DailyConfig,
+    local_date: str,
+) -> int | None:
+    latest_path = config.output_root / LATEST_FILE_NAME
+    if not latest_path.is_file():
+        return None
+    try:
+        latest = _read_json_object(latest_path, "latest run pointer")
+        run_dir = Path(str(latest.get("run_dir") or "")).resolve()
+        state = _read_json_object(
+            run_dir / STATE_FILE_NAME,
+            "run state",
+        )
+    except (OSError, SopError):
+        return None
+    daily_target = state.get("daily_target")
+    if (
+        not isinstance(daily_target, Mapping)
+        or str(daily_target.get("local_date") or "") != local_date
+    ):
+        return None
+    return _run_raw_imported(run_dir)
 
 
 def _update_daily_target_state(
@@ -676,6 +751,7 @@ def _update_daily_target_state(
     progress = daily_submission_progress(
         config,
         now=_execution_accounting_reference(state),
+        raw_imported=_run_raw_imported(run_dir),
     )
     state["daily_target"] = progress
     state["accounting_date_source"] = (
@@ -931,17 +1007,13 @@ def prepare_daily_run(config: DailyConfig) -> Path:
         "started_at": prepare_started_at,
         "duration_seconds": prepare_duration_seconds,
     }
-    if prepared_count:
-        state.pop("next_wake_at", None)
-    else:
-        next_wake_at = _next_wake_at(config.empty_wake_minutes)
-        state["next_wake_at"] = next_wake_at
-        transition_details.update(
-            {
-                "next_wake_at": next_wake_at,
-                "wake_after_minutes": config.empty_wake_minutes,
-            }
-        )
+    _apply_heartbeat_wake_logic(
+        config,
+        prepared_count,
+        run_dir,
+        state,
+        transition_details,
+    )
     _transition(
         run_dir,
         state,
@@ -949,6 +1021,7 @@ def prepare_daily_run(config: DailyConfig) -> Path:
         next_phase,
         **transition_details,
     )
+    _update_daily_target_state(config, run_dir)
     report_path = write_run_report(run_dir)
     print(f"Prepared daily run: {run_dir}")
     print(f"Run report: {report_path}")
@@ -964,6 +1037,16 @@ def run_until_daily_target(config: DailyConfig) -> Path | None:
     last_run: Path | None = None
     while True:
         before = daily_submission_progress(config)
+        submitted_before = int(before.get("submitted", 0))
+        latest_raw_imported = _latest_raw_imported_for_date(
+            config,
+            str(before["local_date"]),
+        )
+        if latest_raw_imported is not None:
+            before = daily_submission_progress(
+                config,
+                raw_imported=latest_raw_imported,
+            )
         if bool(before["reached"]):
             print(
                 "Daily confirmed-submission target reached: "
@@ -978,12 +1061,13 @@ def run_until_daily_target(config: DailyConfig) -> Path | None:
             "pipeline manifest",
         )
         prepared_count = int(manifest.get("counts", {}).get("prepared", 0))
-        _update_daily_target_state(config, run_dir)
+        prepared_progress = _update_daily_target_state(config, run_dir)
         write_run_report(run_dir)
         if prepared_count == 0:
             print(
                 "Daily target remains unmet with no current candidates: "
-                f"{before['submitted']}/{before['target']}"
+                f"{prepared_progress['submitted']}/"
+                f"{prepared_progress['target']}"
             )
             return run_dir
 
@@ -1011,6 +1095,20 @@ def run_until_daily_target(config: DailyConfig) -> Path | None:
                 "Execution did not produce a complete terminal audit; "
                 "refusing to continue to another batch"
             )
+
+        submitted_after = int(progress.get("submitted", 0))
+        if _record_heartbeat_no_progress(
+            config,
+            run_dir,
+            submitted_before,
+            submitted_after,
+        ):
+            print(
+                "Heartbeat guard: no confirmed submission after multiple "
+                "consecutive executed batches. Pausing automation until "
+                f"{datetime.now().astimezone() + timedelta(minutes=HEARTBEAT_NO_PROGRESS_PAUSE_MINUTES)}"
+            )
+            return run_dir
 
         if execution_error is not None:
             print(
@@ -1229,7 +1327,13 @@ def execute_daily_run(
         manifest["artifacts"]["recovery_retry_batch"] = str(
             recovery_retry_summary
         )
-    _write_json(audit_path, audit)
+    _persist_recovery_annotations(
+        state,
+        run_dir=resolved_run_dir,
+        root=config.root,
+        fallback_path=audit_path,
+        recovery_audit=audit,
+    )
     counts = audit.get("counts") if isinstance(audit.get("counts"), dict) else {}
     issue_count = sum(int(counts.get(key, 0) or 0) for key in ISSUE_COUNT_KEYS)
     completed_repair_requests: list[Mapping[str, Any]] = []
@@ -1622,6 +1726,301 @@ def execute_daily_run(
     return resolved_run_dir
 
 
+def _candidate_fact_recovery_handlers(
+    config: DailyConfig,
+    *,
+    run_dir: Path,
+    jobs_path: Path | None,
+    attempt_number: int,
+) -> dict[str, Any]:
+    """Verify newly approved facts and rebuild only their blocked package."""
+    from job_agent.cli import (
+        _job_from_dict,
+        _load_profile_facts,
+        _prepare_application_package,
+    )
+    from job_agent.python_runtime import (
+        PLACEHOLDER_ANSWERS,
+        _norm,
+        load_runtime_payload,
+    )
+    from job_agent.llm_answer_resolver import match_screening_rule
+    from job_agent.sensitive_kb import resolve_sensitive_answer
+
+    profile_facts = _load_profile_facts(config.profile, config.sensitive_kb)
+    if not isinstance(profile_facts, dict):
+        return {}
+
+    raw_jobs: list[Mapping[str, Any]] = []
+    if jobs_path is not None and jobs_path.is_file():
+        try:
+            payload = json.loads(jobs_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            payload = []
+        if isinstance(payload, list):
+            raw_jobs = [item for item in payload if isinstance(item, Mapping)]
+
+    profile_sha256 = _sha256(config.profile)
+    sensitive_kb_sha256 = _sha256(config.sensitive_kb)
+    prior_profile_cache: dict[str, tuple[dict[str, Any], bool]] = {}
+
+    def blocking_items(context: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        review_items = context.get("review_items")
+        if not isinstance(review_items, list):
+            return []
+        return [
+            item
+            for item in review_items
+            if isinstance(item, Mapping)
+            and bool(item.get("blocking", True))
+        ]
+
+    def approved_answer(
+        label: str,
+        item: Mapping[str, Any],
+        facts: Mapping[str, Any],
+    ) -> str | None:
+        if bool(item.get("sensitive")):
+            answer = resolve_sensitive_answer(label, dict(facts))
+        else:
+            raw_answers = facts.get("answers")
+            answers = raw_answers if isinstance(raw_answers, Mapping) else {}
+            answer = next(
+                (
+                    value
+                    for key, value in answers.items()
+                    if _norm(key) == _norm(label)
+                ),
+                None,
+            )
+            if answer is None:
+                answer = match_screening_rule(label, facts.get("screening_answer_rules"))
+        if answer is None:
+            return None
+        raw = str(answer).strip()
+        if (
+            raw.casefold() in PLACEHOLDER_ANSWERS
+            or not raw
+        ):
+            return None
+        return raw
+
+    def prior_profile(context: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
+        raw_script = str(context.get("script_path") or "").strip()
+        if not raw_script:
+            package_value = str(context.get("package_dir") or "").strip()
+            if package_value:
+                raw_script = str(Path(package_value) / "autofill-runtime.js")
+        if raw_script in prior_profile_cache:
+            return prior_profile_cache[raw_script]
+        if not raw_script:
+            return {}, False
+        script_path = Path(raw_script)
+        if not script_path.is_absolute():
+            script_path = run_dir / script_path
+        try:
+            script_path = script_path.resolve()
+            script_path.relative_to(run_dir.resolve())
+            payload = load_runtime_payload(script_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            result = ({}, False)
+        else:
+            raw_profile = payload.get("profile")
+            result = (
+                (dict(raw_profile), True)
+                if isinstance(raw_profile, Mapping)
+                else ({}, False)
+            )
+        prior_profile_cache[raw_script] = result
+        return result
+
+    def fact_readiness(
+        context: Mapping[str, Any],
+    ) -> tuple[list[str], list[str], list[str], list[str]]:
+        labels: list[str] = []
+        unresolved: list[str] = []
+        unchanged: list[str] = []
+        nonfact: list[str] = []
+        previous_facts, previous_available = prior_profile(context)
+        for item in blocking_items(context):
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            if not requires_approved_candidate_fact(item):
+                nonfact.append(label)
+                continue
+            labels.append(label)
+            answer = approved_answer(label, item, profile_facts)
+            if answer is None:
+                unresolved.append(label)
+                continue
+            previous = (
+                approved_answer(label, item, previous_facts)
+                if previous_available
+                else None
+            )
+            if not previous_available or (
+                previous is not None
+                and previous.strip().casefold() == answer.strip().casefold()
+            ):
+                unchanged.append(label)
+        return labels, unresolved, unchanged, nonfact
+
+    def verify_candidate_facts(
+        _action: Any,
+        context: Mapping[str, Any],
+        _private_state: dict[str, Any],
+    ) -> Mapping[str, Any]:
+        labels, unresolved, unchanged, nonfact = fact_readiness(context)
+        if not labels or unresolved:
+            return {
+                "status": "waiting_for_user",
+                "evidence": [],
+                "message": (
+                    "Approved candidate answers are still missing for "
+                    f"{len(unresolved) or len(labels)} required field(s)."
+                ),
+                "details": {
+                    "required_field_count": len(labels),
+                    "unresolved_field_count": len(unresolved) or len(labels),
+                },
+            }
+        if unchanged or nonfact:
+            return {
+                "status": "pending",
+                "evidence": [],
+                "message": (
+                    "Candidate-fact recovery is not verified because the prior "
+                    "package already contained the same answer or other blocker "
+                    "types remain."
+                ),
+                "details": {
+                    "required_field_count": len(labels),
+                    "unchanged_field_count": len(unchanged),
+                    "nonfact_blocker_count": len(nonfact),
+                },
+            }
+        return {
+            "status": "completed",
+            "evidence": ["approved_candidate_facts"],
+            "message": "Candidate-supplied answers are present in the approved fact source.",
+            "details": {
+                "approved_field_count": len(labels),
+                "profile_sha256": profile_sha256,
+                "sensitive_kb_sha256": sensitive_kb_sha256,
+            },
+        }
+
+    def rebuild_scoped_application(
+        _action: Any,
+        context: Mapping[str, Any],
+        _private_state: dict[str, Any],
+    ) -> Mapping[str, Any]:
+        labels, unresolved, unchanged, nonfact = fact_readiness(context)
+        if not labels or unresolved or unchanged or nonfact:
+            return {
+                "status": "pending",
+                "evidence": [],
+                "message": (
+                    "The scoped package cannot be rebuilt until every blocker "
+                    "is a newly approved candidate fact."
+                ),
+                "details": {
+                    "required_field_count": len(labels),
+                    "unresolved_field_count": len(unresolved) or len(labels),
+                    "unchanged_field_count": len(unchanged),
+                    "nonfact_blocker_count": len(nonfact),
+                },
+            }
+
+        apply_url = str(context.get("apply_url") or "").strip()
+        company = str(context.get("company") or "").strip().casefold()
+        title = str(context.get("title") or "").strip().casefold()
+        raw_job = next(
+            (
+                item
+                for item in raw_jobs
+                if apply_url
+                and str(item.get("apply_url") or item.get("source_url") or "").strip()
+                == apply_url
+            ),
+            None,
+        )
+        if raw_job is None:
+            matches = [
+                item
+                for item in raw_jobs
+                if str(item.get("company") or "").strip().casefold() == company
+                and str(item.get("title") or "").strip().casefold() == title
+            ]
+            raw_job = matches[0] if len(matches) == 1 else None
+        if raw_job is None:
+            return {
+                "status": "pending",
+                "evidence": [],
+                "message": "The original normalized job could not be located for scoped rebuilding.",
+            }
+
+        application_id = re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "-",
+            str(context.get("application_id") or "unknown"),
+        ).strip("-") or "unknown"
+        base_dir = (
+            run_dir
+            / "recovery"
+            / f"candidate-facts-{attempt_number:02d}-application-{application_id}"
+        )
+        package_dir = base_dir
+        suffix = 2
+        while package_dir.exists():
+            package_dir = base_dir.with_name(f"{base_dir.name}-{suffix:02d}")
+            suffix += 1
+
+        summary = _prepare_application_package(
+            _job_from_dict(dict(raw_job)),
+            package_dir,
+            resume_source_dir=config.resume_source_dir,
+            db=config.database,
+            profile=config.profile,
+            sensitive_kb=config.sensitive_kb,
+            use_llm=config.use_llm,
+            runtime_headless=config.browser_headless,
+            profile_vector_db=config.profile_vector_db,
+            required_resume_pdf=config.required_resume_pdf,
+        )
+        rebuilt_application_id = str(summary.get("application_id") or "")
+        expected_application_id = str(context.get("application_id") or "")
+        if (
+            expected_application_id
+            and rebuilt_application_id
+            and rebuilt_application_id != expected_application_id
+        ):
+            raise SopError(
+                "Scoped candidate-fact rebuild changed the tracked application ID"
+            )
+        summary_path = package_dir / "recovery-package-summary.json"
+        _write_json(summary_path, summary)
+        return {
+            "status": "completed",
+            "evidence": ["field_gate_passed"],
+            "message": "The single application package was rebuilt from current approved facts.",
+            "details": {
+                "approved_field_count": len(labels),
+                "profile_sha256": profile_sha256,
+                "sensitive_kb_sha256": sensitive_kb_sha256,
+                "replacement_summary_path": str(summary_path),
+                "replacement_package_dir": str(package_dir),
+            },
+        }
+
+    return {
+        "request_candidate_facts": verify_candidate_facts,
+        "update_approved_fact_source": verify_candidate_facts,
+        "rebuild_scoped_application": rebuild_scoped_application,
+    }
+
+
 def recover_daily_run(
     config: DailyConfig,
     *,
@@ -1659,7 +2058,12 @@ def recover_daily_run(
         raise SopError(
             "Historical recovery requires an execution audit inside the selected run"
         )
-    audit = _read_json_object(audit_path, "execution audit")
+    audit = _execution_audit_for_report(
+        state,
+        run_dir=resolved_run_dir,
+        root=config.root,
+        fallback=_read_json_object(audit_path, "execution audit"),
+    )
     progress = audit.get("progress")
     if isinstance(progress, Mapping) and not bool(progress.get("complete")):
         raise SopError(
@@ -1677,6 +2081,18 @@ def recover_daily_run(
         raise SopError(
             "Historical recovery batch summary is outside the selected run"
         )
+    jobs_value = (
+        manifest_artifacts.get("jobs")
+        or state_artifacts.get("jobs")
+    )
+    jobs_path: Path | None = None
+    if jobs_value:
+        candidate_jobs_path = _artifact_path(jobs_value, config.root)
+        if (
+            _is_within(candidate_jobs_path, resolved_run_dir)
+            and candidate_jobs_path.is_file()
+        ):
+            jobs_path = candidate_jobs_path
 
     recovery_attempts = state.get("recovery_attempts")
     prior_attempts = (
@@ -1692,6 +2108,12 @@ def recover_daily_run(
         run_dir=resolved_run_dir,
         database=config.database,
         environ=os.environ,
+        handlers=_candidate_fact_recovery_handlers(
+            config,
+            run_dir=resolved_run_dir,
+            jobs_path=jobs_path,
+            attempt_number=attempt_number,
+        ),
     )
     duration_seconds = round(time.monotonic() - started, 3)
     recovery_path = resolved_run_dir / RECOVERY_EXECUTION_FILE_NAME
@@ -1728,6 +2150,76 @@ def recover_daily_run(
             / f"retry-batch-recovery-{attempt_number:02d}.json"
         ),
     )
+    candidate_fact_retry_verified = any(
+        item.get("recovery_strategy") == "candidate_fact_resolution"
+        for item in recovery_batch.verified_targets
+        if isinstance(item, Mapping)
+    )
+    recovery_input_sha256: dict[str, str] | None = None
+    recovery_config_sha256: str | None = None
+    if candidate_fact_retry_verified:
+        current_inputs = fingerprint_inputs(config)
+        recorded_inputs = state.get("input_sha256")
+        prior_inputs = (
+            dict(recorded_inputs)
+            if isinstance(recorded_inputs, Mapping)
+            else {}
+        )
+        changed_inputs = {
+            key
+            for key in set(prior_inputs) | set(current_inputs)
+            if prior_inputs.get(key) != current_inputs.get(key)
+        }
+        disallowed_changes = sorted(
+            changed_inputs - {"profile", "sensitive_kb", "source_config"}
+        )
+        if disallowed_changes:
+            raise SopError(
+                "Candidate-fact recovery found unrelated prepared-input changes: "
+                + ", ".join(disallowed_changes)
+            )
+        recovery_input_sha256 = current_inputs
+        state["input_sha256"] = dict(current_inputs)
+        recorded_settings = (
+            dict(state.get("settings"))
+            if isinstance(state.get("settings"), Mapping)
+            else {}
+        )
+        current_settings = config.snapshot()
+        recovery_critical_keys = {
+            "root",
+            "source_config",
+            "profile",
+            "sensitive_kb",
+            "database",
+            "profile_vector_db",
+            "resume_source_dir",
+            "required_resume_pdf",
+            "output_root",
+            "use_llm",
+            "llm_answers",
+            "submit_complete",
+            "require_gmail_token",
+        }
+        critical_changes = sorted(
+            key
+            for key in recovery_critical_keys
+            if recorded_settings.get(key) != current_settings.get(key)
+        )
+        if critical_changes:
+            raise SopError(
+                "Candidate-fact recovery found safety-critical config changes: "
+                + ", ".join(critical_changes)
+            )
+        if config.config_path.is_file():
+            recovery_config_sha256 = _sha256(config.config_path)
+            state["config_sha256"] = recovery_config_sha256
+        state["settings"] = current_settings
+        manifest_daily_sop = manifest.setdefault("daily_sop", {})
+        if isinstance(manifest_daily_sop, dict):
+            manifest_daily_sop["input_sha256"] = dict(current_inputs)
+            if recovery_config_sha256 is not None:
+                manifest_daily_sop["config_sha256"] = recovery_config_sha256
     state.setdefault("artifacts", {})["recovery_execution"] = str(
         recovery_path
     )
@@ -1747,9 +2239,17 @@ def recover_daily_run(
             "verified_target_count": len(recovery_batch.verified_targets),
             "recovery_execution": str(recovery_path),
             "retry_batch": str(retry_summary) if retry_summary else None,
+            "input_sha256": recovery_input_sha256,
+            "config_sha256": recovery_config_sha256,
         }
     )
-    _write_json(audit_path, audit)
+    _persist_recovery_annotations(
+        state,
+        run_dir=resolved_run_dir,
+        root=config.root,
+        fallback_path=audit_path,
+        recovery_audit=audit,
+    )
     _write_json(manifest_path, manifest)
     _write_state(resolved_run_dir, state, config.output_root)
     write_run_report(resolved_run_dir)
@@ -1853,6 +2353,26 @@ def repair_daily_run(
         source_path=source_request_path,
         cycle=repair_cycle,
     )
+    if source_request.get("no_repairable_scope"):
+        state["consumed_repair_cycles"] = consumed_cycles
+        _transition(
+            resolved_run_dir,
+            state,
+            config.output_root,
+            "executed_with_blockers",
+            repair_cycle=repair_cycle,
+            consumed_repair_cycles=consumed_cycles,
+            repair_status="not_required",
+            repair_reason="current_audit_has_no_repairable_scope",
+            stage="repair_scope_refresh",
+        )
+        _write_json(manifest_path, manifest)
+        write_run_report(resolved_run_dir)
+        print(
+            "Current complete audit has no coding-repair scope; "
+            f"superseded retained request: {source_request_path}"
+        )
+        return resolved_run_dir
     if refresh_request_only:
         if not source_request.get("request_refresh"):
             raise SopError(
@@ -2160,8 +2680,9 @@ def _load_scoped_repair_request(
             path = run_dir / path
         if not _is_within(path, run_dir) or not path.is_file():
             continue
+        audit = _read_json_object(path, "execution audit")
         request = build_repair_request(
-            _read_json_object(path, "execution audit"),
+            audit,
             run_dir=run_dir,
             cycle=cycle,
         )
@@ -2170,6 +2691,27 @@ def _load_scoped_repair_request(
             if retained_path is not None:
                 request["supersedes_retained_request"] = str(retained_path)
             return request, path
+        progress = audit.get("progress")
+        if isinstance(progress, Mapping) and progress.get("complete") is True:
+            constraints = (
+                dict(retained_request.get("constraints") or {})
+                if isinstance(retained_request, Mapping)
+                else {}
+            )
+            no_scope_request: dict[str, Any] = {
+                "schema_version": 1,
+                "cycle": cycle,
+                "findings": [],
+                "retry_targets": [],
+                "constraints": constraints,
+                "no_repairable_scope": True,
+                "rebuilt_from_audit": str(path),
+            }
+            if retained_path is not None:
+                no_scope_request["supersedes_retained_request"] = str(
+                    retained_path
+                )
+            return no_scope_request, path
     if retained_request is not None and retained_path is not None:
         return retained_request, retained_path
     raise SopError("No retained scoped repair request is available for this run")
@@ -2912,6 +3454,214 @@ def _write_agent_runtime_trace(
     return path
 
 
+def _execution_application_key(
+    record: Mapping[str, Any],
+) -> tuple[str, ...]:
+    application_id = str(record.get("application_id") or "").strip()
+    if application_id:
+        return ("application_id", application_id)
+    return (
+        "application",
+        str(record.get("apply_url") or "").strip(),
+        str(record.get("company") or "").strip().casefold(),
+        str(record.get("title") or "").strip().casefold(),
+    )
+
+
+def _execution_attempt_audits(
+    state: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    root: Path,
+) -> list[tuple[Path, dict[str, Any]]]:
+    attempts = state.get("execution_attempts")
+    attempt_rows = (
+        [item for item in attempts if isinstance(item, Mapping)]
+        if isinstance(attempts, list)
+        else []
+    )
+    audits: list[tuple[Path, dict[str, Any]]] = []
+    registered: set[Path] = set()
+    for attempt in attempt_rows:
+        raw_path = str(attempt.get("audit") or "").strip()
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = root / path
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(run_dir.resolve())
+        except (OSError, ValueError):
+            continue
+        payload = _read_optional_json(resolved)
+        if payload:
+            audits.append((resolved, payload))
+            registered.add(resolved)
+
+    # A worker can be terminated after it has atomically written an audit but
+    # before the parent process records the execution attempt in run-state.
+    # Keep those same-run audit files visible to reports and recovery planning.
+    # Only root-level execution audit files are considered; package-local
+    # audits and unrelated artifacts must never be folded into the run.
+    for candidate in sorted(run_dir.glob("execution-audit-*.json")):
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(run_dir.resolve())
+        except (OSError, ValueError):
+            continue
+        if resolved in registered:
+            continue
+        payload = _read_optional_json(resolved)
+        if not isinstance(payload, Mapping):
+            continue
+        records = payload.get("applications")
+        progress = payload.get("progress")
+        if not isinstance(records, list) or not isinstance(progress, Mapping):
+            continue
+        if not records and not progress.get("planned"):
+            continue
+        audits.append((resolved, dict(payload)))
+        registered.add(resolved)
+    return audits
+
+
+def _persist_recovery_annotations(
+    state: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    root: Path,
+    fallback_path: Path,
+    recovery_audit: Mapping[str, Any],
+) -> None:
+    """Write Recovery metadata back without flattening attempt audit history."""
+    audits = _execution_attempt_audits(
+        state,
+        run_dir=run_dir,
+        root=root,
+    )
+    if not audits:
+        _write_json(fallback_path, recovery_audit)
+        return
+
+    updates: dict[tuple[str, ...], dict[str, Any]] = {}
+    records = recovery_audit.get("applications")
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            annotation = {
+                key: record.get(key)
+                for key in ("recovery_plan", "recovery_execution")
+                if record.get(key) is not None
+            }
+            if annotation:
+                updates[_execution_application_key(record)] = annotation
+
+    owners: dict[tuple[str, ...], tuple[Path, dict[str, Any], int]] = {}
+    for path, payload in audits:
+        payload_records = payload.get("applications")
+        if not isinstance(payload_records, list):
+            continue
+        for index, record in enumerate(payload_records):
+            if isinstance(record, Mapping):
+                owners[_execution_application_key(record)] = (
+                    path,
+                    payload,
+                    index,
+                )
+
+    touched: dict[Path, dict[str, Any]] = {}
+    for key, annotation in updates.items():
+        owner = owners.get(key)
+        if owner is None:
+            continue
+        path, payload, index = owner
+        payload_records = payload.get("applications")
+        if not isinstance(payload_records, list):
+            continue
+        updated_record = dict(payload_records[index])
+        updated_record.update(annotation)
+        payload_records[index] = updated_record
+        touched[path] = payload
+    for path, payload in touched.items():
+        _write_json(path, payload)
+
+
+def _execution_audit_for_report(
+    state: Mapping[str, Any],
+    *,
+    run_dir: Path,
+    root: Path,
+    fallback: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge completed execution attempts by stable application identity."""
+    audits = _execution_attempt_audits(
+        state,
+        run_dir=run_dir,
+        root=root,
+    )
+    if not audits:
+        return dict(fallback)
+    if len(audits) == 1:
+        return dict(audits[0][1])
+
+    merged = dict(audits[-1][1])
+    applications_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    planned_counts: list[int] = []
+    all_complete = True
+    runtime_applications: list[Any] = []
+    runtime_closed_loop = True
+    for _path, audit in audits:
+        progress = audit.get("progress")
+        if isinstance(progress, Mapping):
+            try:
+                planned_counts.append(int(progress.get("planned") or 0))
+            except (TypeError, ValueError):
+                pass
+            all_complete = all_complete and bool(progress.get("complete"))
+        else:
+            all_complete = False
+        records = audit.get("applications")
+        if isinstance(records, list):
+            for record in records:
+                if not isinstance(record, Mapping):
+                    continue
+                applications_by_key[
+                    _execution_application_key(record)
+                ] = dict(record)
+        runtime = audit.get("agent_runtime")
+        if isinstance(runtime, Mapping):
+            runtime_closed_loop = runtime_closed_loop and bool(
+                runtime.get("closed_loop", True)
+            )
+            runtime_rows = runtime.get("applications")
+            if isinstance(runtime_rows, list):
+                runtime_applications.extend(runtime_rows)
+
+    applications = list(applications_by_key.values())
+    from job_agent.execution import summarize_execution
+
+    merged["applications"] = applications
+    merged["counts"] = summarize_execution(applications)
+    planned = max([len(applications), *planned_counts], default=len(applications))
+    terminal = len(applications)
+    merged["progress"] = {
+        "planned": planned,
+        "terminal": terminal,
+        "remaining": max(0, planned - terminal),
+        "complete": all_complete and terminal >= planned,
+    }
+    merged["attempt_audits"] = [str(path) for path, _audit in audits]
+    if runtime_applications:
+        merged["agent_runtime"] = {
+            "schema_version": 1,
+            "closed_loop": runtime_closed_loop,
+            "applications": runtime_applications,
+        }
+    return merged
+
+
 def write_run_report(run_dir: Path) -> Path:
     state = _read_json_object(run_dir / STATE_FILE_NAME, "run state")
     settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
@@ -2930,7 +3680,12 @@ def write_run_report(run_dir: Path) -> Path:
     )
     if not audit_path.is_absolute():
         audit_path = root / audit_path
-    audit = _read_optional_json(audit_path)
+    audit = _execution_audit_for_report(
+        state,
+        run_dir=run_dir,
+        root=root,
+        fallback=_read_optional_json(audit_path),
+    )
 
     pipeline_counts = (
         manifest.get("counts", {}) if isinstance(manifest, dict) else {}
@@ -2993,12 +3748,19 @@ def write_run_report(run_dir: Path) -> Path:
                 "",
                 "## Daily Confirmed Submission Target",
                 "",
-                "| Date | Target | Confirmed | Remaining | Reached |",
-                "| --- | ---: | ---: | ---: | --- |",
+                (
+                    "| Date | Raw imported | Required by rate | "
+                    "Effective target | Confirmed | Confirmed / raw | "
+                    "Remaining | Reached |"
+                ),
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
                 (
                     f"| {daily_target.get('local_date', 'unknown')} "
+                    f"| {daily_target.get('raw_imported', 'n/a')} "
+                    f"| {daily_target.get('rate_target', 'n/a')} "
                     f"| {daily_target.get('target', 0)} "
                     f"| {daily_target.get('submitted', 0)} "
+                    f"| {_format_evaluation_rate(daily_target.get('confirmed_rate'))} "
                     f"| {daily_target.get('remaining', 0)} "
                     f"| {'yes' if daily_target.get('reached') else 'no'} |"
                 ),
@@ -3019,10 +3781,15 @@ def write_run_report(run_dir: Path) -> Path:
         metric_counts["prepared"],
         metric_rates["terminal_audit_coverage"],
     )
-    confirmed_actual = _format_evaluation_ratio(
+    final_eligible_actual = _format_evaluation_ratio(
         metric_counts["submitted"],
         metric_counts["final_eligible"],
         metric_rates["confirmed_submission_rate_final_eligible"],
+    )
+    raw_import_actual = _format_evaluation_ratio(
+        metric_counts["confirmed_for_raw_import_rate"],
+        metric_counts["imported"],
+        metric_rates["raw_import_to_confirmed_rate"],
     )
     lines.extend(
         [
@@ -3035,7 +3802,7 @@ def write_run_report(run_dir: Path) -> Path:
                 f"- Evaluator: `{metric_core.get('evaluator', 'unknown')}`; "
                 f"overall status: `{metric_core.get('status', 'unknown')}`"
             ),
-            "- Confirmed-submission target uses final eligible executions, never raw imports.",
+            "- The primary confirmed-submission target uses the raw imported cohort as its denominator.",
             "",
             "| Metric | Actual | Target | Status |",
             "| --- | ---: | ---: | --- |",
@@ -3050,13 +3817,12 @@ def write_run_report(run_dir: Path) -> Path:
                 f"| {metric_assessment['terminal_audit_coverage']['status']} |"
             ),
             (
-                f"| Confirmed / final eligible | {confirmed_actual} "
+                f"| Confirmed / raw imported | {raw_import_actual} "
                 f"| >= {_format_evaluation_rate(metric_targets['min_confirmed_submission_rate'])} "
-                f"| {metric_assessment['confirmed_submission_rate_final_eligible']['status']} |"
+                f"| {metric_assessment['raw_import_to_confirmed_rate']['status']} |"
             ),
             (
-                f"| Raw import to confirmed | "
-                f"{_format_evaluation_rate(metric_rates['raw_import_to_confirmed_rate'])} "
+                f"| Confirmed / final eligible | {final_eligible_actual} "
                 "| monitor | monitor |"
             ),
             (
@@ -3585,8 +4351,15 @@ def _write_state(
     output_root: Path,
 ) -> None:
     _write_json(run_dir / STATE_FILE_NAME, state)
+    latest_path = output_root / LATEST_FILE_NAME
+    if not _should_update_latest_pointer(
+        run_dir,
+        state,
+        latest_path=latest_path,
+    ):
+        return
     _write_json(
-        output_root / LATEST_FILE_NAME,
+        latest_path,
         {
             "schema_version": 1,
             "run_id": state.get("run_id"),
@@ -3596,6 +4369,40 @@ def _write_state(
             "next_wake_at": state.get("next_wake_at"),
         },
     )
+
+
+def _should_update_latest_pointer(
+    run_dir: Path,
+    state: Mapping[str, Any],
+    *,
+    latest_path: Path,
+) -> bool:
+    if not latest_path.is_file():
+        return True
+    try:
+        latest = _read_json_object(latest_path, "latest run pointer")
+    except (OSError, SopError):
+        return True
+    latest_value = str(latest.get("run_dir") or "").strip()
+    if not latest_value:
+        return True
+    latest_run_dir = Path(latest_value)
+    if not latest_run_dir.is_absolute():
+        latest_run_dir = latest_path.parent / latest_run_dir
+    if latest_run_dir.resolve() == run_dir.resolve():
+        return True
+
+    latest_state = _read_optional_json(latest_run_dir / STATE_FILE_NAME)
+    candidate_created = _parse_datetime(state.get("created_at"))
+    latest_created = (
+        _parse_datetime(latest_state.get("created_at"))
+        if isinstance(latest_state, Mapping)
+        else None
+    )
+    if candidate_created is not None and latest_created is not None:
+        if candidate_created != latest_created:
+            return candidate_created > latest_created
+    return str(run_dir.resolve()) > str(latest_run_dir.resolve())
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -3797,6 +4604,16 @@ def _read_evaluation_policy(payload: Mapping[str, Any]) -> EvaluationPolicy:
         raw = {}
     if not isinstance(raw, Mapping):
         raise SopError("Daily config field 'evaluation' must be an object")
+    denominator = str(
+        raw.get("confirmation_rate_denominator", "raw_imported")
+        or ""
+    ).strip()
+    if denominator != "raw_imported":
+        raise SopError(
+            "Daily config field "
+            "'evaluation.confirmation_rate_denominator' "
+            "must be 'raw_imported'"
+        )
     try:
         return EvaluationPolicy(
             imported_cohort_target=_read_int(
@@ -3806,6 +4623,7 @@ def _read_evaluation_policy(payload: Mapping[str, Any]) -> EvaluationPolicy:
                 minimum=1,
                 maximum=100_000,
             ),
+            confirmation_rate_denominator=denominator,
             min_confirmed_submission_rate=_read_rate(
                 raw,
                 "min_confirmed_submission_rate",
@@ -3963,6 +4781,125 @@ def _sha256(path: Path) -> str:
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
+
+
+
+def _heartbeat_state_path(config: DailyConfig) -> Path:
+    return Path(config.output_root) / HEARTBEAT_STATE_FILE_NAME
+
+
+def _default_heartbeat_state() -> dict[str, Any]:
+    return {
+        "version": 1,
+        "empty_wake_count": 0,
+        "no_progress_count": 0,
+        "last_run_at": None,
+        "last_phase": None,
+        "last_run_id": None,
+        "pause_until": None,
+        "paused_reason": None,
+        "backoff_minutes": None,
+    }
+
+
+def _read_heartbeat_state(config: DailyConfig) -> dict[str, Any]:
+    path = _heartbeat_state_path(config)
+    try:
+        return _read_json_object(path, "heartbeat state")
+    except (FileNotFoundError, SopError):
+        return _default_heartbeat_state()
+
+
+def _write_heartbeat_state(config: DailyConfig, state: dict[str, Any]) -> None:
+    state = {**state, "updated_at": _now()}
+    _write_json(_heartbeat_state_path(config), state)
+
+
+def _apply_heartbeat_wake_logic(
+    config: DailyConfig,
+    prepared_count: int,
+    run_dir: Path,
+    state: dict[str, Any],
+    transition_details: dict[str, Any],
+) -> None:
+    """Set next_wake_at with exponential backoff when no candidate is prepared.
+
+    Also resets the no-progress counter when a new batch appears and writes a
+    small heartbeat-state file that external automations can read without
+    opening every run directory.
+    """
+    hb = _read_heartbeat_state(config)
+    hb["last_run_at"] = _now()
+    hb["last_phase"] = str(state.get("phase") or "")
+    hb["last_run_id"] = str(run_dir.name)
+
+    if prepared_count > 0:
+        hb["empty_wake_count"] = 0
+        hb["no_progress_count"] = 0
+        hb["pause_until"] = None
+        hb["paused_reason"] = None
+        hb["backoff_minutes"] = None
+        state.pop("next_wake_at", None)
+    else:
+        empty_count = int(hb.get("empty_wake_count", 0)) + 1
+        hb["empty_wake_count"] = empty_count
+        base = max(1, config.empty_wake_minutes)
+        backoff = min(
+            base * (2 ** (empty_count - 1)),
+            HEARTBEAT_MAX_EMPTY_BACKOFF_MINUTES,
+        )
+        next_wake = _next_wake_at(backoff)
+        hb["backoff_minutes"] = backoff
+        hb["pause_until"] = None
+        hb["paused_reason"] = None
+        state["next_wake_at"] = next_wake
+        transition_details["next_wake_at"] = next_wake
+        transition_details["wake_after_minutes"] = backoff
+
+    _write_heartbeat_state(config, hb)
+
+
+def _record_heartbeat_no_progress(
+    config: DailyConfig,
+    run_dir: Path,
+    submitted_before: int,
+    submitted_after: int,
+) -> bool:
+    """Track consecutive executed batches that did not increase confirmed submissions.
+
+    Returns True when a pause is set (the caller should stop the loop).
+    """
+    hb = _read_heartbeat_state(config)
+    hb["last_run_at"] = _now()
+    hb["last_phase"] = "executed"
+    hb["last_run_id"] = str(run_dir.name)
+
+    if submitted_after > submitted_before:
+        hb["no_progress_count"] = 0
+        hb["empty_wake_count"] = 0
+        hb["pause_until"] = None
+        hb["paused_reason"] = None
+        _write_heartbeat_state(config, hb)
+        return False
+
+    no_progress = int(hb.get("no_progress_count", 0)) + 1
+    hb["no_progress_count"] = no_progress
+
+    if no_progress >= HEARTBEAT_MAX_NO_PROGRESS_BATCHES:
+        pause_until = (
+            datetime.now().astimezone()
+            + timedelta(minutes=HEARTBEAT_NO_PROGRESS_PAUSE_MINUTES)
+        ).isoformat()
+        hb["pause_until"] = pause_until
+        hb["paused_reason"] = (
+            f"No confirmed submission after {no_progress} consecutive "
+            "executed batches; waiting for candidate facts or source refresh."
+        )
+        _write_heartbeat_state(config, hb)
+        return True
+
+    _write_heartbeat_state(config, hb)
+    return False
 
 def _next_wake_at(minutes: int) -> str:
     return (

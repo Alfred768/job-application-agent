@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -15,6 +16,7 @@ from job_agent.jobs import (
     parse_remotive_jobs,
     parse_rss_jobs,
 )
+from job_agent.candidate_screening import location_is_outside_us
 from job_agent.models import Job
 
 # Public job APIs (e.g. Remotive) reject the default Python-urllib User-Agent.
@@ -24,7 +26,7 @@ _HTTP_USER_AGENT = (
 )
 
 
-def _read_url(url: str, timeout: int = 20):
+def _read_url(url: str, timeout: int = 8):
     return urlopen(Request(url, headers={"User-Agent": _HTTP_USER_AGENT}), timeout=timeout)
 
 
@@ -117,11 +119,16 @@ def _filter_jobs_for_source(jobs: list[Job], item: dict[str, Any]) -> list[Job]:
         ("location", _as_patterns(item.get("location_exclude"))),
         ("text", _as_patterns(item.get("text_exclude") or item.get("exclude_keywords"))),
     ]
-    if not any(patterns for _, patterns in include_specs + exclude_specs):
+    us_only = item.get("us_only") is True
+    if not us_only and not any(
+        patterns for _, patterns in include_specs + exclude_specs
+    ):
         return jobs
 
     filtered: list[Job] = []
     for job in jobs:
+        if us_only and location_is_outside_us(_job_filter_text(job, "location")):
+            continue
         if any(
             patterns and not _matches_any(_job_filter_text(job, scope), patterns)
             for scope, patterns in include_specs
@@ -148,6 +155,7 @@ def _source_has_filters(item: dict[str, Any]) -> bool:
             "text_exclude",
             "include_keywords",
             "exclude_keywords",
+            "us_only",
         )
     )
 
@@ -168,10 +176,11 @@ def load_jobs_from_source_config(config_path: Path | str) -> list[Job]:
     path = Path(config_path)
     config = json.loads(path.read_text())
     base_dir = path.parent
-    jobs: list[Job] = []
     defaults = config.get("defaults") if isinstance(config.get("defaults"), dict) else {}
 
-    for raw_item in config.get("sources", []):
+    raw_items = list(config.get("sources", []))
+
+    def load_one(raw_item: dict[str, Any]) -> list[Job]:
         item = {**defaults, **raw_item}
         source_type = str(item.get("type", "")).lower()
         limit = item.get("limit")
@@ -258,7 +267,14 @@ def load_jobs_from_source_config(config_path: Path | str) -> list[Job]:
                 RuntimeWarning,
                 stacklevel=2,
             )
-            continue
-        jobs.extend(_limit_jobs(_filter_jobs_for_source(source_jobs, item), limit))
+            return []
+        return _limit_jobs(_filter_jobs_for_source(source_jobs, item), limit)
 
+    source_groups: list[list[Job]] = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        source_groups = list(executor.map(load_one, raw_items))
+
+    jobs: list[Job] = []
+    for source_jobs in source_groups:
+        jobs.extend(source_jobs)
     return deduplicate_jobs(jobs)

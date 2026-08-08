@@ -111,6 +111,55 @@ class ShortTermMemory:
     def rounds(self) -> tuple[AgentRound, ...]:
         return tuple(self._rounds)
 
+    def planning_observations(
+        self,
+        current_observation: Observation | None = None,
+        *,
+        history_limit: int = 5,
+    ) -> tuple[Observation, ...]:
+        """Return the compact STM projection used by Thought.
+
+        The append-only queues remain available for audit.  Planning receives
+        the current environment state plus a short action summary, so page
+        snapshots and old ToolResult payloads do not accumulate in the LLM
+        prompt as a second copy of the world.
+        """
+        projected: list[Observation] = []
+        if current_observation is not None:
+            projected.append(current_observation)
+        elif self._observations:
+            projected.append(self._observations[-1])
+
+        history = [
+            self._round_summary(round_)
+            for round_ in list(self._rounds)[-max(0, history_limit):]
+        ]
+        if history:
+            latest_round = list(self._rounds)[-1]
+            projected.append(
+                Observation(
+                    kind="memory_summary",
+                    source="short_term_memory",
+                    payload={
+                        "mode": "sliding_window",
+                        "history": history,
+                        "retained_observation_id": (
+                            current_observation.observation_id
+                            if current_observation is not None
+                            else (
+                                self._observations[-1].observation_id
+                                if self._observations
+                                else ""
+                            )
+                        ),
+                    },
+                    observation_id=(
+                        f"stm-summary-{latest_round.round_id}"
+                    ),
+                )
+            )
+        return tuple(projected)
+
     def latest_output(self, tool_name: str, default: Any = None) -> Any:
         for result in reversed(self._tool_results):
             if result.tool_name == tool_name and result.ok:
@@ -128,3 +177,35 @@ class ShortTermMemory:
         self._thoughts.clear()
         self._memory_updates.clear()
         self._rounds.clear()
+
+    @staticmethod
+    def _round_summary(round_: AgentRound) -> dict[str, Any]:
+        policy_code = (
+            round_.policy_decision.code
+            if round_.policy_decision is not None
+            else None
+        )
+        if policy_code and policy_code != "allowed":
+            summary = (
+                f"{round_.action.tool_name} blocked by Policy Gate "
+                f"({policy_code})."
+            )
+        elif round_.tool_result.ok:
+            summary = f"{round_.action.tool_name} completed."
+        else:
+            error_type = (
+                str(round_.tool_result.error).split(":", 1)[0]
+                if round_.tool_result.error
+                else "tool_error"
+            )
+            summary = f"{round_.action.tool_name} failed ({error_type})."
+        return {
+            "round_id": round_.round_id,
+            "tool_name": round_.action.tool_name,
+            "effect": round_.action.effect.value,
+            "status": round_.status,
+            "ok": round_.tool_result.ok,
+            "policy_code": policy_code,
+            "summary": summary,
+            "new_observation_id": round_.new_observation.observation_id,
+        }

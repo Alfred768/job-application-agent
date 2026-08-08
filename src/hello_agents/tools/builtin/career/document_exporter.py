@@ -9,13 +9,16 @@ from hello_agents.tools.base import Tool, ToolParameter
 from job_agent.packages import export_application_package
 
 
-class ApplicationPackageTool(Tool):
-    """Export review artifacts for a job application into a local package directory."""
+class BuildApplicationPackageTool(Tool):
+    """Build application package files without doing semantic fit evaluation."""
 
-    def __init__(self):
+    def __init__(self, *, name: str = "build_application_package"):
         super().__init__(
-            name="application_package",
-            description="Export review, JD analysis, and submit gate files.",
+            name=name,
+            description=(
+                "Assemble review, JD analysis, and submit-gate artifacts from "
+                "approved inputs."
+            ),
             effect=ToolEffect.WRITE,
         )
 
@@ -43,3 +46,10 @@ class ApplicationPackageTool(Tool):
                 description="Directory to write application package files.",
             ),
         ]
+
+
+class ApplicationPackageTool(BuildApplicationPackageTool):
+    """Backward-compatible package exporter name."""
+
+    def __init__(self):
+        super().__init__(name="application_package")

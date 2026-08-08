@@ -51,6 +51,10 @@ def test_runtime_autofill_script_embeds_profile_and_url():
 def test_runtime_autofill_script_includes_office_location_combobox_rule():
     script = render_runtime_autofill_script(profile=_profile())
 
+    assert 'n.includes("last time you wrote code") && n.includes("professionally")' in script
+    assert 'return "Within the last 6 months"' in script
+    assert 'n.includes("regularly read and understand code") && n.includes("written by other engineers")' in script
+    assert "optLabel.startsWith(candidate + \" (\")" in script
     assert "function preferredOfficeLocationOption" in script
     assert "preferredOfficeLocationOption(field, profile)" in script
     assert "function preferredOfficeLocationAnswer" in script
@@ -168,7 +172,15 @@ def test_runtime_autofill_script_clears_stale_autofill_markers_before_rescrape()
     assert "Airbnb Candidate Privacy Policy" in script
     assert "I will require immigration sponsorship in the future" in script
     assert "I do not have direct Community Support domain experience" in script
-    assert "I have never worked for SpaceX or SpaceXAI" in script
+    assert "function requiresExplicitCandidateFact" in script
+    assert "candidate fact needs explicit approved answer" in script
+    assert '"native language"' in script
+    assert '"native script"' in script
+    assert '"anticipated"' in script
+    assert "structuredExplicitCandidateFactAnswer" in script
+    assert "personalPreference" in script
+    assert '"able to attend"' in script
+    assert '"referrer"' in script
     assert "Company careers page / website" in script
     assert "company careers page website" in script
     assert "function workdayPhoneDeviceTypeAnswer" in script
@@ -3111,6 +3123,7 @@ def test_runtime_autofill_script_handles_notion_screening_and_suppresses_stale_r
     profile["answers"].update(
         {
             "Are you open to working in-person in one of our offices 25% of the time?": "Yes",
+            "Are you able to commit to working from one of our offices on Anchor Days each week?": "Yes",
             "Please indicate all of the locations that you would be interested in relocating to for this position.": "San Francisco, CA",
         }
     )
