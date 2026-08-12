@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 from urllib.parse import urlparse, urlencode
@@ -104,6 +105,34 @@ pipeline_app = typer.Typer(help="Auditable end-to-end job application workflows.
 profiles_app = typer.Typer(help="Private profile store and embeddings commands.")
 resumes_app = typer.Typer(help="Resume template commands.")
 inbox_app = typer.Typer(help="Email verification providers and authorization.")
+
+_DAILY_SOP_EXECUTION_ENV = "JOB_AGENT_DAILY_SOP_EXECUTION"
+
+
+def _daily_sop_execution_authorized() -> bool:
+    return str(os.getenv(_DAILY_SOP_EXECUTION_ENV) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _production_execution_path(*paths: Path) -> bool:
+    """Identify the repository's real daily output lane.
+
+    Temporary fixtures and library-level tests intentionally retain the lower
+    CLI for offline verification. The production output root is the only lane
+    where the Daily SOP ownership lock is mandatory.
+    """
+    production_root = Path(__file__).resolve().parents[2] / "output" / "daily"
+    for raw_path in paths:
+        try:
+            Path(raw_path).expanduser().resolve().relative_to(production_root.resolve())
+        except (OSError, ValueError):
+            continue
+        return True
+    return False
 
 EXAMPLE_FILENAMES = [
     "offline-sources.json",
@@ -1000,6 +1029,11 @@ def _was_previously_submitted(
     application_url = _normalized_application_url(job.apply_url or job.source_url)
     if application_url and application_url in submitted_urls:
         return True
+    # A URL is the authoritative identity for a job application.  Do not
+    # fall back to company/title when a distinct URL is present: companies
+    # routinely reuse titles across multiple openings.
+    if application_url:
+        return False
     return (job.company.strip().lower(), job.title.strip().lower()) in submitted_titles
 
 
@@ -1057,6 +1091,71 @@ def _previous_terminal_outcome_reason_for_summary(summary: dict[str, object], db
     if status:
         return f"matching prior terminal outcome {status} already exists: {_summary_application_url(summary)}"
     return None
+
+
+def _prepared_run_exclusions(out_dir: Path) -> tuple[set[str], set[str]]:
+    """Return only confirmed sibling coverage from earlier runs today.
+
+    A package that was merely prepared, or that ended without a verified
+    submission, is not a successful same-day company/URL exclusion. Its exact
+    URL remains governed by the database's submitted/terminal gates, while
+    other roles at that company may still be considered.
+    """
+    urls: set[str] = set()
+    companies: set[str] = set()
+    if not out_dir.parent.is_dir():
+        return urls, companies
+    for candidate in sorted(out_dir.parent.iterdir()):
+        if not candidate.is_dir() or candidate == out_dir:
+            continue
+        summaries = sorted((candidate / "applications").glob("batch-summary*.json"))
+        audit_path = candidate / "execution-audit.json"
+        try:
+            audit = json.loads(audit_path.read_text()) if audit_path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            audit = {}
+        audit_records = audit.get("applications") if isinstance(audit, dict) else None
+        if not isinstance(audit_records, list):
+            continue
+        confirmed_records = [
+            item
+            for item in audit_records
+            if isinstance(item, dict) and item.get("status") == "submitted"
+        ]
+        if not confirmed_records:
+            continue
+        for summary_path in summaries:
+            try:
+                raw = json.loads(summary_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            items = raw if isinstance(raw, list) else raw.get("applications")
+            if not isinstance(items, list):
+                continue
+            summary_by_script = {
+                str(item.get("runtime_script_path") or ""): item
+                for item in items
+                if isinstance(item, dict) and item.get("runtime_script_path")
+            }
+            for record in confirmed_records:
+                url = _normalized_application_url(str(record.get("apply_url") or ""))
+                if url:
+                    urls.add(url)
+                company = str(record.get("company") or "").strip().lower()
+                if not company:
+                    summary = summary_by_script.get(
+                        str(record.get("script_path") or "")
+                    )
+                    if isinstance(summary, dict):
+                        company = str(summary.get("company") or "").strip().lower()
+                        url = _normalized_application_url(
+                            str(summary.get("apply_url") or "")
+                        )
+                        if url:
+                            urls.add(url)
+                if company:
+                    companies.add(company)
+    return urls, companies
 
 
 def _execution_resume_upload_error(
@@ -1560,6 +1659,11 @@ def _write_execution_audit(
         planned = len(summary_items)
         audit: dict[str, object] = {
             "schema_version": 1,
+            "execution_origin": (
+                "daily_sop"
+                if _daily_sop_execution_authorized()
+                else "direct_cli"
+            ),
             "counts": summarize_execution(records),
             "progress": {
                 "planned": planned,
@@ -1574,6 +1678,17 @@ def _write_execution_audit(
             ),
             "applications": records,
         }
+        health = next(
+            (
+                record.get("network_health_observation")
+                for record in reversed(records)
+                if isinstance(record, dict)
+                and isinstance(record.get("network_health_observation"), dict)
+            ),
+            None,
+        )
+        if health is not None:
+            audit["batch_health"] = {"network": dict(health)}
         audit.update(_resume_pdf_audit_fields(required_resume, "required_resume_pdf"))
         if tracking is not None:
             audit["tracking"] = tracking
@@ -2142,6 +2257,7 @@ def _run_pipeline_direct(
     anti_spam_blocked_companies = _anti_spam_blocked_companies(db)
     anti_spam_blocked_hosts = _anti_spam_blocked_hosts(db)
     failure_blocked_companies, failure_blocked_adapters = _failure_circuit_breakers(db)
+    prepared_urls, prepared_companies = _prepared_run_exclusions(out_dir)
     for job in jobs:
         if _was_previously_submitted(job, submitted_urls, submitted_titles):
             already_submitted.append(
@@ -2154,6 +2270,30 @@ def _run_pipeline_direct(
             )
             continue
         company_key = job.company.strip().lower()
+        if _normalized_application_url(job.apply_url or job.source_url) in prepared_urls:
+            screened_out.append(
+                {
+                    "title": job.title,
+                    "company": job.company,
+                    "apply_url": job.apply_url or job.source_url,
+                    "reasons": [
+                        "application already prepared in a sibling batch"
+                    ],
+                }
+            )
+            continue
+        if company_key and company_key in prepared_companies:
+            screened_out.append(
+                {
+                    "title": job.title,
+                    "company": job.company,
+                    "apply_url": job.apply_url or job.source_url,
+                    "reasons": [
+                        "company already prepared in a sibling batch"
+                    ],
+                }
+            )
+            continue
         if company_key and company_key in anti_spam_blocked_companies:
             skipped_terminal_outcomes.append(
                 {
@@ -2233,7 +2373,8 @@ def _run_pipeline_direct(
         eligible_jobs,
         min_score=min_score,
         limit=limit,
-        diversify_companies=True,
+        unique_companies=True,
+        startup_to_big=True,
     )
     shortlist_rows = shortlisted_jobs_to_dicts(shortlisted)
     shortlist_path.write_text(json.dumps(shortlist_rows, indent=2, ensure_ascii=True))
@@ -3057,15 +3198,19 @@ def verify_offline_examples(
                 payload=trace,
             )
 
-    records = execute_application_batch(
-        summary_items,
-        timeout_seconds=timeout_seconds,
-        use_gmail_verification=False,
-        required_resume_pdf=example_resume_pdf,
-        database_path=pipeline_dir / "job-agent.db",
-        on_agent_loop=capture_offline_loop,
-        unified_runtime=False,
-    )
+    # Offline verification must be deterministic and must use the packaged
+    # fake Playwright runtime, even when the developer's shell enables the
+    # optional LLM fallback for production execution.
+    with _temporary_llm_answers_env(False):
+        records = execute_application_batch(
+            summary_items,
+            timeout_seconds=timeout_seconds,
+            use_gmail_verification=False,
+            required_resume_pdf=example_resume_pdf,
+            database_path=pipeline_dir / "job-agent.db",
+            on_agent_loop=capture_offline_loop,
+            unified_runtime=False,
+        )
     _attach_resume_audit_fields(records, summary_items, example_resume_pdf)
     audit = {
         "schema_version": 1,
@@ -3512,6 +3657,10 @@ def execute_batch(
     ),
 ) -> None:
     """Execute runtime autofill scripts with automatic submit when no blockers remain."""
+    if _production_execution_path(summary, audit_out) and not _daily_sop_execution_authorized():
+        raise typer.BadParameter(
+            "Production execution must be started by scripts/daily_sop.py execute or run --execute"
+        )
     if timeout_seconds < 1:
         raise typer.BadParameter("--timeout-seconds must be greater than 0")
     if resume_existing_audit and retry_prior_terminal_outcome:
@@ -3938,6 +4087,10 @@ def run_and_execute_application_pipeline(
         raise typer.BadParameter("--limit must be greater than 0")
     if timeout_seconds < 1:
         raise typer.BadParameter("--timeout-seconds must be greater than 0")
+    if _production_execution_path(out_dir) and not _daily_sop_execution_authorized():
+        raise typer.BadParameter(
+            "Production execution must be started by scripts/daily_sop.py execute or run --execute"
+        )
 
     manifest = _run_pipeline(
         config_file,

@@ -796,6 +796,135 @@ def test_execute_application_batch_restores_ordinary_failure_sequence_from_db(
     assert records[1]["error"] == "failure_circuit_breaker_active"
 
 
+def test_execute_application_batch_verified_repair_retry_bypasses_old_failure_circuit(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD", "2")
+    db_path = tmp_path / "tracking.db"
+    conn = connect(db_path)
+    init_db(conn)
+    for index in range(2):
+        prior_job = Job(
+            title=f"Prior Role {index}",
+            company="Acme",
+            raw_jd="Role",
+            apply_url=(
+                f"https://jobs.ashbyhq.com/acme/prior-{index}/application"
+            ),
+        )
+        application_id = create_application(
+            conn,
+            create_job(conn, prior_job),
+            prior_job,
+        )
+        assert update_application_execution_status(
+            conn,
+            application_id,
+            "autofill_completed_blocked",
+        )
+    conn.close()
+
+    script = tmp_path / "verified-retry.js"
+    script.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        return CompletedProcess(
+            command,
+            0,
+            stdout=(
+                "Autofill stats: filled=18 review=0\n"
+                "Submission confirmed: matched 'thank you for applying'"
+            ),
+            stderr="",
+        )
+
+    records = execute_application_batch(
+        [
+            {
+                "application_id": "42",
+                "company": "Acme",
+                "title": "Verified Retry",
+                "apply_url": (
+                    "https://jobs.ashbyhq.com/acme/verified/application"
+                ),
+                "runtime_script_path": str(script),
+                "retry": True,
+                "retry_scope": "single_application",
+                "repair_verified": True,
+                "repair_cycle": 3,
+            }
+        ],
+        runner=fake_run,
+        database_path=db_path,
+    )
+
+    assert calls == [str(script)]
+    assert records[0]["status"] == "submitted"
+    assert records[0]["repair_verified"] is True
+    assert records[0]["repair_cycle"] == 3
+
+
+def test_execute_application_batch_unverified_retry_does_not_bypass_failure_circuit(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD", "2")
+    db_path = tmp_path / "tracking.db"
+    conn = connect(db_path)
+    init_db(conn)
+    for index in range(2):
+        prior_job = Job(
+            title=f"Prior Role {index}",
+            company="Acme",
+            raw_jd="Role",
+            apply_url=(
+                f"https://jobs.ashbyhq.com/acme/prior-{index}/application"
+            ),
+        )
+        application_id = create_application(
+            conn,
+            create_job(conn, prior_job),
+            prior_job,
+        )
+        assert update_application_execution_status(
+            conn,
+            application_id,
+            "autofill_completed_blocked",
+        )
+    conn.close()
+
+    script = tmp_path / "unverified-retry.js"
+    script.write_text("console.log('runtime')")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[1])
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    records = execute_application_batch(
+        [
+            {
+                "company": "Acme",
+                "title": "Unverified Retry",
+                "apply_url": (
+                    "https://jobs.ashbyhq.com/acme/unverified/application"
+                ),
+                "runtime_script_path": str(script),
+                "retry": True,
+                "retry_scope": "single_application",
+            }
+        ],
+        runner=fake_run,
+        database_path=db_path,
+    )
+
+    assert calls == []
+    assert records[0]["error"] == "failure_circuit_breaker_active"
+
+
 def test_execute_application_batch_records_unsupported_captcha_as_processing_error(tmp_path):
     script = tmp_path / "autofill-runtime.js"
     script.write_text("console.log('Submission processing error: captcha blocked automatic submission')")
@@ -1071,6 +1200,7 @@ def test_execute_application_batch_runs_generated_runtime_script_with_node(tmp_p
         pytest.skip("node executable is required for runtime execution test")
 
     monkeypatch.delenv("JOB_AGENT_GMAIL_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("JOB_AGENT_LLM_ANSWERS", "0")
 
     script = tmp_path / "autofill-runtime.js"
     script.write_text(
@@ -1273,6 +1403,36 @@ def test_python_runtime_in_process_enforces_timeout(tmp_path, monkeypatch):
         )
     if hasattr(signal, "getalarm"):
         assert signal.getalarm() == 0
+
+
+def test_python_runtime_in_process_injects_terminal_evidence_directory(
+    tmp_path,
+    monkeypatch,
+):
+    from job_agent import execution
+
+    package_dir = tmp_path / "application"
+    package_dir.mkdir()
+    script = package_dir / "autofill-runtime.js"
+    script.write_text("// runtime payload fixture")
+    captured = {}
+
+    monkeypatch.setattr(execution, "load_runtime_payload", lambda _path: {})
+
+    def fake_runtime(payload, *, action_runner, watchdog_deadline_seconds):
+        captured.update(payload)
+        return 0
+
+    monkeypatch.setattr(execution, "run_runtime_payload", fake_runtime)
+
+    result = execution._run_python_runtime_in_process(
+        str(script),
+        runtime_env=None,
+        action_runner=lambda name, effect, context, callback: None,
+    )
+
+    assert result.returncode == 0
+    assert captured["_runtimeScriptDir"] == str(package_dir.resolve())
 
 
 def test_execute_application_batch_maps_watchdog_triggered_exception_to_timeout(
@@ -1629,6 +1789,41 @@ def test_execute_application_batch_classifies_unavailable_application_form(tmp_p
     assert records[0]["submit_gate"] == "application_form_unavailable"
     assert records[0]["error"] == "application_form_unavailable"
     assert records[0]["evidence"] == str(evidence.resolve())
+    assert records[0]["recovery_plan"]["strategy"] == "application_form_reconciliation"
+
+
+def test_execute_application_batch_opens_global_network_health_circuit(tmp_path, monkeypatch):
+    class Error(Exception):
+        pass
+
+    scripts = []
+    for index in range(4):
+        script = tmp_path / f"autofill-{index}.js"
+        script.write_text("runtime")
+        scripts.append(script)
+
+    def fake_run(_command, **_kwargs):
+        raise Error("net::ERR_NAME_NOT_RESOLVED")
+
+    monkeypatch.setenv("JOB_AGENT_NETWORK_HEALTH_CIRCUIT_THRESHOLD", "3")
+    records = execute_application_batch(
+        [
+            {
+                "company": f"Company {index}",
+                "title": "Engineer",
+                "runtime_script_path": str(script),
+            }
+            for index, script in enumerate(scripts)
+        ],
+        runner=fake_run,
+    )
+
+    assert [record["error"] for record in records[:3]] == [
+        "browser_navigation_network_error"
+    ] * 3
+    assert records[2]["network_health_observation"]["status"] == "open"
+    assert records[3]["submit_gate"] == "network_health_circuit_active"
+    assert records[3]["recovery_plan"]["strategy"] == "batch_network_health_recovery"
 
 
 def test_execute_application_batch_clears_stale_terminal_evidence_before_rerun(tmp_path):

@@ -29,6 +29,40 @@ def test_watchdog_process_discovery_finds_playwright_driver(monkeypatch):
     assert python_runtime._playwright_driver_pids() == [4242]
 
 
+def test_normalized_field_signature_is_stable_across_rerender_churn():
+    first = [
+        {"kind": "fill", "tag": "input", "type": "text", "id": "a", "name": "a", "label": "First Name", "required": True},
+        {"kind": "combobox", "tag": "select", "type": None, "id": "b", "name": "b", "label": "Country", "required": True},
+    ]
+    rerendered = [
+        {"kind": "combobox", "tag": "select", "type": None, "id": "b2", "name": "b2", "label": "Country", "required": True},
+        {"kind": "fill", "tag": "input", "type": "text", "id": "a2", "name": "a2", "label": "First Name", "required": True},
+    ]
+    assert python_runtime._normalized_field_signature(first) == (
+        python_runtime._normalized_field_signature(rerendered)
+    )
+    advanced = [
+        {"kind": "fill", "tag": "input", "type": "text", "id": "c", "name": "c", "label": "Veteran Status", "required": True}
+    ]
+    assert python_runtime._normalized_field_signature(advanced) != (
+        python_runtime._normalized_field_signature(first)
+    )
+
+
+def test_normalized_page_url_strips_fragment_and_volatile_tracking_params():
+    raw = (
+        "https://careers.example.com/jobs/1234?gh_jid=5678&gh_src=referral"
+        "&utm_source=feed&q=engineer#section"
+    )
+    normalized = python_runtime._normalized_page_url(raw)
+    assert "#section" not in normalized
+    assert "gh_jid" not in normalized
+    assert "gh_src" not in normalized
+    assert "utm_source" not in normalized
+    assert "q=engineer" in normalized
+    assert normalized == python_runtime._normalized_page_url(raw)
+
+
 class _FakeProcess:
     def __init__(self, pid, command):
         self.pid = pid
@@ -58,6 +92,16 @@ def test_captcha_retry_is_bounded_to_one_recovery_attempt():
     assert "range(1, CAPTCHA_RECOVERY_ATTEMPTS + 1)" in source
     assert python_runtime.CAPTCHA_RECOVERY_ATTEMPTS == 1
     assert "range(1, _self_heal_passes() + 1)" not in source
+
+
+def test_recaptcha_retry_restores_api_and_requests_a_fresh_solver_token():
+    source = inspect.getsource(python_runtime.run_runtime_payload)
+    retry_start = source.index("# Native reCAPTCHA v3 token fallback on retry")
+    retry_end = source.index("retry_submit = _find_button", retry_start)
+    retry_source = source[retry_start:retry_end]
+
+    assert "_restore_native_recaptcha(page, retry_challenge)" in retry_source
+    assert "retry_captcha = _solve_captcha_if_configured(page)" in retry_source
 
 
 def test_blocking_review_does_not_promote_captcha_presence_to_processing_error():
@@ -151,13 +195,311 @@ def test_combobox_available_options_diagnostic_is_scoped_to_open_popup():
 
     assert '[data-automation-id="menuItem"], [role="option"], [data-automation-id="radioBtn"], li' not in source
     assert '[role="listbox"], [role="menu"], [data-automation-id="activeListContainer"]' in source
+    assert "controlled.length ? controlled : globalPopups" in source
 
 
 def test_combobox_dynamic_fallback_handles_previous_employment_and_single_job_code():
-    source = inspect.getsource(python_runtime._apply_fill)
+    source = inspect.getsource(python_runtime._dynamic_combobox_fallback_choice)
 
     assert '"never worked" in _norm(text)' in source
     assert "_looks_like_job_code_option(text)" in source
+
+
+def test_dynamic_combobox_fallback_uses_grounded_binary_polarity_and_live_job_code():
+    sponsorship = {
+        "label": "Will you require sponsorship for work authorization in the future?*"
+    }
+    job_code = {
+        "label": "Please indicate the job code number in the job posting here.*"
+    }
+
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        sponsorship,
+        ["Yes", "No"],
+        "I require/will require employer sponsorship to obtain work authorization.",
+    ) == "Yes"
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        job_code,
+        ["SWEI4AMPI4"],
+        "7960680",
+    ) == "SWEI4AMPI4"
+
+
+def test_dynamic_combobox_fallback_generates_from_live_options_for_non_sensitive_question(
+    monkeypatch,
+):
+    observed = {}
+
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            observed["options"] = field["options"]
+            observed["label"] = label
+            observed["profile"] = profile
+            return "ML Infrastructure"
+
+    monkeypatch.setattr(python_runtime, "llm_answers_enabled", lambda: True)
+    monkeypatch.setattr(
+        python_runtime,
+        "get_llm_answer_resolver",
+        lambda: Resolver(),
+    )
+    profile = {"skills": ["Kubernetes", "PyTorch"], "projects": []}
+    field = {
+        "label": "Which team best matches your background?",
+        "role": "combobox",
+    }
+
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Product Design", "ML Infrastructure", "Sales Engineering"],
+        "No direct saved answer",
+        profile,
+    ) == "ML Infrastructure"
+    assert observed == {
+        "options": ["Product Design", "ML Infrastructure", "Sales Engineering"],
+        "label": "Which team best matches your background?",
+        "profile": profile,
+    }
+
+
+def test_dynamic_combobox_fallback_can_generate_without_a_preplanned_answer(monkeypatch):
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            assert field["options"] == ["Product Design", "ML Infrastructure"]
+            return "ML Infrastructure"
+
+    monkeypatch.setattr(
+        python_runtime,
+        "get_llm_answer_resolver",
+        lambda: Resolver(),
+    )
+
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        {
+            "label": "Which team best matches your background?",
+            "role": "combobox",
+        },
+        ["Product Design", "ML Infrastructure"],
+        "",
+        {"skills": ["PyTorch"]},
+    ) == "ML Infrastructure"
+
+
+def test_unknown_dynamic_combobox_defers_until_live_options_are_visible(monkeypatch):
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            raise AssertionError("planning must wait for the live option set")
+
+    monkeypatch.setattr(
+        python_runtime,
+        "get_llm_answer_resolver",
+        lambda: Resolver(),
+    )
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Which team best matches your background?",
+        "required": True,
+        "options": [],
+    }
+
+    assert python_runtime._plan_field(
+        field,
+        {"skills": ["PyTorch"]},
+        None,
+    ) == {
+        "action": "combobox",
+        "value": "",
+        "defer_live_options": True,
+    }
+
+
+def test_explicit_dynamic_combobox_answer_does_not_generate_a_conflicting_guess(
+    monkeypatch,
+):
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            raise AssertionError("an approved answer must not be regenerated")
+
+    monkeypatch.setattr(
+        python_runtime,
+        "get_llm_answer_resolver",
+        lambda: Resolver(),
+    )
+    question = "What intern season are you interested in?*"
+
+    assert python_runtime._plan_field(
+        {
+            "kind": "single",
+            "tag": "input",
+            "type": "text",
+            "role": "combobox",
+            "label": question,
+            "required": True,
+            "options": [],
+        },
+        {"answers": {question: "Fall 2026"}},
+        None,
+    ) == {"action": "combobox", "value": "Fall 2026"}
+
+
+def test_dynamic_combobox_fallback_does_not_generate_candidate_facts(monkeypatch):
+    monkeypatch.setattr(python_runtime, "llm_answers_enabled", lambda: True)
+
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            raise AssertionError("candidate facts must not reach option generation")
+
+    monkeypatch.setattr(
+        python_runtime,
+        "get_llm_answer_resolver",
+        lambda: Resolver(),
+    )
+
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        {"label": "What is your nationality?", "role": "combobox"},
+        ["China", "United States", "Canada"],
+        "No direct saved answer",
+        {"location": "Jersey City, NJ"},
+    ) is None
+
+
+def test_regular_commute_question_uses_explicit_approved_screening_rule():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": (
+            "Will you be able to regularly commute and work in an office "
+            "in job posting location?"
+        ),
+        "required": True,
+        "options": [],
+    }
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "screening_answer_rules": [
+            {
+                "patterns": ["regularly commute and work in an office"],
+                "answer": "Yes",
+            }
+        ],
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_source_checkbox_group_uses_section_context_and_saved_source():
+    field = {
+        "kind": "checkboxgroup",
+        "type": "checkbox",
+        "label": "Please check all that apply:",
+        "section": "How did you hear about Hive?",
+        "required": True,
+        "options": [
+            "Friend",
+            "Recruiter/current employee",
+            "LinkedIn",
+            "Other",
+        ],
+    }
+    profile = {"answers": {"How did you hear about us?": "LinkedIn"}}
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "checkmany",
+        "options": ["LinkedIn"],
+    }
+
+
+def test_option_style_sensitive_checkbox_uses_question_section():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "checkbox",
+        "label": "Yes",
+        "section": "Are you currently authorized to work in the United States? *",
+        "required": True,
+    }
+    profile = {
+        "sensitive_answers": {
+            "work_authorization_us": {
+                "patterns": ["authorized to work in the united states"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "check"
+    }
+
+    opposite = dict(field, label="No", value="No")
+    assert python_runtime._plan_field(opposite, profile, None) == {
+        "action": "skip",
+        "reason": "option polarity does not match approved answer",
+        "sensitive": True,
+        "blocking": False,
+    }
+
+
+def test_export_control_not_applicable_selects_page_none_option():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "EXPORT CONTROLS - eligibility under U.S. export controls.*",
+        "required": True,
+        "options": [
+            "A United States citizen or national",
+            "A person lawfully admitted for permanent residence",
+            "None of the above",
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "us_export_control_status": {
+                "patterns": ["export control"],
+                "answer": "Not applicable",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "None of the above",
+    }
+
+
+def test_highest_education_saved_master_degree_matches_plural_option():
+    field = {
+        "label": "Please indicate your highest level of education*",
+        "role": "combobox",
+        "required": True,
+        "options": [
+            {"label": option, "value": option}
+            for option in (
+                "None",
+                "High School",
+                "Associates",
+                "Bachelors",
+                "Masters",
+                "Doctorate",
+            )
+        ],
+    }
+
+    assert python_runtime._matching_options(field, "Master's degree") == [
+        {"label": "Masters", "value": "Masters"}
+    ]
 
 
 def test_coinbase_runtime_url_uses_greenhouse_embed_to_avoid_cloudflare():
@@ -377,10 +719,221 @@ def test_combobox_progress_deadline_is_bounded_and_raises_a_specific_error(
         )
 
 
+def test_fill_page_enforces_runtime_wall_deadline(monkeypatch):
+    class Page:
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    def raise_deadline():
+        raise RuntimeError("autofill runtime wall-clock deadline exceeded")
+
+    monkeypatch.setattr(
+        python_runtime,
+        "_ensure_application_fields_ready",
+        lambda _page: [],
+    )
+    monkeypatch.setattr(python_runtime, "_scrape_fields", lambda _page: [])
+    monkeypatch.setattr(python_runtime, "_audit_required_fields", lambda _page: [])
+    monkeypatch.setattr(
+        python_runtime,
+        "_check_runtime_wall_deadline",
+        raise_deadline,
+    )
+
+    with pytest.raises(RuntimeError, match="wall-clock"):
+        python_runtime._fill_page(Page(), {}, None)
+
+
+def test_fill_page_blocks_when_fill_time_budget_is_exhausted(monkeypatch):
+    class Page:
+        def wait_for_timeout(self, milliseconds):
+            pass
+
+    monkeypatch.setattr(
+        python_runtime,
+        "_ensure_application_fields_ready",
+        lambda _page: [],
+    )
+    monkeypatch.setattr(python_runtime, "_scrape_fields", lambda _page: [])
+    monkeypatch.setattr(python_runtime, "_audit_required_fields", lambda _page: [])
+    monkeypatch.setattr(
+        python_runtime,
+        "_check_runtime_wall_deadline",
+        lambda: None,
+    )
+    previous = python_runtime._FILL_TIME_BUDGET_SECONDS[0]
+    python_runtime._FILL_TIME_BUDGET_SECONDS[0] = -1.0
+    try:
+        result = python_runtime._fill_page(Page(), {}, None)
+    finally:
+        python_runtime._FILL_TIME_BUDGET_SECONDS[0] = previous
+
+    assert result["filled"] == []
+    assert any(
+        item.get("blocking") and "budget" in str(item.get("reason") or "")
+        for item in result["review"]
+    )
+
+
 def test_option_matching_expands_location_state_and_country_abbreviations():
     assert python_runtime._option_matches(
         "Jersey City, New Jersey, United States", "Jersey City, NJ, USA"
     )
+
+
+def test_best_option_match_prefers_years_range_containing_answer():
+    options = [
+        "0-1 years",
+        "1-3 years",
+        "3-5 years",
+        "5-7 years",
+        "7+ years",
+    ]
+
+    assert python_runtime._best_option_match(options, "4 years") == "3-5 years"
+    assert python_runtime._best_option_match(options, "5 years") == "3-5 years"
+    assert python_runtime._best_option_match(options, "8 years") == "7+ years"
+
+
+def test_best_option_match_rejects_low_confidence_overlap():
+    assert python_runtime._best_option_match(
+        ["New York office", "San Francisco office"],
+        "office",
+    ) is None
+
+
+def test_candidate_commitments_require_exact_approved_answers():
+    onsite_label = "Are you willing to work onsite from our New York City office 5 days/week?*"
+    familiarity_label = "How familiar were you with our company before applying?*"
+    season_label = "What intern season are you interested in?*"
+    product_label = "Have you used our product before?*"
+    sms_label = (
+        "We would like to contact you via SMS or WhatsApp to provide updates. "
+        "Mark yes if you agree.*"
+    )
+    relocation_only = {
+        "answers": {"Are you open to relocation?": "Yes"},
+        "sensitive_answers": {
+            "relocation": {
+                "approved": True,
+                "answer": "Yes",
+                "patterns": ["relocation"],
+            }
+        },
+    }
+
+    assert python_runtime._priority_auto_answer(onsite_label, relocation_only) is None
+    assert python_runtime._auto_answer(familiarity_label, relocation_only) is None
+    assert python_runtime._auto_answer(season_label, relocation_only) is None
+
+    approved = {
+        **relocation_only,
+        "answers": {
+            **relocation_only["answers"],
+            onsite_label: "Yes",
+            familiarity_label: "Somewhat familiar",
+            season_label: "Fall 2026",
+        },
+    }
+    assert python_runtime._priority_auto_answer(onsite_label, approved) == "Yes"
+    assert python_runtime._auto_answer(familiarity_label, approved) == "Somewhat familiar"
+    assert python_runtime._auto_answer(season_label, approved) == "Fall 2026"
+
+    approved_rules = {
+        "answers": {
+            "Would you like to receive communications via SMS and/or WhatsApp": "No",
+            "Which area interests you most?": "AI & Machine Learning",
+        },
+        "screening_answer_rules": [
+            {"patterns": ["onsite", "in office"], "answer": "Yes"},
+            {"patterns": ["have you used", "used our product"], "answer": "No"},
+            {"patterns": ["sms"], "answer": "Yes"},
+        ],
+    }
+    assert python_runtime._priority_auto_answer(onsite_label, approved_rules) == "Yes"
+    assert python_runtime._auto_answer(product_label, approved_rules) == "No"
+    # The semantically identical exact answer is more specific than the broad
+    # SMS standing rule, so it must win.
+    assert python_runtime._auto_answer(sms_label, approved_rules) == "No"
+    # Unrelated fuzzy overlap must not become an internship preference.
+    assert python_runtime._auto_answer(season_label, approved_rules) is None
+
+
+def test_candidate_fact_plan_never_uses_fuzzy_answer_overlap():
+    field = {
+        "kind": "radiogroup",
+        "label": "Do you have a minimum of 3 years of experience, not including internships?",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "answers": {
+            "Do you have over 2 years of industry work experience (non-internship experience)?": "Yes"
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "skip",
+        "reason": "candidate fact needs explicit approved answer",
+        "sensitive": False,
+        "blocking": True,
+    }
+
+
+def test_nationality_and_english_level_require_explicit_profile_facts():
+    for label in ("What is your nationality?", "What is your English level?*"):
+        field = {
+            "kind": "single",
+            "tag": "input",
+            "type": "text",
+            "role": "combobox",
+            "label": label,
+            "required": True,
+            "options": ["C1", "C2", "United States", "China"],
+        }
+        assert python_runtime._plan_field(field, {"country": "United States"}, None) == {
+            "action": "skip",
+            "reason": "candidate fact needs explicit approved answer",
+            "sensitive": False,
+            "blocking": True,
+        }
+
+
+def test_exceptional_ability_prompt_can_use_grounded_generation_when_allowed():
+    label = (
+        "Please provide us with 3-4 examples highlighting your exceptional "
+        "ability. This is your moment to WOW us! First example:*"
+    )
+
+    assert not python_runtime._requires_user_authored_answer(label, {})
+    assert python_runtime._auto_answer(label, {}) is None
+
+    approved_profile = {
+        "screening_answer_rules": [
+            {
+                "patterns": ["examples highlighting your exceptional ability"],
+                "answer": "1. Built an approved, measured project example.",
+            }
+        ]
+    }
+    field = {
+        "kind": "single",
+        "tag": "textarea",
+        "type": "textarea",
+        "label": label,
+        "required": True,
+    }
+    assert python_runtime._plan_field(field, approved_profile, None) == {
+        "action": "fill",
+        "value": "1. Built an approved, measured project example.",
+    }
+
+
+def test_numeric_range_bounds_parses_dash_plus_and_single_values():
+    assert python_runtime._numeric_range_bounds("3-5 years") == (3.0, 5.0)
+    assert python_runtime._numeric_range_bounds("7+ years") == (7.0, float("inf"))
+    assert python_runtime._numeric_range_bounds("5 years") == (5.0, 5.0)
+    assert python_runtime._numeric_range_bounds("United States") is None
 
 
 def test_selector_for_prefers_unique_marker_over_shared_name():
@@ -445,7 +998,7 @@ def test_fill_page_discovers_conditional_field_revealed_by_prior_answer(monkeypa
         lambda field, *_args: {"action": "fill", "value": field["id"]},
     )
 
-    def apply_fill(current_page, field, _plan):
+    def apply_fill(current_page, field, _plan, _profile=None):
         if field["id"] == "trigger":
             current_page.revealed = True
         return field["id"]
@@ -456,6 +1009,59 @@ def test_fill_page_discovers_conditional_field_revealed_by_prior_answer(monkeypa
     result = python_runtime._fill_page(page, {}, None)
 
     assert [item["label"] for item in result["filled"]] == ["First name", "Current city"]
+    assert result["review"] == []
+
+
+def test_fill_page_defers_disabled_conditional_select_until_dependency_is_ready(monkeypatch):
+    class Page:
+        def __init__(self):
+            self.revealed = False
+            self.waits: list[int] = []
+
+        def wait_for_timeout(self, milliseconds):
+            self.waits.append(milliseconds)
+
+    trigger = {
+        "kind": "single", "tag": "input", "type": "text", "id": "trigger",
+        "label": "Education level", "required": True,
+    }
+    education = {
+        "kind": "single", "tag": "select", "type": "select", "id": "school",
+        "label": "School", "required": True, "disabled": True,
+    }
+    page = Page()
+    applied: list[str] = []
+
+    monkeypatch.setattr(
+        python_runtime,
+        "_scrape_fields",
+        lambda current_page: [
+            trigger,
+            {**education, "disabled": not current_page.revealed},
+        ],
+    )
+    monkeypatch.setattr(
+        python_runtime,
+        "_plan_field",
+        lambda field, *_args: {"action": "select" if field["id"] == "school" else "fill", "value": field["id"]},
+    )
+
+    def apply_fill(current_page, field, _plan, _profile=None):
+        applied.append(field["id"])
+        if field["id"] == "trigger":
+            current_page.revealed = True
+        return field["id"]
+
+    monkeypatch.setattr(python_runtime, "_apply_fill", apply_fill)
+    monkeypatch.setattr(python_runtime, "_audit_required_fields", lambda _page: [])
+
+    result = python_runtime._fill_page(page, {}, None)
+
+    assert applied == ["trigger", "school"]
+    assert [item["label"] for item in result["filled"]] == [
+        "Education level",
+        "School",
+    ]
     assert result["review"] == []
 
 
@@ -1085,6 +1691,30 @@ def test_workday_date_sections_use_calendar_and_verify_readback(monkeypatch):
     assert page.waited == [250, 700]
 
 
+def test_application_date_field_uses_todays_date_in_mm_dd_yy(monkeypatch):
+    class _Today:
+        month = 8
+        day = 11
+        year = 2026
+
+    monkeypatch.setattr(
+        python_runtime,
+        "date",
+        type("Date", (), {"today": staticmethod(lambda: _Today())}),
+    )
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "label": "Today's Date of Application (MM/DD/YY Format)*",
+        "required": True,
+    }
+
+    plan = python_runtime._plan_field(field, {}, None)
+
+    assert plan == {"action": "fill", "value": "08/11/26"}
+
+
 def test_workday_history_date_section_uses_profile_value_without_sensitive_gate():
     field = {
         "kind": "single",
@@ -1678,6 +2308,60 @@ def test_optional_ai_screening_consent_is_left_unchecked():
     assert plan == {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
 
 
+def test_plan_field_skips_if_yes_clearance_followup_when_gate_is_no():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "If Yes, Which level of Security Clearance Do You Hold?*",
+        "required": True,
+        "options": [],
+    }
+    profile = {
+        "sensitive_answers": {
+            "active_security_clearance": {
+                "patterns": ["active security clearance", "hold a security clearance"],
+                "answer": "No",
+                "approved": True,
+            }
+        },
+        "answers": {},
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "skip"
+    assert plan["blocking"] is False
+    assert "not applicable" in plan["reason"]
+
+
+def test_plan_field_keeps_if_yes_clearance_followup_blocked_when_gate_is_yes():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "If Yes, Which level of Security Clearance Do You Hold?*",
+        "required": True,
+        "options": [],
+    }
+    profile = {
+        "sensitive_answers": {
+            "active_security_clearance": {
+                "patterns": ["active security clearance"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+        "answers": {},
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert "not applicable" not in plan["reason"]
+
+
 def test_required_terms_and_conditions_consent_is_checked():
     plan = python_runtime._plan_field(
         {
@@ -2095,7 +2779,52 @@ def test_successful_readback_filter_removes_stale_low_risk_invalid_review():
         },
     ]
 
-    assert python_runtime._filter_successful_readback_reviews(review, filled) == [review[1]]
+    assert python_runtime._filter_successful_readback_reviews(review, filled) == []
+
+
+def test_successful_readback_filter_covers_citizen_and_authorization_groups():
+    review = [
+        {
+            "label": "Are you a U.S. citizen?✱YesNo",
+            "reason": "browser reports field as invalid",
+            "blocking": True,
+        },
+        {
+            "label": "Are you legally authorized to work in the United States?✱",
+            "reason": "browser reports field as invalid",
+            "blocking": True,
+        },
+    ]
+    filled = [
+        {
+            "label": "Are you a U.S. citizen?",
+            "action": "check",
+            "readback": "selected: No",
+        },
+        {
+            "label": "Are you legally authorized to work in the United States?",
+            "action": "check",
+            "readback": "selected: Yes",
+        },
+    ]
+
+    assert python_runtime._filter_successful_readback_reviews(review, filled) == []
+
+
+def test_required_audit_keeps_invalid_without_successful_readback():
+    review: list[dict] = []
+
+    python_runtime._append_required_audit(
+        review,
+        [
+            {
+                "label": "Are you a U.S. citizen?",
+                "reason": "browser reports field as invalid",
+            }
+        ],
+    )
+
+    assert len(review) == 1
 
 
 def test_map_text_value_does_not_guess_missing_work_or_education():
@@ -2138,9 +2867,15 @@ def test_map_text_value_does_not_treat_schoolwork_essay_as_school_field():
 
 
 def test_auto_answer_handles_perpay_new_grad_screening_fields():
+    onsite_label = "I understand this is an in-person role in Philadelphia, PA.*"
+    career_fair_label = "Did you attend a 2026 spring career fair?*"
     profile = {
         "target_company": "Perpay",
-        "answers": {"Are you open to relocation?": "Yes"},
+        "answers": {
+            "Are you open to relocation?": "Yes",
+            onsite_label: "Yes",
+            career_fair_label: "No",
+        },
         "sensitive_answers": {
             "relocation": {
                 "patterns": ["relocation", "relocate"],
@@ -2157,10 +2892,10 @@ def test_auto_answer_handles_perpay_new_grad_screening_fields():
     }
 
     assert python_runtime._auto_answer(
-        "I understand this is an in-person role in Philadelphia, PA.*",
+        onsite_label,
         profile,
     ) == "Yes"
-    assert python_runtime._auto_answer("Did you attend a 2026 spring career fair?*", profile) == "No"
+    assert python_runtime._auto_answer(career_fair_label, profile) == "No"
     assert python_runtime._auto_answer(
         "Do you have a personal project you're proud of that you'd like to share?*",
         profile,
@@ -2391,6 +3126,10 @@ def test_airbnb_greenhouse_privacy_policy_uses_exact_acknowledgement():
             "privacy_consent": {"patterns": ["privacy policy"], "answer": "Yes", "approved": True},
         },
         "answers": {},
+        "screening_answer_rules": [
+            {"patterns": ["non-compete", "non-solicitation"], "answer": "No"},
+            {"patterns": ["ever worked for Airbnb"], "answer": "No"},
+        ],
     }
     privacy = {
         "kind": "single",
@@ -2410,6 +3149,10 @@ def test_airbnb_greenhouse_privacy_policy_uses_exact_acknowledgement():
 def test_airbnb_greenhouse_screening_fields_use_truthful_specific_answers():
     profile = {
         "target_company": "airbnb",
+        "screening_answer_rules": [
+            {"patterns": ["non-compete or non-solicitation"], "answer": "No"},
+            {"patterns": ["ever worked for Airbnb"], "answer": "No"},
+        ],
         "sensitive_answers": {
             "work_authorization_us": {
                 "patterns": ["authorized to work"],
@@ -2469,6 +3212,12 @@ def test_xai_greenhouse_screening_fields_use_truthful_specific_answers():
     profile = {
         "target_company": "xAI",
         "answers": {"How did you hear about us?": "Company website"},
+        "screening_answer_rules": [
+            {
+                "patterns": ["SpaceXAI employment history"],
+                "answer": "I have never worked for SpaceX or SpaceXAI",
+            }
+        ],
     }
     employment = {
         "kind": "single",
@@ -2559,6 +3308,29 @@ def test_company_specific_contract_work_screening_defaults_to_no():
     }
 
 
+def test_company_specific_employment_combobox_defaults_to_no():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Have you been employed with The Trade Desk?*",
+        "required": True,
+        "options": ["Yes", "No"],
+    }
+    assert python_runtime._plan_field(
+        field,
+        {
+            "answers": {},
+            "personal_us_company_employment_history": "Never worked for a United States company.",
+        },
+        None,
+    ) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
 def test_workday_compensation_factor_and_authorization_select_one_use_yes_no():
     profile = {
         "answers": {},
@@ -2602,7 +3374,18 @@ def test_workday_compensation_factor_and_authorization_select_one_use_yes_no():
 
 
 def test_bms_workday_compliance_select_one_fields_use_deterministic_answers():
-    profile = {"answers": {}}
+    profile = {
+        "answers": {},
+        "screening_answer_rules": [
+            {"patterns": ["relatives", "romantic partners"], "answer": "No"},
+            {"patterns": ["willing to commute"], "answer": "Yes"},
+            {"patterns": ["List of Excluded"], "answer": "No"},
+            {"patterns": ["debarred", "debarment"], "answer": "No"},
+            {"patterns": ["licensed physician"], "answer": "No"},
+            {"patterns": ["investigated", "investigational drugs"], "answer": "No"},
+            {"patterns": ["pending inquiry", "administrative action"], "answer": "No"},
+        ],
+    }
     labels_and_answers = [
         (
             "BMS seeks to avoid conflicts of interest. Do you have relatives "
@@ -3157,6 +3940,21 @@ def test_field_scraper_excludes_controls_hidden_by_computed_visibility():
     assert source.index('style.visibility === "hidden"') < source.index("if (node.offsetParent)")
 
 
+def test_required_audit_treats_aria_selected_custom_choices_as_selected():
+    source = inspect.getsource(python_runtime._audit_required_fields)
+
+    assert 'candidate.getAttribute("aria-selected") === "true"' in source
+    assert "choiceSelected(candidate)" in source
+    assert "!choiceSelected(control)" in source
+
+
+def test_application_iframe_discovery_accepts_non_greenhouse_application_frames():
+    source = inspect.getsource(python_runtime._embedded_application_frame_url)
+
+    assert "application|job_app|apply" in source
+    assert "privacy|notice|policy|terms|candidate" in source
+
+
 def test_required_audit_treats_same_name_checkbox_group_as_satisfied_when_any_checked():
     sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
@@ -3176,6 +3974,220 @@ def test_required_audit_treats_same_name_checkbox_group_as_satisfied_when_any_ch
         )
 
         assert python_runtime._audit_required_fields(page) == []
+        browser.close()
+
+
+def test_scraper_preserves_question_context_for_single_yes_checkbox():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <div data-question="onsite-commitment">
+                <div data-field-label>
+                  I understand that this internship requires working on-site 5 days/week. *
+                </div>
+                <label><input type="checkbox" name="onsite" required value="Yes"> Yes</label>
+              </div>
+            </form>
+            """
+        )
+
+        checkbox = next(
+            field
+            for field in python_runtime._scrape_fields(page)
+            if field.get("type") == "checkbox"
+        )
+
+        assert checkbox["label"] == "Yes"
+        assert "requires working on-site 5 days/week" in checkbox["section"]
+        assert checkbox["required"] is True
+        browser.close()
+
+
+def test_ashby_education_date_selects_infer_subfield_from_entry_context():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <div data-field-path="_systemfield_education_history">
+              <div class="ashby-application-form-field-entry">
+                <div>Education History</div>
+                <div>Start Date</div>
+                <select placeholder="Month...">
+                  <option value="">Month...</option>
+                  <option value="September">September</option>
+                </select>
+                <select placeholder="Year...">
+                  <option value="">Year...</option>
+                  <option value="2024">2024</option>
+                </select>
+                <div>End Date</div>
+                <select placeholder="Month...">
+                  <option value="">Month...</option>
+                  <option value="May">May</option>
+                </select>
+                <select placeholder="Year...">
+                  <option value="">Year...</option>
+                  <option value="2026">2026</option>
+                </select>
+                <label><input type="checkbox"> Still Student?</label>
+              </div>
+            </div>
+            """
+        )
+
+        fields = python_runtime._scrape_fields(page)
+        by_subfield = {
+            field.get("ashbyEduSubfield"): field
+            for field in fields
+            if field.get("ashbyEduSubfield")
+        }
+
+        assert by_subfield["start_month"]["placeholder"] == "Month..."
+        assert by_subfield["start_year"]["placeholder"] == "Year..."
+        assert by_subfield["end_month"]["placeholder"] == "Month..."
+        assert by_subfield["end_year"]["placeholder"] == "Year..."
+        browser.close()
+
+
+def test_ashby_education_dates_detect_placeholder_option_and_enrich_labels():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <div data-field-path="_systemfield_education_history">
+              <label class="ashby-application-form-question-title" for="_systemfield_education_history">Education History</label>
+              <label class="ashby-application-form-question-title" for="_systemfield_education_history-school">School</label>
+              <input placeholder="Search schools..." role="combobox">
+              <label class="ashby-application-form-question-title" for="_systemfield_education_history-degree">Degree</label>
+              <input id="_systemfield_education_history-degree" placeholder="e.g. Bachelor of Science">
+              <label class="ashby-application-form-question-title" for="_systemfield_education_history-major">Field of Study</label>
+              <input id="_systemfield_education_history-major" placeholder="e.g. Computer Science">
+              <label class="ashby-application-form-question-title" for="_systemfield_education_history-startDate">Start Date</label>
+              <div id="_systemfield_education_history-startDate">
+                <select><option disabled hidden value="">Month...</option><option value="9">September</option></select>
+                <select><option disabled hidden value="">Year...</option><option value="2024">2024</option></select>
+              </div>
+              <label class="ashby-application-form-question-title" for="_systemfield_education_history-endDate">End Date</label>
+              <div id="_systemfield_education_history-endDate">
+                <select><option disabled hidden value="">Month...</option><option value="5">May</option></select>
+                <select><option disabled hidden value="">Year...</option><option value="2026">2026</option></select>
+              </div>
+              <label><input type="checkbox"> Still Student?</label>
+            </div>
+            """
+        )
+
+        fields = python_runtime._scrape_fields(page)
+        by_subfield = {
+            field.get("ashbyEduSubfield"): field
+            for field in fields
+            if field.get("ashbyEduSubfield")
+        }
+
+        assert by_subfield["start_month"]["label"] == "Education History Start Date Month"
+        assert by_subfield["start_year"]["label"] == "Education History Start Date Year"
+        assert by_subfield["end_month"]["label"] == "Education History End Date Month"
+        assert by_subfield["end_year"]["label"] == "Education History End Date Year"
+        assert by_subfield["school"]["label"] == "Education History School"
+        assert by_subfield["degree"]["label"] == "Education History Degree"
+        assert by_subfield["field"]["label"] == "Education History Field of Study"
+        assert by_subfield["still_student"]["label"] == "Still Student?"
+
+        profile = {
+            "education": [
+                {
+                    "school": "Stevens Institute of Technology",
+                    "degree": "Master's",
+                    "field": "Computer Science",
+                    "start_date": "2024-09",
+                    "end_date": "2026-05",
+                }
+            ]
+        }
+        assert python_runtime._plan_field(by_subfield["start_month"], profile, None) == {
+            "action": "select",
+            "value": "September",
+        }
+        assert python_runtime._plan_field(by_subfield["start_year"], profile, None) == {
+            "action": "select",
+            "value": "2024",
+        }
+        assert python_runtime._plan_field(by_subfield["end_month"], profile, None) == {
+            "action": "select",
+            "value": "May",
+        }
+        assert python_runtime._plan_field(by_subfield["end_year"], profile, None) == {
+            "action": "select",
+            "value": "2026",
+        }
+        browser.close()
+
+
+def test_dynamic_combobox_generates_from_live_options_and_commits_with_readback(
+    monkeypatch,
+):
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            assert field["options"] == ["Product Design", "ML Infrastructure"]
+            return "ML Infrastructure"
+
+    monkeypatch.setattr(
+        python_runtime,
+        "get_llm_answer_resolver",
+        lambda: Resolver(),
+    )
+    profile = {"skills": ["PyTorch", "Kubernetes"]}
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <span id="team-question">Which team best matches your background? *</span>
+              <button id="team" type="button" role="combobox"
+                aria-labelledby="team-question" aria-controls="team-options"
+                aria-expanded="false"
+                onclick="document.getElementById('team-options').style.display='block'; this.setAttribute('aria-expanded','true')">
+                Select one
+              </button>
+              <div id="team-options" role="listbox" style="display:none">
+                <button type="button" role="option"
+                  onclick="document.getElementById('team').textContent='Product Design'; document.getElementById('team').setAttribute('aria-expanded','false'); this.parentElement.style.display='none'">
+                  Product Design
+                </button>
+                <button type="button" role="option"
+                  onclick="document.getElementById('team').textContent='ML Infrastructure'; document.getElementById('team').setAttribute('aria-expanded','false'); this.parentElement.style.display='none'">
+                  ML Infrastructure
+                </button>
+              </div>
+            </form>
+            """
+        )
+        field = next(
+            field
+            for field in python_runtime._scrape_fields(page)
+            if field.get("id") == "team"
+        )
+        plan = python_runtime._plan_field(field, profile, None)
+
+        assert plan["defer_live_options"] is True
+        readback = python_runtime._apply_fill(page, field, plan, profile)
+        assert readback == "ML Infrastructure"
+        assert page.locator("#team").inner_text().strip() == "ML Infrastructure"
         browser.close()
 
 
@@ -3220,6 +4232,141 @@ def test_apply_fill_ashby_button_group_clicks_visible_button_without_hidden_fall
         assert "_active_" in page.locator("button").first.get_attribute("class")
         assert page.evaluate("document.body.dataset.buttonClicks || '0'") == "1"
         assert page.evaluate("document.body.dataset.hiddenClicks || '0'") == "0"
+        browser.close()
+
+
+def test_ashby_education_end_date_selects_are_enabled_by_still_student_uncheck():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <div data-field-path="_systemfield_education_history" id="education-history">
+              <section class="entry">
+                <button type="button">Delete</button>
+                <input type="text" id="school-0" value="Stevens Institute of Technology">
+                <select id="end-month-0" data-job-agent-autofill-index="end-month-0" disabled>
+                  <option value="">Month...</option>
+                  <option value="May">May</option>
+                  <option value="June">June</option>
+                </select>
+                <select id="end-year-0" data-job-agent-autofill-index="end-year-0" disabled>
+                  <option value="">Year...</option>
+                  <option value="2026">2026</option>
+                </select>
+                <label><input type="checkbox" id="still-student-0" data-job-agent-autofill-index="still-student-0" checked onchange="document.getElementById('end-month-0').disabled = this.checked; document.getElementById('end-year-0').disabled = this.checked;"> Still Student?</label>
+              </section>
+              <section class="entry">
+                <button type="button">Delete</button>
+                <input type="text" id="school-1" value="Shenzhen University">
+                <select id="end-month-1" data-job-agent-autofill-index="end-month-1" disabled>
+                  <option value="">Month...</option>
+                  <option value="July">July</option>
+                </select>
+                <select id="end-year-1" data-job-agent-autofill-index="end-year-1" disabled>
+                  <option value="">Year...</option>
+                  <option value="2023">2023</option>
+                </select>
+                <label><input type="checkbox" id="still-student-1" data-job-agent-autofill-index="still-student-1" checked onchange="document.getElementById('end-month-1').disabled = this.checked; document.getElementById('end-year-1').disabled = this.checked;"> Still Student?</label>
+              </section>
+            </div>
+            """
+        )
+        profile = {
+            "education": [
+                {
+                    "school": "Stevens Institute of Technology",
+                    "degree": "Master's",
+                    "field": "Computer Science",
+                    "start_date": "2024-09",
+                    "end_date": "2026-05",
+                },
+                {
+                    "school": "Shenzhen University",
+                    "degree": "Bachelor's",
+                    "field": "Logistics Management",
+                    "start_date": "2019-09",
+                    "end_date": "2023-07",
+                },
+            ]
+        }
+
+        checkboxes = [
+            {
+                "kind": "single",
+                "tag": "input",
+                "type": "checkbox",
+                "label": "Still Student?",
+                "id": "still-student-0",
+                "autofillId": "still-student-0",
+                "section": "education",
+                "ashbyEduEntryIndex": 0,
+                "ashbyEduSubfield": "still_student",
+            },
+            {
+                "kind": "single",
+                "tag": "input",
+                "type": "checkbox",
+                "label": "Still Student?",
+                "id": "still-student-1",
+                "autofillId": "still-student-1",
+                "section": "education",
+                "ashbyEduEntryIndex": 1,
+                "ashbyEduSubfield": "still_student",
+            },
+        ]
+        for checkbox in checkboxes:
+            plan = python_runtime._plan_field(checkbox, profile, None)
+            assert plan == {"action": "uncheck"}
+            assert python_runtime._apply_fill(page, checkbox, plan) == "unchecked"
+
+        assert page.locator("#still-student-0").is_checked() is False
+        assert page.locator("#still-student-1").is_checked() is False
+        assert page.locator("#end-month-0").is_enabled() is True
+        assert page.locator("#end-year-0").is_enabled() is True
+        assert page.locator("#end-month-1").is_enabled() is True
+        assert page.locator("#end-year-1").is_enabled() is True
+
+        end_month = {
+            "kind": "single",
+            "tag": "select",
+            "type": "select",
+            "label": "End Date Month",
+            "id": "end-month-0",
+            "autofillId": "end-month-0",
+            "section": "education",
+            "ashbyEduEntryIndex": 0,
+            "ashbyEduSubfield": "end_month",
+            "required": True,
+            "options": ["May", "June"],
+        }
+        end_year = {
+            "kind": "single",
+            "tag": "select",
+            "type": "select",
+            "label": "End Date Year",
+            "id": "end-year-0",
+            "autofillId": "end-year-0",
+            "section": "education",
+            "ashbyEduEntryIndex": 0,
+            "ashbyEduSubfield": "end_year",
+            "required": True,
+            "options": ["2026"],
+        }
+        assert python_runtime._plan_field(end_month, profile, None) == {
+            "action": "select",
+            "value": "May",
+        }
+        assert python_runtime._plan_field(end_year, profile, None) == {
+            "action": "select",
+            "value": "2026",
+        }
+        assert python_runtime._apply_fill(page, end_month, {"action": "select", "value": "May"}) == "May"
+        assert python_runtime._apply_fill(page, end_year, {"action": "select", "value": "2026"}) == "2026"
+        assert page.locator("#end-month-0").input_value() == "May"
+        assert page.locator("#end-year-0").input_value() == "2026"
         browser.close()
 
 
@@ -3409,6 +4556,7 @@ def test_dismiss_cookie_banner_targets_waymo_consent_modal():
     assert '[aria-label="Cookie consent"]' in page.script
     assert 'i do not accept' in page.script.lower()
     assert 'i accept' in page.script.lower()
+    assert 'save and continue' in page.script.lower()
 
 
 def test_ensure_application_fields_ready_waits_past_nonmeaningful_workday_shell(monkeypatch):
@@ -4310,7 +5458,10 @@ def test_together_modal_mercor_live_screening_fields_are_auto_answered():
             "start_date": {"answer": "Within a month", "approved": True},
             "relocation": {"answer": "Yes", "approved": True},
         },
-        "screening_answer_rules": [{"patterns": ["willing to travel"], "answer": "Yes"}],
+        "screening_answer_rules": [
+            {"patterns": ["willing to travel"], "answer": "Yes"},
+            {"patterns": ["four days per week", "work from our NYC"], "answer": "Yes"},
+        ],
         "education": [{"degree": "Master's Degree", "field": "Computer Science", "end_date": "2026-05"}],
         "work_history": [{"description": "Built ML systems with Python and PyTorch."}],
     }
@@ -4416,7 +5567,7 @@ def test_capmonster_hcaptcha_unsupported_uses_vision_fallback(monkeypatch):
     }
 
 
-def test_capmonster_hcaptcha_token_task_is_not_attempted_without_vision(monkeypatch):
+def test_capmonster_hcaptcha_token_task_is_attempted_without_vision(monkeypatch):
     events = []
 
     class FakeClient:
@@ -4444,9 +5595,9 @@ def test_capmonster_hcaptcha_token_task_is_not_attempted_without_vision(monkeypa
 
     result = python_runtime._solve_captcha_if_configured(object())
 
-    assert result["status"] == "unsupported"
-    assert "hcaptcha is not supported by CapMonster token tasks" in result["detail"]
-    assert events == []
+    assert result["status"] == "solution_not_injected"
+    assert "hcaptcha at https://jobs.example.com/apply" in result["detail"]
+    assert events == [("client", "cap-key"), ("solve", "HCaptchaTaskProxyless")]
 
 
 def test_capmonster_recaptcha_v2_task_type_error_retries_legacy_alias(monkeypatch):
@@ -4535,7 +5686,7 @@ def test_capmonster_turnstile_task_type_error_retries_legacy_alias(monkeypatch):
     ]
 
 
-def test_capmonster_hcaptcha_vision_enabled_skips_token_task(monkeypatch):
+def test_capmonster_hcaptcha_tries_token_tasks_before_vision_fallback(monkeypatch):
     attempts = []
 
     class FakeClient:
@@ -4569,9 +5720,10 @@ def test_capmonster_hcaptcha_vision_enabled_skips_token_task(monkeypatch):
 
     result = python_runtime._solve_captcha_if_configured(object())
 
-    assert attempts == []
+    assert attempts == ["HCaptchaTaskProxyless", "HCaptchaTask"]
     assert result["status"] == "unsupported"
-    assert result["detail"] == "vision failed"
+    assert "HCaptchaTaskProxyless: ERROR_TASK_NOT_SUPPORTED" in result["detail"]
+    assert "vision fallback: vision failed" in result["detail"]
 
 
 def test_capmonster_task_for_datadome_requires_proxy(monkeypatch):
@@ -4878,6 +6030,17 @@ def test_coinbase_greenhouse_screening_fields_use_truthful_exact_options(monkeyp
         "birthday": "2001-12-18",
         "answers": {},
         "skills": ["AI agents", "workflow automation"],
+        "screening_answer_rules": [
+            {
+                "patterns": ["current government official"],
+                "answer": "No, I am not a current or former Government Official",
+            },
+            {
+                "patterns": ["close relative of a government official"],
+                "answer": "No, I am not a relative of a government official.",
+            },
+            {"patterns": ["referred to this position"], "answer": "No"},
+        ],
         "sensitive_answers": {
             "privacy_consent": {"approved": True, "answer": "Yes", "patterns": ["privacy notice"]},
             "legal_attestation": {"approved": True, "answer": "Yes", "patterns": ["arbitration agreement"]},
@@ -5011,6 +6174,12 @@ def test_production_experience_screening_comboboxes_use_profile_evidence_conserv
         "answers": {
             "Are you open to relocation?": "Yes",
         },
+        "screening_answer_rules": [
+            {
+                "patterns": ["able to work onsite", "5 days in-office"],
+                "answer": "Yes",
+            }
+        ],
         "sensitive_answers": {
             "relocation": {
                 "patterns": ["relocation", "relocate", "willing to relocate"],
@@ -5290,7 +6459,10 @@ def test_chime_hybrid_role_acknowledgement_uses_relocation_approval():
     profile = {
         "sensitive_answers": {
             "relocation": {"patterns": ["relocation", "relocate"], "answer": "Yes", "approved": True}
-        }
+        },
+        "screening_answer_rules": [
+            {"patterns": ["hybrid role", "office four days a week"], "answer": "Yes"}
+        ],
     }
 
     assert python_runtime._plan_field(field, profile, None) == {
@@ -5336,7 +6508,15 @@ def test_robinhood_previous_employment_matches_never_worked_option():
         ],
     }
 
-    assert python_runtime._plan_field(field, {}, None) == {
+    profile = {
+        "screening_answer_rules": [
+            {
+                "patterns": ["ever worked for Robinhood"],
+                "answer": "I have never worked at Robinhood",
+            }
+        ]
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
         "action": "combobox",
         "value": "I have never worked at Robinhood",
     }
@@ -5355,7 +6535,10 @@ def test_robinhood_office_willingness_uses_relocation_approval():
     profile = {
         "sensitive_answers": {
             "relocation": {"patterns": ["relocation", "relocate"], "answer": "Yes", "approved": True}
-        }
+        },
+        "screening_answer_rules": [
+            {"patterns": ["willing to work from the office"], "answer": "Yes"}
+        ],
     }
 
     assert python_runtime._plan_field(field, profile, None) == {"action": "combobox", "value": "Yes"}
@@ -5376,7 +6559,12 @@ def test_robinhood_conflict_disclosure_defaults_to_no_without_saved_relationship
         "options": ["Yes", "No"],
     }
 
-    assert python_runtime._plan_field(field, {}, None) == {"action": "combobox", "value": "No"}
+    profile = {
+        "screening_answer_rules": [
+            {"patterns": ["Personal/Familial Relationships"], "answer": "No"}
+        ]
+    }
+    assert python_runtime._plan_field(field, profile, None) == {"action": "combobox", "value": "No"}
 
 
 def test_robinhood_single_job_code_option_is_selected_over_url_id():
@@ -5413,6 +6601,30 @@ def test_robinhood_alphanumeric_job_code_option_is_selected_over_url_id():
     }
 
 
+def test_robinhood_job_code_option_is_selected_for_dynamic_radiogroup():
+    field = {
+        "kind": "radiogroup",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Please indicate the job code number in the job posting here.*",
+        "required": True,
+        "options": ["SWEI4AMPI4", "Yes", "No", "Select..."],
+    }
+
+    assert python_runtime._plan_field(field, {}, None) == {
+        "action": "combobox",
+        "value": "SWEI4AMPI4",
+    }
+
+
+def test_negative_employment_history_answer_matches_never_worked_option():
+    assert python_runtime._option_matches(
+        "I have never worked at Robinhood",
+        "No, I have never worked at Robinhood",
+    )
+
+
 def test_samsara_learned_about_source_combobox_matches_linkedin_jobs():
     field = {
         "kind": "single",
@@ -5446,6 +6658,28 @@ def test_pinterest_current_us_state_combobox_uses_profile_location_state():
     assert python_runtime._plan_field(field, profile, None) == {
         "action": "combobox",
         "value": "New Jersey",
+    }
+
+
+def test_continental_us_residency_combobox_uses_yes_not_profile_state():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Do you currently reside within the continental United States?*",
+        "required": True,
+        "options": ["Yes", "No"],
+    }
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "country": "United States",
+        "answers": {},
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
     }
 
 
@@ -5920,6 +7154,7 @@ def test_databricks_production_genai_prompt_does_not_map_model_name_to_candidate
 
 
 def test_c3_screening_comboboxes_use_priority_answers_not_fuzzy_answer_bank():
+    onsite_label = "Are you willing to work onsite from our New York City office 5 days/week?*"
     profile = {
         "location": "Jersey City, NJ, USA",
         "years_experience": "1-2",
@@ -5931,6 +7166,7 @@ def test_c3_screening_comboboxes_use_priority_answers_not_fuzzy_answer_bank():
             "What languages do you speak?": "English",
             "Where are you currently located?": "Jersey City, NJ, USA",
             "Are you open to relocation?": "Yes",
+            onsite_label: "Yes",
         },
         "education": [{"degree": "Master's", "field": "Computer Science"}],
         "work_history": [
@@ -5972,7 +7208,7 @@ def test_c3_screening_comboboxes_use_priority_answers_not_fuzzy_answer_bank():
         "tag": "input",
         "type": "text",
         "role": "combobox",
-        "label": "Are you willing to work onsite from our New York City office 5 days/week?*",
+        "label": onsite_label,
         "required": True,
         "options": ["Yes", "No"],
     }
@@ -6131,7 +7367,12 @@ def test_company_relative_question_defaults_to_na():
         "required": True,
     }
 
-    assert python_runtime._plan_field(field, {}, None) == {"action": "fill", "value": "N/A"}
+    profile = {
+        "screening_answer_rules": [
+            {"patterns": ["relatives currently work"], "answer": "N/A"}
+        ]
+    }
+    assert python_runtime._plan_field(field, profile, None) == {"action": "fill", "value": "N/A"}
 
 
 def test_welbehealth_referral_and_employee_status_fields_default_truthfully():
@@ -6140,6 +7381,12 @@ def test_welbehealth_referral_and_employee_status_fields_default_truthfully():
         "first_name": "Gaoyi",
         "last_name": "Wu",
         "answers": {"Last Name": "Wu"},
+        "screening_answer_rules": [
+            {"patterns": ["referred by a current"], "answer": "No"},
+            {"patterns": ["current employee of WelbeHealth"], "answer": "No"},
+            {"patterns": ["ever worked for WelbeHealth"], "answer": "No"},
+            {"patterns": ["referring individual's"], "answer": "N/A"},
+        ],
     }
     fields = [
         (
@@ -6217,6 +7464,9 @@ def test_wonderschool_applied_ai_screening_fields_use_profile_evidence():
         "sensitive_answers": {
             "relocation": {"patterns": ["relocation"], "answer": "Yes", "approved": True}
         },
+        "screening_answer_rules": [
+            {"patterns": ["comfortable coming in 5 days"], "answer": "Yes"}
+        ],
     }
     cases = {
         "Are you comfortable coming in 5 days a week to the office?*": "Yes",
@@ -6591,6 +7841,43 @@ def test_binary_yes_answer_does_not_guess_between_relocation_timelines():
     }
 
 
+def test_binary_no_answer_deduplicates_duplicate_options():
+    field = {
+        "kind": "radiogroup",
+        "type": "radio",
+        "label": "Do you currently hold an active US security clearance?",
+        "required": True,
+        "options": [
+            {"label": "Yes", "autofillId": "yes"},
+            {"label": "No", "autofillId": "no1"},
+            {"label": "No", "autofillId": "no2"},
+        ],
+    }
+
+    plan = python_runtime._plan_field(field, {"sensitive_answers": {"active_security_clearance": {"patterns": ["active security clearance"], "answer": "No", "approved": True}}}, None)
+
+    assert plan["action"] == "check"
+    assert plan["option"]["autofillId"] == "no1"
+
+
+def test_negative_answer_matches_none_of_the_above_and_never_held_option():
+    field = {
+        "kind": "combobox",
+        "type": "select",
+        "label": "If you have held a U.S. security clearance in the past, what clearance level have you held?",
+        "required": True,
+        "options": [
+            {"label": "N/A - have never held U.S. security clearance"},
+            {"label": "Confidential"},
+            {"label": "Secret"},
+            {"label": "Top Secret"},
+        ],
+    }
+
+    matches = python_runtime._matching_options(field, "No")
+    assert [o["label"] for o in matches] == ["N/A - have never held U.S. security clearance"]
+
+
 def test_currently_based_in_us_question_uses_profile_location_not_country_name():
     field = {
         "kind": "radiogroup",
@@ -6805,7 +8092,57 @@ def test_required_sensitive_checkbox_conflicting_with_no_blocks_submit():
     assert plan["blocking"] is True
 
 
-def test_job_scoped_open_questions_are_auto_answered_from_enriched_profile():
+def test_notetaker_checkbox_negative_value_is_not_checked_when_approved_yes():
+    profile = {
+        "sensitive_answers": {
+            "ai_notetaker_consent": {
+                "patterns": ["ai notetaker", "transcribe conversations"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        }
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "checkbox",
+        "label": "As part of our interview process, we may use AI notetakers to transcribe conversations.",
+        "value": "No, I do not consent",
+        "required": True,
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "skip"
+    assert plan["blocking"] is True
+
+
+def test_notetaker_checkbox_negative_value_is_checked_when_approved_no():
+    profile = {
+        "sensitive_answers": {
+            "ai_notetaker_consent": {
+                "patterns": ["ai notetaker", "transcribe conversations"],
+                "answer": "No",
+                "approved": True,
+            }
+        }
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "checkbox",
+        "label": "As part of our interview process, we may use AI notetakers to transcribe conversations.",
+        "value": "No, I do not consent",
+        "required": True,
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "check"
+
+
+def test_job_scoped_open_questions_are_auto_answered_from_enriched_profile(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_LLM_ANSWERS", "0")
     profile = {
         "target_company": "Anthropic",
         "target_title": "Research Engineer",
@@ -6967,6 +8304,9 @@ def test_ashby_replit_foster_city_office_requirement_uses_relocation_approval():
                 "approved": True,
             },
         },
+        "screening_answer_rules": [
+            {"patterns": ["Foster City", "3 days per week"], "answer": "Yes"}
+        ],
     }
     field = {
         "kind": "buttongroup",
@@ -7134,6 +8474,132 @@ def test_ashby_education_and_country_radio_fields_use_structured_profile():
     assert python_runtime._plan_field(country, profile, None)["option"]["label"] == "United States"
 
 
+def test_plan_field_maps_ashby_education_entries_to_their_own_profile_facts():
+    profile = {
+        "education": [
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "start_date": "2024-09",
+                "end_date": "2026-05",
+            },
+            {
+                "school": "Shenzhen University",
+                "degree": "Bachelor's",
+                "field": "Logistics Management",
+                "start_date": "2019-09",
+                "end_date": "2023-07",
+            },
+        ]
+    }
+    school_one = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "label": "Education History",
+        "id": "",
+        "section": "education",
+        "role": "combobox",
+        "placeholder": "Search schools...",
+        "required": True,
+        "ashbyEduEntryIndex": 0,
+        "ashbyEduSubfield": "school",
+        "options": [],
+    }
+    school_two = {**school_one, "ashbyEduEntryIndex": 1}
+
+    assert python_runtime._plan_field(school_one, profile, None) == {
+        "action": "combobox",
+        "value": "Stevens Institute of Technology",
+    }
+    assert python_runtime._plan_field(school_two, profile, None) == {
+        "action": "combobox",
+        "value": "Shenzhen University",
+    }
+
+    degree_two = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "label": "Degree",
+        "id": "_systemfield_education_history-degree",
+        "section": "education",
+        "ashbyEduEntryIndex": 1,
+        "ashbyEduSubfield": "degree",
+    }
+    assert python_runtime._plan_field(degree_two, profile, None) == {
+        "action": "fill",
+        "value": "Bachelor's",
+    }
+
+    end_year_two = {
+        "kind": "single",
+        "tag": "select",
+        "type": "select",
+        "label": "End Date",
+        "id": "_systemfield_education_history-end-year",
+        "section": "education",
+        "ashbyEduEntryIndex": 1,
+        "ashbyEduSubfield": "end_year",
+        "required": True,
+        "options": ["2023", "2024", "2025", "2026"],
+    }
+    assert python_runtime._plan_field(end_year_two, profile, None) == {
+        "action": "select",
+        "value": "2023",
+    }
+
+    end_month_two = {
+        "kind": "single",
+        "tag": "select",
+        "type": "select",
+        "label": "End Date",
+        "id": "_systemfield_education_history-end-month",
+        "section": "education",
+        "ashbyEduEntryIndex": 1,
+        "ashbyEduSubfield": "end_month",
+        "required": True,
+        "options": ["January", "February", "March", "April", "May", "June", "July"],
+    }
+    assert python_runtime._plan_field(end_month_two, profile, None) == {
+        "action": "select",
+        "value": "July",
+    }
+
+    still_student_two = {
+        "kind": "single",
+        "tag": "input",
+        "type": "checkbox",
+        "label": "Still Student?",
+        "id": "_systemfield_education_history-still-student",
+        "section": "education",
+        "ashbyEduEntryIndex": 1,
+        "ashbyEduSubfield": "still_student",
+    }
+    assert python_runtime._plan_field(still_student_two, profile, None) == {
+        "action": "uncheck",
+    }
+
+    ongoing = {
+        "education": [
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "start_date": "2024-09",
+                "current": True,
+            }
+        ]
+    }
+    assert python_runtime._plan_field(
+        {**still_student_two, "ashbyEduEntryIndex": 0}, ongoing, None
+    ) == {"action": "check"}
+    assert python_runtime._is_school_combobox_field(
+        {**school_one, "label": "Education History"}
+    ) is True
+
+
 def test_sponsorship_type_selects_opt_for_ashby_option_style_question():
     profile = {
         "sensitive_answers": {
@@ -7243,6 +8709,9 @@ def test_ashby_common_screening_fields_are_auto_answered():
             "How did you hear about us?": "Company website",
             "Are you open to working in-person in one of our offices 25% of the time?": "Yes",
         },
+        "screening_answer_rules": [
+            {"patterns": ["Anchor Days"], "answer": "Yes"}
+        ],
         "work_history": [
             {"title": "Research Assistant", "employment_type": "Internship"},
             {"title": "AI/ML Engineer Intern", "employment_type": "Internship"},
@@ -7298,6 +8767,12 @@ def test_ashby_listed_location_hybrid_field_uses_relocation_answer():
         "answers": {
             "Are you open to relocation?": "Yes",
         },
+        "screening_answer_rules": [
+            {
+                "patterns": ["currently based in the listed location"],
+                "answer": "No, I’m not based in this location but willing to relocate",
+            }
+        ],
     }
     field = {
         "kind": "radiogroup",
@@ -7321,6 +8796,174 @@ def test_ashby_listed_location_hybrid_field_uses_relocation_answer():
 
     assert plan["action"] == "check"
     assert plan["option"]["label"] == "No, I’m not based in this location but willing to relocate"
+
+
+def test_ashby_confido_relocation_chooses_relocation_not_nyc_claim():
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "answers": {"Are you open to relocation?": "Yes"},
+        "sensitive_answers": {
+            "relocation": {"answer": "Yes", "approved": True},
+        },
+    }
+    field = {
+        "kind": "buttongroup",
+        "type": "button",
+        "label": "We work 5 days on-site in NYC. If you're not local, are you willing to relocate?",
+        "required": True,
+        "options": [
+            {"label": "I am in NYC and happy to work in office"},
+            {"label": "I will relocate and am happy to work in office"},
+            {"label": "I do not want to work in office"},
+        ],
+    }
+
+    assert not python_runtime._profile_location_matches_question(
+        field["label"],
+        "I am in NYC and happy to work in office",
+        profile,
+    )
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "buttonclick"
+    assert plan["option"]["label"] == "I will relocate and am happy to work in office"
+
+
+def test_ashby_realm_sponsorship_chooses_new_sponsorship_option():
+    profile = {
+        "sensitive_answers": {
+            "sponsorship": {"answer": "Yes", "approved": True},
+            "sponsorship_type": {"answer": "OPT", "approved": True},
+        },
+    }
+    field = {
+        "kind": "buttongroup",
+        "type": "button",
+        "label": "Do you now or in the future require sponsorship for employment visa status to work in the United States?",
+        "required": True,
+        "options": [
+            {"label": "No, I do not require sponsorship now or in the future"},
+            {"label": "No, I do not require sponsorship now, but may require it in the future"},
+            {"label": "Yes, I currently hold a visa status that would require a transfer to a new employer"},
+            {"label": "Yes, I would require new sponsorship"},
+        ],
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "buttonclick"
+    assert plan["option"]["label"] == "Yes, I would require new sponsorship"
+    assert python_runtime._matching_options(field, "No", profile) == []
+    assert "None" in python_runtime._answer_aliases("N/A - have never held U.S. security clearance")
+
+
+def test_dynamic_combobox_fallback_chooses_new_sponsorship():
+    profile = {
+        "sensitive_answers": {
+            "sponsorship": {"answer": "Yes", "approved": True},
+            "sponsorship_type": {"answer": "OPT", "approved": True},
+        },
+    }
+    field = {
+        "role": "combobox",
+        "label": "Do you now or in the future require sponsorship for employment visa status to work in the United States?",
+    }
+    available = [
+        "No, I do not require sponsorship now or in the future",
+        "No, I do not require sponsorship now, but may require it in the future",
+        "Yes, I currently hold a visa status that would require a transfer to a new employer",
+        "Yes, I would require new sponsorship",
+    ]
+
+    assert (
+        python_runtime._dynamic_combobox_fallback_choice(field, available, "Yes", profile)
+        == "Yes, I would require new sponsorship"
+    )
+
+
+def test_location_checkbox_group_selects_approved_relocation_offices():
+    profile = {
+        "answers": {
+            "Select all locations you would be open to being placed": (
+                "New York, NY; San Francisco, CA; Seattle, WA; Los Angeles, CA; Sunnyvale, CA"
+            )
+        }
+    }
+    field = {
+        "kind": "checkboxgroup",
+        "type": "checkbox",
+        "label": "What office(s) would you be willing to relocate to? (Select all that apply)",
+        "required": True,
+        "options": [
+            "San Diego, California",
+            "Dallas, Texas",
+            "Washington, DC",
+            "Boston, MA",
+            "International",
+            "San Francisco, California",
+        ],
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "checkmany"
+    assert [python_runtime._option_text(option) for option in plan["options"]] == [
+        "San Francisco, California"
+    ]
+
+
+def test_current_security_clearance_level_uses_none():
+    profile = {
+        "sensitive_answers": {
+            "active_security_clearance": {"answer": "No", "approved": True},
+        },
+    }
+    field = {
+        "role": "combobox",
+        "label": "What is your current security clearance level?*",
+        "required": True,
+        "options": [
+            {"label": "None"},
+            {"label": "Public Trust"},
+            {"label": "Secret"},
+            {"label": "Top Secret"},
+            {"label": "TS/SCI"},
+        ],
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "combobox"
+    assert plan["value"] == "None"
+
+
+def test_english_level_and_bachelor_year_use_profile_answers():
+    profile = {
+        "answers": {"What is your English level?": "Fluent"},
+        "education": [{"degree": "Bachelor's", "end_year": "2023"}],
+    }
+    english = {
+        "role": "combobox",
+        "label": "What is your English level?*",
+        "required": True,
+        "options": [{"label": "A1"}, {"label": "A2"}, {"label": "B1"}, {"label": "B2"}, {"label": "C1"}],
+    }
+    bachelor_year = {
+        "role": "combobox",
+        "label": "What year did you graduate with a Bachelor's degree?*",
+        "required": True,
+        "options": [
+            {"label": "Earlier than 2020"},
+            {"label": "2020"},
+            {"label": "2021"},
+            {"label": "2022"},
+            {"label": "2023"},
+            {"label": "Not yet graduated"},
+        ],
+    }
+
+    assert python_runtime._plan_field(english, profile, None)["value"] == "C1"
+    assert python_runtime._plan_field(bachelor_year, profile, None)["value"] == "2023"
 
 
 def test_fireworks_hybrid_location_and_compensation_fields_are_auto_answered():
@@ -7440,6 +9083,32 @@ def test_native_number_experience_input_uses_conservative_range_bound():
     )
 
 
+def test_native_number_input_never_writes_nan_for_non_numeric_answer():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "number",
+        "label": "What was (or currently is) your PPA?",
+    }
+
+    assert (
+        python_runtime._normalize_number_input_value(
+            "I do not have a PPA.",
+            field,
+            input_type="number",
+        )
+        == ""
+    )
+    assert (
+        python_runtime._normalize_number_input_value(
+            "10",
+            field,
+            input_type="number",
+        )
+        == "10"
+    )
+
+
 def test_netic_technical_domain_prefers_infrastructure_option():
     field = {
         "kind": "single",
@@ -7480,6 +9149,9 @@ def test_nuro_hybrid_four_day_office_requirement_uses_relocation_evidence():
                 "approved": True,
             }
         },
+        "screening_answer_rules": [
+            {"patterns": ["requires 4 days a week in office"], "answer": "Yes"},
+        ],
     }
     field = {
         "kind": "single",
@@ -7661,7 +9333,8 @@ def test_common_location_and_work_authorization_screening_fields_are_auto_answer
     assert python_runtime._plan_field(currently_bay_area, profile, None)["option"]["label"] == "No"
 
 
-def test_workday_identity_state_and_previous_employer_fields_are_auto_answered():
+def test_workday_identity_state_and_previous_employer_fields_are_auto_answered(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_LLM_ANSWERS", "0")
     profile = {
         "phone": "+1(201)-283-4980",
         "state": "NJ",
@@ -7960,7 +9633,7 @@ def test_workday_field_of_study_uses_combobox_selection():
     }
 
 
-def test_relative_at_company_question_defaults_to_no():
+def test_relative_at_company_question_uses_approved_profile_rule():
     field = {
         "kind": "single",
         "tag": "button",
@@ -7971,8 +9644,15 @@ def test_relative_at_company_question_defaults_to_no():
         "options": [{"label": "Yes"}, {"label": "No"}],
     }
 
-    assert python_runtime._auto_answer(field["label"], {"answers": {}}) == "No"
-    assert python_runtime._plan_field(field, {"answers": {}}, None) == {
+    profile = {
+        "answers": {},
+        "screening_answer_rules": [
+            {"patterns": ["relatives that currently work"], "answer": "No"},
+        ],
+    }
+
+    assert python_runtime._auto_answer(field["label"], profile) == "No"
+    assert python_runtime._plan_field(field, profile, None) == {
         "action": "combobox",
         "value": "No",
     }
@@ -8194,9 +9874,12 @@ def test_greenhouse_source_question_defaults_to_company_website_without_saved_an
     }
 
 
-def test_renaissance_referral_and_race_comboboxes_use_truthful_defaults():
+def test_renaissance_referral_and_race_comboboxes_use_approved_facts():
     profile = {
         "answers": {},
+        "screening_answer_rules": [
+            {"patterns": ["referred by a current employee"], "answer": "No"},
+        ],
         "demographics": {"race": "East Asian", "ethnicity": "East Asian"},
     }
     referral = {
@@ -8230,17 +9913,32 @@ def test_renaissance_referral_and_race_comboboxes_use_truthful_defaults():
     assert python_runtime._plan_field(race, profile, None) == {"action": "combobox", "value": "Asian"}
 
 
-def test_brex_referral_relocation_and_capital_one_fields_use_truthful_defaults():
+def test_brex_referral_relocation_and_capital_one_fields_use_approved_facts():
     profile = {
         "location": "Jersey City, NJ, USA",
         "answers": {
             "How did you hear about us?": "LinkedIn",
             "Are you open to relocation?": "Yes",
+            "If you currently work, or have previously worked, at Capital One or a company acquired by Capital One, please provide your Employee ID (EID).": "N/A",
         },
         "sensitive_answers": {
             "relocation": {"answer": "Yes", "approved": True},
             "privacy_consent": {"answer": "Yes", "approved": True},
         },
+        "screening_answer_rules": [
+            {
+                "patterns": ["requires in-office work three days per week"],
+                "answer": "Yes, I’d relocate prior to the start of the role",
+            },
+            {
+                "patterns": ["plan to relocate to, the specified location"],
+                "answer": "Yes, I plan to relocate",
+            },
+            {
+                "patterns": ["previously, worked at Capital One"],
+                "answer": "No",
+            },
+        ],
     }
     referral_name = {
         "kind": "single",
@@ -8306,7 +10004,10 @@ def test_brex_referral_relocation_and_capital_one_fields_use_truthful_defaults()
         "action": "combobox",
         "value": "Yes, I plan to relocate",
     }
-    assert python_runtime._plan_field(capital_one_history, profile, None) == {"action": "combobox", "value": "No"}
+    assert python_runtime._plan_field(capital_one_history, profile, None) == {
+        "action": "check",
+        "option": "No",
+    }
     assert python_runtime._plan_field(capital_one_eid, profile, None) == {"action": "fill", "value": "N/A"}
     assert python_runtime._plan_field(privacy_consent, profile, None) == {"action": "combobox", "value": "Consent"}
 
@@ -8320,6 +10021,9 @@ def test_wonderschool_applied_ai_screening_fields_are_auto_answered_truthfully()
             "Are you open to working in-person in one of our offices 25% of the time?": "Yes",
             "Why wonderschool?": "This should never be used for a School field.",
         },
+        "screening_answer_rules": [
+            {"patterns": ["coming to the office 3 days a week"], "answer": "Yes"},
+        ],
         "education": [
             {
                 "school": "Stevens Institute of Technology",
@@ -8404,7 +10108,13 @@ def test_palantir_new_grad_early_talent_fields_are_auto_answered_truthfully():
         "target_title": "Forward Deployed Software Engineer, New Grad",
         "target_location": "New York, NY",
         "location": "Jersey City, NJ, USA",
-        "answers": {"How did you hear about us?": "LinkedIn"},
+        "answers": {
+            "How did you hear about us?": "LinkedIn",
+            "Do you have any, or anticipate any upcoming offer deadlines?": "No",
+            "What are your preferred office location(s) to work from in addition to the location you are applying to? Select 1-3 from below.": "New York, NY",
+            "Which office location would you prefer?": "New York",
+            "What are your preferred Palantir product(s)? Please pick 1-2. Foundry Gotham Foundations Apollo": "Foundry; Apollo",
+        },
         "education": [
             {
                 "school": "Stevens Institute of Technology",
@@ -8644,12 +10354,15 @@ def test_high_school_fields_do_not_use_university_without_explicit_profile_fact(
     assert python_runtime._map_text_value(high_school_name, profile) is None
     assert python_runtime._plan_field(high_school_name, profile, None) == {
         "action": "skip",
-        "reason": "unmapped field",
+        "reason": "candidate fact needs explicit approved answer",
+        "sensitive": False,
+        "blocking": True,
     }
     assert python_runtime._plan_field(high_school_year, profile, None) == {
         "action": "skip",
-        "reason": "no matching option / answer",
+        "reason": "candidate fact needs explicit approved answer",
         "sensitive": False,
+        "blocking": True,
     }
 
     profile["high_school"] = {
@@ -9036,6 +10749,44 @@ def test_greenhouse_selected_presentation_is_committed_despite_empty_native_inpu
         browser.close()
 
 
+def test_greenhouse_select_shell_committed_text_is_read_back_and_audited():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            """
+            <label for="residency">Do you currently reside within the continental United States?*</label>
+            <div class="select-shell">
+              <span class="selected-option">option Yes, selected.</span>
+              <input
+                id="residency"
+                data-job-agent-autofill-index="residency"
+                role="combobox"
+                aria-expanded="false"
+                required
+                value=""
+              >
+            </div>
+            """
+        )
+        field = {
+            "id": "residency",
+            "autofillId": "residency",
+            "tag": "input",
+            "role": "combobox",
+            "label": "Do you currently reside within the continental United States?*",
+        }
+
+        values, expanded = python_runtime._control_selection_readback(page, field)
+
+        assert values == ["Yes"]
+        assert expanded is False
+        assert python_runtime._audit_required_fields(page) == []
+        browser.close()
+
+
 def test_required_audit_uses_greenhouse_label_star_when_native_required_is_missing():
     sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
@@ -9385,3 +11136,702 @@ def test_ashby_not_found_application_route_falls_back_to_job_page(monkeypatch):
     )
     assert page.gotos == ["https://jobs.ashbyhq.com/cursor/job-id"]
     assert opened == ["https://jobs.ashbyhq.com/cursor/job-id"]
+
+
+def test_retired_cursor_ashby_route_falls_back_to_current_official_career_page(
+    monkeypatch,
+):
+    class Page:
+        url = "https://jobs.ashbyhq.com/cursor/retired-id/application"
+
+        def __init__(self):
+            self.gotos = []
+
+        def goto(self, url, wait_until=None, timeout=None):
+            self.gotos.append(url)
+            self.url = url
+
+        def wait_for_load_state(self, _state, timeout=None):
+            return None
+
+        def wait_for_timeout(self, _milliseconds):
+            return None
+
+    page = Page()
+    monkeypatch.setattr(
+        python_runtime,
+        "_open_application_form_if_needed",
+        lambda _page: False,
+    )
+    monkeypatch.setattr(
+        python_runtime,
+        "_wait_for_application_form_context",
+        lambda current_page, attempts=8, delay_ms=1000: (
+            current_page.url
+            == "https://cursor.com/careers/software-engineer-ml-infrastructure"
+        ),
+    )
+
+    assert python_runtime._recover_application_form_from_job_page(
+        page,
+        "https://jobs.ashbyhq.com/cursor/retired-id/application",
+        {
+            "target_company": "cursor",
+            "target_title": "Software Engineer, ML Infrastructure",
+        },
+    )
+    assert page.gotos == [
+        "https://jobs.ashbyhq.com/cursor/retired-id",
+        "https://cursor.com/careers/software-engineer-ml-infrastructure",
+    ]
+
+
+def test_best_option_match_binary_yes_no_from_long_answers():
+    assert python_runtime._best_option_match(["Yes", "No"], "Yes, I will require sponsorship") == "Yes"
+    assert python_runtime._best_option_match(["Yes", "No"], "No, I do not require sponsorship") == "No"
+    assert python_runtime._best_option_match(["Yes", "No"], "Yes, I am based in San Francisco") == "Yes"
+    # Negative answer should not map to Yes.
+    assert python_runtime._best_option_match(["Yes", "No"], "No, I am not willing") == "No"
+    assert python_runtime._best_option_match(
+        ["Yes", "No"],
+        "I require/will require employer sponsorship to maintain work authorization.",
+    ) == "Yes"
+
+
+def test_visible_option_picker_adds_only_leading_binary_polarity_alias():
+    source = inspect.getsource(python_runtime._click_visible_option_with_playwright)
+
+    assert 'wants.push("no")' in source
+    assert 'wants.push("yes")' in source
+    assert "explicit leading polarity" in source
+
+
+def test_best_option_match_binary_yes_no_from_grounded_experience_text():
+    assert python_runtime._best_option_match(
+        ["Yes", "No"],
+        "I have deployed and operated Kubernetes clusters for distributed LLM training.",
+    ) == "Yes"
+    assert python_runtime._best_option_match(
+        ["Yes", "No"],
+        "I have not used Terraform in a professional setting.",
+    ) == "No"
+
+
+def test_plan_field_maps_grounded_experience_rule_to_binary_option():
+    field = {
+        "kind": "radiogroup",
+        "label": "Kubernetes experience",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "screening_answer_rules": [
+            {
+                "patterns": ["kubernetes experience"],
+                "answer": (
+                    "I have deployed and operated Kubernetes clusters for distributed LLM training."
+                ),
+            }
+        ]
+    }
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan == {"action": "check", "option": {"label": "Yes"}}
+
+
+def test_explicit_experience_threshold_supports_plus_years_from_profile_fact():
+    field = {
+        "kind": "radiogroup",
+        "label": "Do you have 3+ years of experience in an industry role?",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "years_experience": 3,
+        "answers": {
+            "How many years of relevant experience do you have outside internships/academia?": "3 years",
+        },
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "check",
+        "option": {"label": "Yes"},
+    }
+
+
+def test_best_option_match_does_not_choose_generic_placeholders():
+    assert python_runtime._best_option_match(["Yes", "No", "Other", "Select"], "Maybe") is None
+    assert python_runtime._best_option_match(["Yes", "No", "Other"], "Not sure") is None
+    assert python_runtime._best_option_match(["Yes", "No", "Other"], "N/A") is None
+
+
+def test_best_option_match_falls_back_to_token_overlap():
+    assert python_runtime._best_option_match(
+        ["Fall 2026 (September - December)", "Spring 2027"],
+        "Fall 2026",
+    ) == "Fall 2026 (September - December)"
+
+
+def test_best_option_match_usage_negation():
+    assert python_runtime._best_option_match(
+        [
+            "Yes, on my personal devices.",
+            "Yes, at work.",
+            "Yes, both personally and at work.",
+            "I haven't used it, but I'm excited to learn more!",
+        ],
+        "No, I have not used Tailscale",
+    ) == "I haven't used it, but I'm excited to learn more!"
+
+
+def test_best_option_match_negation_polarity_respected():
+    # A clearly affirmative answer should not match a negative option.
+    assert python_runtime._best_option_match(
+        ["I have used it", "I haven't used it"],
+        "Yes, I have used it",
+    ) == "I have used it"
+    # A clearly negative answer should not match a non-negative option.
+    assert python_runtime._best_option_match(
+        ["I have used it", "I haven't used it"],
+        "No, I have not used it",
+    ) == "I haven't used it"
+
+
+def test_best_option_match_country_region_location_question():
+    options = [
+        "United States/Canada",
+        "Latin America",
+        "Western Europe",
+        "Eastern Europe",
+        "India",
+        "East Asia",
+        "Other",
+    ]
+    assert (
+        python_runtime._best_option_match(
+            options,
+            "Jersey City, New Jersey, United States",
+        )
+        == "United States/Canada"
+    )
+    assert (
+        python_runtime._best_option_match(
+            options,
+            "I am currently based in the Hoboken, NJ area, United States",
+        )
+        == "United States/Canada"
+    )
+    assert (
+        python_runtime._best_option_match(options, "Hoboken, NJ")
+        == "United States/Canada"
+    )
+
+
+def test_plan_field_uses_country_region_closest_match_for_location_combobox():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Where are you located?*",
+        "required": True,
+        "options": [
+            {"label": "United States/Canada"},
+            {"label": "Latin America"},
+            {"label": "Western Europe"},
+            {"label": "Other"},
+        ],
+    }
+    plan = python_runtime._plan_field(
+        field,
+        {"location": "Jersey City, New Jersey, United States"},
+        None,
+    )
+    assert plan == {"action": "combobox", "value": "United States/Canada"}
+
+
+def test_structured_geography_answer_avoids_verbose_llm_text():
+    profile = {"location": "Jersey City, NJ, USA"}
+    assert python_runtime._is_geography_question("Where are you located?*")
+    answer = python_runtime._structured_geography_answer(
+        "Where are you located?*",
+        profile,
+    )
+    assert answer
+    assert "United States" in answer
+    assert "Jersey City" in answer
+
+
+def test_source_question_does_not_map_to_school_when_label_contains_source_options():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "From which job site did you see this posting? Indeed LinkedIN University Glassdoor Zip Recruiter Referral Search Engine Other",
+        "required": True,
+        "options": [
+            {"label": "Indeed", "value": "Indeed"},
+            {"label": "LinkedIN", "value": "LinkedIN"},
+            {"label": "University", "value": "University"},
+            {"label": "Glassdoor", "value": "Glassdoor"},
+            {"label": "Zip Recruiter", "value": "Zip Recruiter"},
+            {"label": "Referral", "value": "Referral"},
+            {"label": "Search Engine", "value": "Search Engine"},
+            {"label": "Other", "value": "Other"},
+        ],
+    }
+    profile = {
+        "location": "Jersey City, NJ",
+        "answers": {"How did you hear about us?": "LinkedIn"},
+    }
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan == {"action": "combobox", "value": "LinkedIN"}
+
+
+def test_na_score_option_maps_to_did_not_take():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "SAT Score*",
+        "required": True,
+        "options": [
+            {"label": "Did not take", "value": "Did not take"},
+            {"label": "1600 out of 1600", "value": "1600 out of 1600"},
+        ],
+    }
+    profile = {"answers": {"SAT Score*": "N/A"}}
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan == {"action": "combobox", "value": "Did not take"}
+
+
+def test_dynamic_combobox_fallback_maps_generated_na_score_to_did_not_take():
+    field = {
+        "role": "combobox",
+        "label": "SAT Score*",
+        "required": True,
+    }
+    profile = {
+        "screening_answer_rules": [
+            {"patterns": ["sat score", "act score", "gre score", "standardized test score"], "answer": "N/A"}
+        ]
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Did not take/Do not recall", "1600 out of 1600"],
+        "",
+        profile,
+    ) == "Did not take/Do not recall"
+
+
+def test_best_option_match_maps_na_to_did_not_take():
+    assert python_runtime._best_option_match(
+        ["Did not take/Do not recall", "1600 out of 1600"],
+        "N/A",
+    ) == "Did not take/Do not recall"
+
+
+def test_negative_answer_matches_never_held_clearance_option():
+    field = {
+        "kind": "combobox",
+        "type": "select",
+        "label": "Active Security Clearance(s)*",
+        "required": True,
+        "options": [
+            {"label": "Top Secret"},
+            {"label": "Secret"},
+            {"label": "Never held a clearance"},
+        ],
+    }
+    matches = python_runtime._matching_options(field, "No")
+    assert [o["label"] for o in matches] == ["Never held a clearance"]
+
+
+def test_office_commitment_question_uses_approved_standing_rule():
+    field = {
+        "kind": "buttongroup",
+        "type": "button",
+        "label": "Can you work out of the San Francisco office 5 days a week?",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    profile = {
+        "screening_answer_rules": [
+            {"patterns": ["work from our local office", "onsite monday-friday", "monday-friday"], "answer": "Yes"}
+        ]
+    }
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "buttonclick"
+    assert plan["option"]["label"] == "Yes"
+
+
+def test_dynamic_combobox_fallback_office_commitment_uses_approved_rule():
+    field = {
+        "role": "combobox",
+        "label": "Please note the expectation for this role is to work in our Chicago office - please confirm this works for you.",
+        "required": True,
+    }
+    profile = {
+        "screening_answer_rules": [
+            {"patterns": ["work from our local office", "monday-friday"], "answer": "Yes"}
+        ]
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Yes", "No"],
+        "",
+        profile,
+    ) == "Yes"
+
+
+def test_dynamic_combobox_fallback_age_bucket_prefers_derived_range():
+    field = {
+        "role": "combobox",
+        "label": "What is your current age?",
+        "required": True,
+    }
+    profile = {
+        "birthday": "2002-06-15",
+        "sensitive_answers": {
+            "age_bucket": {
+                "patterns": ["what is your current age", "current age", "age range", "age bracket"],
+                "answer": "Under 30",
+                "approved": True,
+            }
+        },
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["18-24", "25-34", "35-44"],
+        "",
+        profile,
+    ) == "18-24"
+
+
+def test_dynamic_combobox_fallback_age_under_30_style_option():
+    field = {
+        "role": "combobox",
+        "label": "What is your current age?",
+        "required": True,
+    }
+    profile = {"birthday": "2001-07-28"}
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Under 30", "30-39", "40-49", "50-59", "60 or older", "I prefer not to answer"],
+        "",
+        profile,
+    ) == "Under 30"
+
+
+def test_dynamic_combobox_fallback_work_authorization_prefers_screening_rule():
+    field = {
+        "role": "combobox",
+        "label": "U.S. Work Authorization",
+        "required": True,
+    }
+    profile = {
+        "screening_answer_rules": [
+            {
+                "patterns": ["work authorization", "authorized to work in the united states"],
+                "answer": "Seeking work authorization",
+            }
+        ],
+        "sensitive_answers": {
+            "work_authorization_us": {
+                "label": "US Work Authorization",
+                "patterns": ["authorized to work in the us"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        [
+            "Can work for any employer",
+            "Can work for current employer",
+            "Seeking work authorization",
+            "NA, applying to non-US location",
+        ],
+        "",
+        profile,
+    ) == "Seeking work authorization"
+
+
+def test_dynamic_combobox_fallback_ethnicity_maps_to_not_hispanic():
+    field = {
+        "role": "combobox",
+        "label": "Indicate Ethnic group",
+        "required": True,
+    }
+    profile = {"demographics": {"ethnicity": "East Asian"}}
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Hispanic or Latino", "Not Hispanic or Latino", "I don't wish to answer"],
+        "",
+        profile,
+    ) == "Not Hispanic or Latino"
+
+
+def test_cc305_disability_disclosure_uses_approved_disability_fact():
+    label = "Please review Form CC-305 at the link above before checking one of the boxes below."
+    field = {
+        "role": "combobox",
+        "label": label,
+        "required": True,
+    }
+    profile = {
+        "demographics": {"disability": "No"},
+        "sensitive_answers": {
+            "disability": {
+                "patterns": ["disability", "disabled"],
+                "answer": "No",
+                "approved": True,
+            }
+        },
+    }
+    assert python_runtime._is_sensitive(label) is True
+    assert python_runtime._match_sensitive(label, profile) == "No"
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        [
+            "Yes, I have a disability, or have had one in the past.",
+            "No, I do not have a disability and have not had one in the past.",
+            "I don't wish to answer",
+        ],
+        "",
+        profile,
+    ) == "No, I do not have a disability and have not had one in the past."
+
+
+def test_based_in_metro_answer_uses_generic_city_extraction():
+    assert python_runtime._based_in_metro_question_answer(
+        "Are you local to Fort Worth, TX?",
+        {"location": "Jersey City, NJ, USA"},
+    ) == "No"
+    assert python_runtime._based_in_metro_question_answer(
+        "Are you local to Jersey City, NJ?",
+        {"location": "Jersey City, NJ, USA"},
+    ) == "Yes"
+    assert python_runtime._based_in_metro_question_answer(
+        "Are you a resident of California?",
+        {"location": "Jersey City, NJ, USA"},
+    ) == "No"
+    assert python_runtime._based_in_metro_question_answer(
+        "Are you a resident of New Jersey?",
+        {"location": "Jersey City, NJ, USA"},
+    ) == "Yes"
+    assert python_runtime._based_in_metro_question_answer(
+        "Do you currently reside in the Austin, TX metro area?",
+        {"location": "Jersey City, NJ, USA"},
+    ) == "No"
+    assert python_runtime._based_in_metro_question_answer(
+        "Do you live in New York or California?",
+        {"location": "Jersey City, NJ, USA"},
+    ) == "No"
+
+
+def test_dynamic_combobox_fallback_local_question_prefers_willing_relocation_option():
+    field = {
+        "role": "combobox",
+        "label": "Are you local to Fort Worth, TX?",
+        "required": True,
+    }
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "sensitive_answers": {
+            "relocation": {"patterns": ["relocation"], "answer": "Yes", "approved": True}
+        },
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Yes", "No", "No, but I'm willing to relocate"],
+        "",
+        profile,
+    ) == "No, but I'm willing to relocate"
+
+
+def test_negative_answer_matches_not_currently_us_person_option():
+    field = {
+        "kind": "combobox",
+        "type": "select",
+        "label": "Are you currently a U.S. Person as described above, or otherwise eligible to obtain the required authorization?",
+        "required": True,
+        "options": [
+            {"label": "U.S. citizen or national of the United States"},
+            {"label": "U.S. lawful permanent resident (Green Card holder)"},
+            {"label": "Refugee admitted under 8 U.S.C. 1157"},
+            {"label": "Asylee granted asylum under 8 U.S.C. 1158"},
+            {"label": "Not currently a U.S. Person / Other status"},
+        ],
+    }
+    matches = python_runtime._matching_options(field, "No")
+    assert [o["label"] for o in matches] == ["Not currently a U.S. Person / Other status"]
+
+
+def test_best_option_match_maps_negative_answer_to_not_worked_option():
+    assert python_runtime._best_option_match(
+        ["I am a previous employee", "I have not worked at DoorDash"],
+        "No",
+    ) == "I have not worked at DoorDash"
+
+
+def test_dynamic_combobox_fallback_maps_negative_screening_rule_to_not_worked_option():
+    field = {
+        "role": "combobox",
+        "label": "Have you worked at DoorDash?",
+        "required": True,
+    }
+    profile = {
+        "screening_answer_rules": [
+            {"patterns": ["worked at"], "answer": "No"}
+        ]
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["I am a previous employee", "I have not worked at DoorDash"],
+        "",
+        profile,
+    ) == "I have not worked at DoorDash"
+
+
+def test_where_do_you_currently_live_uses_profile_location():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Where do you currently live?",
+        "required": True,
+        "options": [],
+    }
+    profile = {"location": "Jersey City, NJ, USA", "country": "United States"}
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan == {"action": "combobox", "value": "Jersey City, NJ, USA"}
+
+
+def test_source_answer_linkedin_matches_social_media_option():
+    assert python_runtime._option_matches("Social Media", "LinkedIn")
+    assert python_runtime._option_matches("Third Party Job Board", "LinkedIn")
+    assert python_runtime._best_option_match(
+        ["Events", "General Awareness", "Company Website", "Social Media", "Third Party Job Board", "Press", "Other"],
+        "LinkedIn",
+    ) == "Social Media"
+
+
+def test_how_did_you_hear_combobox_uses_social_media_option():
+    field = {
+        "kind": "combobox",
+        "role": "combobox",
+        "tag": "select",
+        "label": "How did you hear about The Trade Desk?",
+        "required": True,
+        "options": [
+            {"label": "Events"},
+            {"label": "General Awareness"},
+            {"label": "Company Website"},
+            {"label": "Social Media"},
+            {"label": "Third Party Job Board"},
+            {"label": "Press"},
+            {"label": "Other"},
+        ],
+    }
+    profile = {"answers": {"How did you hear about us?": "LinkedIn"}}
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "combobox"
+    assert plan["value"] == "Social Media"
+
+
+def test_citizenship_status_uses_other_when_not_a_us_citizen():
+    field = {
+        "kind": "combobox",
+        "role": "combobox",
+        "tag": "select",
+        "label": "Citizenship Status",
+        "required": True,
+        "options": [
+            {"label": "1) U.S. citizen or national of the United States"},
+            {"label": "2) U.S. lawful permanent resident (green card holder)"},
+            {"label": "3) Refugee under 8 U.S.C 1157"},
+            {"label": "4) Asylee under 8 U.S.C 1158"},
+            {"label": "5) Authorized to work in the United States under the Deferred Action For Childhood Arrivals (DACA Program)"},
+            {"label": "6) Other (please explain)"},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "citizenship": {
+                "label": "Citizenship",
+                "patterns": ["citizenship", "citizen", "us citizen"],
+                "answer": "No",
+                "approved": True,
+            }
+        }
+    }
+    assert python_runtime._citizenship_status_option(field, profile)["label"] == "6) Other (please explain)"
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan == {"action": "combobox", "value": "6) Other (please explain)"}
+
+
+def test_what_city_do_you_live_in_returns_profile_city():
+    profile = {"location": "Jersey City, NJ, USA", "city": "Jersey City"}
+    assert python_runtime._structured_geography_answer("What city do you live in?", profile) == "Jersey City"
+
+
+def test_radiogroup_without_plan_options_defers_to_live_choices():
+    field = {
+        "kind": "radiogroup",
+        "label": "We work 5 days on-site in NYC. If you're not local, are you willing to relocate?",
+        "required": True,
+        "options": [],
+    }
+    profile = {
+        "answers": {"Are you open to relocation?": "Yes"},
+        "sensitive_answers": {
+            "relocation": {
+                "label": "Relocation",
+                "patterns": ["relocation", "willing to relocate", "open to relocation"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "check"
+    assert plan.get("defer_live_options") is True
+
+
+def test_dynamic_radiogroup_fallback_prefers_willing_relocation_statement():
+    field = {
+        "kind": "radiogroup",
+        "label": "We work 5 days on-site in NYC. If you're not local, are you willing to relocate?",
+        "required": True,
+    }
+    profile = {
+        "answers": {"Are you open to relocation?": "Yes"},
+        "sensitive_answers": {
+            "relocation": {
+                "label": "Relocation",
+                "patterns": ["relocation", "willing to relocate", "open to relocation"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        [
+            "I am in NYC and happy to work in office",
+            "I will relocate and am happy to work in office",
+            "I do not want to work in office",
+        ],
+        "",
+        profile,
+    ) == "I will relocate and am happy to work in office"

@@ -1,4 +1,4 @@
-from job_agent.candidate_screening import screen_job_for_candidate
+from job_agent.candidate_screening import application_url_unusable, screen_job_for_candidate
 from job_agent.models import Job
 
 
@@ -50,6 +50,129 @@ def test_screening_rejects_common_non_us_city_country_pairs_for_us_candidate():
 
         assert result.eligible is False, location
         assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_foreign_city_only_locations_for_us_candidate():
+    for location in [
+        "London",
+        "Munich",
+        "Dublin",
+        "Paris",
+        "Prague",
+        "Bengaluru",
+        "Tel Aviv",
+        "Abu Dhabi",
+        "Hong Kong",
+        "Kuala Lumpur",
+        "Seoul",
+        "Melbourne",
+        "Lisbon",
+        "Athens",
+        "D\u00fcsseldorf",
+        "Reykjav\u00edk",
+        "Shanghai",
+        "Gurugram",
+        "Kuwait - Main Office",
+        "Norway",
+        "Sao Jose dos Campos",
+    ]:
+        result = screen_job_for_candidate(
+            Job(title="Software Engineer", company="Example", raw_jd="", location=location),
+            _early_career_profile(),
+        )
+
+        assert result.eligible is False, location
+        assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_listing_without_identifiable_employer():
+    result = screen_job_for_candidate(
+        Job(title="Software Engineer", company="Unknown Company", raw_jd="", location="Remote"),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("employer" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_listing_without_identifiable_role():
+    result = screen_job_for_candidate(
+        Job(title="Unknown Role", company="Example", raw_jd="", location="Remote"),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("role" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_non_direct_application_urls():
+    for url in (
+        "https://www.notion.so/careers/job/123",
+        "https://angel.co/company/acme/jobs/1",
+        "https://news.ycombinator.com/item?id=1",
+        "https://job-boards.greenhouse.io/coinbase/jobs/1",
+        "https://job-boards.greenhouse.io/epicgames/jobs/2",
+        "https://job-boards.greenhouse.io/wayve/jobs/3",
+        "https://workatastartup.com/jobs/4",
+    ):
+        assert application_url_unusable(url)
+        result = screen_job_for_candidate(
+            Job(
+                title="Machine Learning Engineer",
+                company="Example",
+                raw_jd="",
+                location="Remote US",
+                apply_url=url,
+            ),
+            _early_career_profile(),
+        )
+        assert result.eligible is False
+        assert any("application form" in reason for reason in result.reasons)
+
+
+def test_screening_keeps_direct_ats_board_urls():
+    url = "https://boards.greenhouse.io/acme/jobs/123"
+    assert not application_url_unusable(url)
+    result = screen_job_for_candidate(
+        Job(
+            title="Machine Learning Engineer",
+            company="Example",
+            raw_jd="",
+            location="Remote US",
+            apply_url=url,
+        ),
+        _early_career_profile(),
+    )
+    assert result.eligible is True
+
+
+def test_screening_rejects_clearance_requirement_when_not_clearance_eligible():
+    profile = {
+        **_early_career_profile(),
+        "security_clearance_eligibility": "No",
+        "sensitive_answers": {
+            "security_clearance_eligibility": {
+                "patterns": ["eligible to obtain the security clearance"],
+                "answer": "No",
+                "approved": True,
+            }
+        },
+    }
+    result = screen_job_for_candidate(
+        Job(
+            title="DevOps Engineer",
+            company="Example",
+            raw_jd=(
+                "A current TS/SCI with Polygraph U.S. Government Security "
+                "clearance is required; U.S. citizenship required."
+            ),
+            location="Columbia, MD",
+        ),
+        profile,
+    )
+
+    assert result.eligible is False
+    assert any("security clearance" in reason for reason in result.reasons)
 
 
 def test_screening_rejects_senior_title_for_early_career_profile():

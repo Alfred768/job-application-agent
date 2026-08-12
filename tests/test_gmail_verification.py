@@ -2,6 +2,7 @@ import base64
 
 from job_agent.gmail_verification import (
     _code_from_payload,
+    _latest_application_confirmation,
     _latest_verification_code,
     _latest_verification_link,
 )
@@ -91,3 +92,48 @@ def test_selects_newest_workday_verification_link_after_request():
         ],
         requested_after_ms=700,
     ) == "https://wd1.myworkday.com/verify?token=new"
+
+
+def test_application_confirmation_requires_exact_company_title_and_confirmation_copy():
+    def message(message_id, received_at_ms, subject, body):
+        return {
+            "id": message_id,
+            "internalDate": str(received_at_ms),
+            "snippet": body,
+            "payload": {
+                "headers": [
+                    {"name": "Subject", "value": subject},
+                    {"name": "From", "value": "talent@example.com"},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(body.encode()).decode().rstrip("="),
+                },
+            },
+        }
+
+    messages = [
+        message(
+            "wrong-role",
+            2000,
+            "Point72 Employment Application - thanks!",
+            "Thanks for submitting your application for Data Engineer.",
+        ),
+        message(
+            "exact-role",
+            1000,
+            "Point72 Employment Application - thanks!",
+            "Thanks for submitting your application for Quantitative Researcher - Machine Learning.",
+        ),
+        message(
+            "not-confirmed",
+            3000,
+            "Point72 role alert",
+            "Quantitative Researcher - Machine Learning is still open.",
+        ),
+    ]
+
+    assert _latest_application_confirmation(
+        messages,
+        company="Point72",
+        title="Quantitative Researcher - Machine Learning",
+    ) == {"message_id": "exact-role", "received_at_ms": 1000}

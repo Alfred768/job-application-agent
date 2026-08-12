@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -26,7 +27,17 @@ _HTTP_USER_AGENT = (
 )
 
 
-def _read_url(url: str, timeout: int = 8):
+def _source_timeout_seconds() -> int:
+    try:
+        value = int(os.getenv("JOB_AGENT_SOURCE_TIMEOUT_SECONDS") or "20")
+    except ValueError:
+        value = 20
+    return max(5, value)
+
+
+def _read_url(url: str, timeout: int | None = None):
+    if timeout is None:
+        timeout = _source_timeout_seconds()
     return urlopen(Request(url, headers={"User-Agent": _HTTP_USER_AGENT}), timeout=timeout)
 
 
@@ -101,6 +112,21 @@ def _job_filter_text(job: Job, scope: str) -> str:
     )
 
 
+_SOURCE_URL_EXCLUDE_PATTERNS = [
+    "ycombinator.com/companies",
+    "workatastartup.com",
+    "notion.so",
+    "angel.co",
+    "news.ycombinator.com",
+    # Boards whose public Greenhouse pages do not expose a direct
+    # application form and consistently terminate as
+    # ``application_form_unavailable``.
+    "greenhouse.io/coinbase",
+    "greenhouse.io/epicgames",
+    "greenhouse.io/wayve",
+]
+
+
 def _filter_jobs_for_source(jobs: list[Job], item: dict[str, Any]) -> list[Job]:
     """Apply optional source-level filters before per-source limiting.
 
@@ -120,19 +146,41 @@ def _filter_jobs_for_source(jobs: list[Job], item: dict[str, Any]) -> list[Job]:
         ("text", _as_patterns(item.get("text_exclude") or item.get("exclude_keywords"))),
     ]
     us_only = item.get("us_only") is True
-    if not us_only and not any(
+    # A US-only source keeps any job that is not clearly outside the US.  Large
+    # ATS boards often label office roles "Hybrid" or "In-Office" instead of a
+    # city, so the US gate is the authoritative location check and generic
+    # location whitelists should not discard those roles before scoring.
+    has_filters = us_only or any(
         patterns for _, patterns in include_specs + exclude_specs
-    ):
-        return jobs
+    )
+    if not has_filters:
+        return [
+            job
+            for job in jobs
+            if not any(
+                pattern in (job.apply_url or job.source_url or "").lower()
+                for pattern in _SOURCE_URL_EXCLUDE_PATTERNS
+            )
+        ]
 
     filtered: list[Job] = []
     for job in jobs:
-        if us_only and location_is_outside_us(_job_filter_text(job, "location")):
+        raw_url = job.apply_url or job.source_url or ""
+        if any(pattern in raw_url.lower() for pattern in _SOURCE_URL_EXCLUDE_PATTERNS):
             continue
-        if any(
-            patterns and not _matches_any(_job_filter_text(job, scope), patterns)
-            for scope, patterns in include_specs
-        ):
+        location_text = _job_filter_text(job, "location")
+        if us_only and location_is_outside_us(location_text):
+            continue
+        include_miss = False
+        for scope, patterns in include_specs:
+            if not patterns:
+                continue
+            if scope == "location" and us_only:
+                continue
+            if not _matches_any(_job_filter_text(job, scope), patterns):
+                include_miss = True
+                break
+        if include_miss:
             continue
         if any(
             patterns and _matches_any(_job_filter_text(job, scope), patterns)

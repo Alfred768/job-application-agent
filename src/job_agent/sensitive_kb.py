@@ -289,12 +289,14 @@ def _entry_priority(key: str, entry: dict[str, Any]) -> tuple[int, int]:
     """Prefer specific eligibility/identity answers over broad preferences."""
     highest_priority_keys = {
         "us_export_control_status",
+        "security_clearance_level_never_held",
     }
     specific_keys = {
         "citizenship",
         "active_security_clearance",
         "security_clearance_eligibility",
         "security_clearance",
+        "security_clearance_level_never_held",
         "sponsorship_type",
         "hispanic_or_latino",
         "terms_consent",

@@ -6,9 +6,12 @@ from pathlib import Path
 
 from hello_agents.career.policies import JobApplicationPolicyGate
 from hello_agents.career.recovery import JobApplicationRecoveryPlanner
+from hello_agents.core.contracts import RecoveryAction
 from hello_agents.core.execution import ControlledExecution
 from hello_agents.core.runtime import AgentCore
 from hello_agents.tools.registry import ToolRegistry
+from job_agent.db import connect, create_application, create_job, init_db
+from job_agent.models import Job
 from job_agent.recovery_executor import (
     JobApplicationRecoveryExecutor,
     execute_audit_recovery,
@@ -260,6 +263,73 @@ def test_unconfirmed_click_does_not_persist_without_confirmation(
     assert batch.verified_targets == ()
 
 
+def test_processing_error_exact_confirmation_is_persisted_without_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from job_agent import recovery_executor
+
+    database = tmp_path / "agent.db"
+    connection = connect(database)
+    init_db(connection)
+    job = Job(
+        company="Point72",
+        title="Quantitative Researcher - Machine Learning",
+        source="greenhouse",
+        raw_jd="Research role",
+        apply_url="https://job-boards.greenhouse.io/point72/jobs/8023550002",
+    )
+    job_id = create_job(connection, job)
+    application_id = create_application(connection, job_id, job)
+    connection.close()
+    secret_dir = tmp_path / ".job-agent-secrets"
+    secret_dir.mkdir()
+    (secret_dir / "gmail-token.json").write_text("{}")
+
+    monkeypatch.setattr(
+        recovery_executor,
+        "find_application_confirmation",
+        lambda *args, **kwargs: {
+            "message_id": "gmail-message",
+            "received_at_ms": 1_786_236_000_000,
+        },
+    )
+    audit = {
+        "applications": [
+            {
+                "company": "Point72",
+                "title": "Quantitative Researcher - Machine Learning",
+                "status": "submission_processing_error",
+                "error": "submission_processing_error",
+                "application_id": str(application_id),
+            }
+        ]
+    }
+
+    batch = execute_audit_recovery(
+        audit,
+        run_dir=tmp_path,
+        database=database,
+        environ={"JOB_AGENT_GMAIL_TOKEN_FILE": str(secret_dir / "gmail-token.json")},
+    )
+
+    record = audit["applications"][0]
+    assert record["status"] == "submitted"
+    assert record["reconciled_from_status"] == "submission_processing_error"
+    assert record["recovery_execution"]["status"] == "verified"
+    assert record["recovery_execution"]["retry_ready"] is False
+    assert "confirmed_outcome_persisted" in record["recovery_execution"]["evidence"]
+    assert batch.verified_targets == ()
+    connection = connect(database)
+    row = connection.execute(
+        "select status, submitted_at from applications where id = ?",
+        (application_id,),
+    ).fetchone()
+    connection.close()
+    assert row["status"] == "submitted"
+    assert row["submitted_at"] is not None
+
+
 def test_verified_recovery_batch_is_scoped_and_policy_annotated(
     tmp_path: Path,
 ) -> None:
@@ -309,6 +379,53 @@ def test_verified_recovery_batch_is_scoped_and_policy_annotated(
     assert items[0]["recovery_verified"] is True
     assert items[0]["retry_scope"] == "single_application"
     assert items[0]["recovery_attempt"] == 1
+
+
+def test_network_recovery_uses_structured_audit_and_read_only_health_check(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        @staticmethod
+        def getcode() -> int:
+            return 200
+
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return Response()
+
+    monkeypatch.setattr(
+        "job_agent.recovery_executor.urlopen",
+        fake_urlopen,
+    )
+    executor = JobApplicationRecoveryExecutor(run_dir=tmp_path)
+    preserved = executor.run_action(
+        RecoveryAction(
+            "preserve_network_failure_evidence",
+            "preserve",
+            automatic=True,
+        ),
+        {"error": "browser_navigation_network_error"},
+    )
+    checked = executor.run_action(
+        RecoveryAction("recheck_network_health", "check", automatic=True),
+        {"apply_url": "https://job-boards.greenhouse.io/acme/jobs/1"},
+    )
+
+    assert preserved["status"] == "completed"
+    assert preserved["evidence"] == ["network_failure"]
+    assert checked["status"] == "completed"
+    assert checked["evidence"] == ["network_health_rechecked"]
+    assert requests[0][0].get_method() == "HEAD"
+    assert requests[0][1] == 10
 
 
 def test_verified_recovery_batch_can_use_rebuilt_package_summary(

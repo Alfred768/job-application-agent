@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,9 @@ from job_agent.agent_session import (
     DeterministicSessionLLM,
     latest_trajectory_observation,
 )
+from job_agent.llm_answer_resolver import match_screening_rule
+from job_agent.python_runtime import load_runtime_payload
+from job_agent.sensitive_kb import resolve_sensitive_answer
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,7 @@ class RepairAgentReadiness:
     code: str
     message: str
     agent_path: str | None = None
+    auth_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,96 @@ class _RepairAgentRoute:
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Fingerprint = tuple[str, int, str] | None
+
+
+def _run_with_process_group_timeout(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    input: str | None = None,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command and tear down its full process tree on timeout.
+
+    ``subprocess.run(..., timeout=...)`` kills only the immediate child.  The
+    Codex launcher is a Node wrapper which starts a native grandchild; that
+    grandchild can keep stdout/stderr pipes open forever after the wrapper is
+    killed.  A dedicated process group lets the timeout own and reap the
+    complete isolated repair command.
+    """
+    process = subprocess.Popen(
+        list(command),
+        cwd=cwd,
+        env=dict(env),
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=(os.name == "posix"),
+    )
+    try:
+        stdout, stderr = process.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:  # pragma: no cover - Windows fallback
+            process.terminate()
+        try:
+            process.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:  # pragma: no cover - Windows fallback
+                process.kill()
+            process.communicate()
+        raise subprocess.TimeoutExpired(
+            list(command),
+            timeout,
+            output=exc.output,
+            stderr=exc.stderr,
+        ) from exc
+    return subprocess.CompletedProcess(
+        list(command),
+        process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _run_isolated_command(
+    runner: Runner,
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    input: str | None = None,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    if runner is subprocess.run:
+        return _run_with_process_group_timeout(
+            command,
+            cwd=cwd,
+            env=env,
+            input=input,
+            timeout=timeout,
+        )
+    return runner(
+        list(command),
+        cwd=cwd,
+        env=env,
+        input=input,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
 
 _REPAIRABLE_STATUSES = {
     "autofill_completed_blocked",
@@ -206,6 +301,12 @@ def check_repair_agent_readiness(
             message=route.error_message or "Repair-agent provider configuration is invalid.",
             agent_path=str(discovered),
         )
+    explicit_codex_key = bool(str(os.environ.get("CODEX_API_KEY") or "").strip())
+    projected_openai_key = (
+        route.auth_mode == "default_openai"
+        and not explicit_codex_key
+        and bool(str(os.environ.get("OPENAI_API_KEY") or "").strip())
+    )
     exec_env = _repair_agent_environment(for_exec=True, route=route)
     if route.provider_env_key and not exec_env.get(route.provider_env_key):
         return RepairAgentReadiness(
@@ -256,32 +357,68 @@ def check_repair_agent_readiness(
                 isolated_codex_home = Path(temporary) / "codex-home"
                 isolated_codex_home.mkdir()
                 exec_env["CODEX_HOME"] = str(isolated_codex_home)
-            probe = runner(
-                [
-                    str(discovered),
-                    "exec",
-                    "--ephemeral",
-                    "--ignore-user-config",
-                    "--sandbox",
-                    "read-only",
-                    "--skip-git-repo-check",
-                    *_repair_agent_override_args(route),
-                    "-c",
-                    "shell_environment_policy.inherit=none",
-                    "-C",
-                    temporary,
-                    (
-                        "Reply with exactly READY. Do not inspect files, call "
-                        "tools, or change anything."
-                    ),
-                ],
-                cwd=Path(temporary),
-                env=exec_env,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=max(1, int(timeout_seconds)),
-            )
+
+            def run_probe(environment: Mapping[str, str]):
+                return runner(
+                    [
+                        str(discovered),
+                        "exec",
+                        "--ephemeral",
+                        "--ignore-user-config",
+                        "--sandbox",
+                        "read-only",
+                        "--skip-git-repo-check",
+                        *_repair_agent_override_args(route),
+                        "-c",
+                        "shell_environment_policy.inherit=none",
+                        "-C",
+                        temporary,
+                        (
+                            "Reply with exactly READY. Do not inspect files, call "
+                            "tools, or change anything."
+                        ),
+                    ],
+                    cwd=Path(temporary),
+                    env=dict(environment),
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=max(1, int(timeout_seconds)),
+                )
+
+            probe = run_probe(exec_env)
+            if probe.returncode != 0 and projected_openai_key:
+                # The project .env may contain an expired OpenAI API key while
+                # the desktop Codex session still has a valid ChatGPT login.
+                # Try that login exactly once, without carrying any API key
+                # into the isolated probe or repair workspace.
+                login_env = _repair_agent_environment(
+                    route=route,
+                    auth_mode="login",
+                )
+                login_status = runner(
+                    [str(discovered), "login", "status"],
+                    cwd=Path.cwd(),
+                    env=login_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=max(1, int(timeout_seconds)),
+                )
+                if login_status.returncode == 0:
+                    probe = run_probe(login_env)
+                    if probe.returncode == 0:
+                        return RepairAgentReadiness(
+                            ready=True,
+                            code="ready",
+                            message=(
+                                "Repair agent completed a read-only remote readiness "
+                                "probe using the machine-level ChatGPT login after "
+                                "the configured API key was rejected."
+                            ),
+                            agent_path=str(discovered),
+                            auth_mode="login",
+                        )
     except subprocess.TimeoutExpired:
         return RepairAgentReadiness(
             ready=False,
@@ -306,6 +443,7 @@ def check_repair_agent_readiness(
             f"provider {route.provider_name}."
         ),
         agent_path=str(discovered),
+        auth_mode="login" if requires_login else "api_key",
     )
 
 
@@ -334,8 +472,18 @@ def _readiness_failure(
 
 def repair_result_consumes_cycle(result: Mapping[str, Any]) -> bool:
     """Return false for infrastructure failures that never reached code repair."""
-    if result.get("status") == "agent_unavailable":
+    if repair_result_is_verified(result):
+        return True
+    result_status = str(result.get("status") or "")
+    if result_status in {"agent_unavailable", "exhausted"}:
         return False
+    # Once the isolated agent returned and trusted verification actually ran,
+    # the cycle was consumed even if the agent's prose or diff happens to
+    # contain words such as "rate limit".  Classifying arbitrary agent output
+    # as infrastructure would strand a real verification failure as
+    # repair_unavailable and skip the remaining bounded cycles.
+    if result_status == "verification_failed":
+        return True
     reason = str(result.get("reason") or "")
     if reason.startswith("repair_agent_") and reason.endswith(
         (
@@ -430,6 +578,7 @@ def build_repair_request(
 
         fingerprints: list[dict[str, Any]] = []
         sanitized_reviews: list[dict[str, Any]] = []
+        unresolved_candidate_fact = False
         review_items = raw_application.get("review_items")
         if isinstance(review_items, list):
             for raw_item in review_items:
@@ -438,13 +587,47 @@ def build_repair_request(
                 reason = _compact_text(raw_item.get("reason"))
                 label = _compact_text(raw_item.get("label")) or "unlabeled field"
                 normalized_reason = reason.lower()
+                candidate_fact = requires_approved_candidate_fact(raw_item)
+                approved_answer = _prior_package_approved_answer(
+                    raw_application,
+                    raw_item,
+                    run_dir=run_dir,
+                )
+                approved_fact_mapping_failure = bool(
+                    candidate_fact
+                    and approved_answer is not None
+                    and _approved_answer_is_compatible_with_control_failure(
+                        raw_item,
+                        approved_answer,
+                    )
+                    and _is_control_mapping_failure(normalized_reason)
+                )
+                if (
+                    raw_item.get("blocking", True)
+                    and candidate_fact
+                    and not approved_fact_mapping_failure
+                ):
+                    unresolved_candidate_fact = True
                 if (
                     not raw_item.get("blocking", True)
-                    or requires_approved_candidate_fact(raw_item)
-                    or any(marker in normalized_reason for marker in _MANUAL_REASON_MARKERS)
+                    or (candidate_fact and not approved_fact_mapping_failure)
+                    or (
+                        any(
+                            marker in normalized_reason
+                            for marker in _MANUAL_REASON_MARKERS
+                        )
+                        and not _is_control_mapping_failure(normalized_reason)
+                    )
                 ):
                     continue
                 item_fingerprints = _review_fingerprints(label, reason)
+                if approved_fact_mapping_failure and not item_fingerprints:
+                    item_fingerprints = [
+                        {
+                            "code": "approved_fact_control_mapping_failure",
+                            "field_label": label,
+                        }
+                    ]
                 if not item_fingerprints:
                     continue
                 sanitized_reviews.append(
@@ -490,6 +673,9 @@ def build_repair_request(
             finding["agent_runtime_id"] = agent_runtime_id
         if package_dir is not None:
             finding["package_dir"] = str(package_dir)
+        if unresolved_candidate_fact:
+            finding["retry_withheld"] = True
+            finding["retry_withheld_reason"] = "unresolved_candidate_fact"
         findings.append(finding)
 
         target = {"company": company, "title": title}
@@ -497,7 +683,8 @@ def build_repair_request(
             target["agent_runtime_id"] = agent_runtime_id
         if package_dir is not None:
             target["package_dir"] = str(package_dir)
-        retry_targets.append(target)
+        if not unresolved_candidate_fact:
+            retry_targets.append(target)
 
     if not findings:
         return None
@@ -526,11 +713,16 @@ def _run_repair_cycle_direct(
     verification_runner: Runner = subprocess.run,
     verification_commands: Sequence[Sequence[str]] | None = None,
     defer_promotion: bool = False,
+    auth_mode: str | None = None,
 ) -> dict[str, Any]:
     """Run one coding repair in an isolated copy and promote verified changes."""
     root = root.resolve()
     run_dir = run_dir.resolve()
     cycle = max(1, int(request.get("cycle", 1) or 1))
+    budget_cycle = max(
+        1,
+        int(request.get("budget_cycle", cycle) or cycle),
+    )
     attempt = max(1, int(request.get("attempt", cycle) or cycle))
     result_dir = run_dir / "repair"
     result_dir.mkdir(parents=True, exist_ok=True)
@@ -546,6 +738,7 @@ def _run_repair_cycle_direct(
         result = {
             "schema_version": 1,
             "cycle": cycle,
+            "budget_cycle": budget_cycle,
             "attempt": attempt,
             "status": status,
             "changed_files": [],
@@ -572,7 +765,7 @@ def _run_repair_cycle_direct(
         )
     if not policy.enabled:
         return finish("disabled", reason="automatic_repair_disabled")
-    if cycle > policy.max_cycles:
+    if budget_cycle > policy.max_cycles:
         return finish("exhausted", reason="maximum_repair_cycles_reached")
     if not policy.agent_binary.strip():
         return finish("agent_failed", reason="repair_agent_binary_is_empty")
@@ -584,7 +777,11 @@ def _run_repair_cycle_direct(
             retryable=False,
             provider=route.provider_name,
         )
-    agent_env = _repair_agent_environment(for_exec=True, route=route)
+    agent_env = _repair_agent_environment(
+        for_exec=True,
+        route=route,
+        auth_mode=auth_mode,
+    )
     if route.provider_env_key and not agent_env.get(route.provider_env_key):
         return finish(
             "agent_unavailable",
@@ -593,7 +790,7 @@ def _run_repair_cycle_direct(
             provider=route.provider_name,
             provider_env_key=route.provider_env_key,
         )
-    requires_login = route.auth_mode == "openai_login" or (
+    requires_login = auth_mode == "login" or route.auth_mode == "openai_login" or (
         route.auth_mode == "default_openai"
         and not agent_env.get("CODEX_API_KEY")
     )
@@ -640,14 +837,12 @@ def _run_repair_cycle_direct(
             "-",
         ]
         try:
-            agent_completed = agent_runner(
+            agent_completed = _run_isolated_command(
+                agent_runner,
                 agent_command,
                 cwd=staging,
                 env=agent_env,
                 input=prompt,
-                capture_output=True,
-                text=True,
-                check=False,
                 timeout=policy.agent_timeout_seconds,
             )
         except subprocess.TimeoutExpired:
@@ -717,13 +912,11 @@ def _run_repair_cycle_direct(
         for raw_command in commands:
             command = [str(part) for part in raw_command]
             try:
-                completed = verification_runner(
+                completed = _run_isolated_command(
+                    verification_runner,
                     command,
                     cwd=staging,
                     env=verification_env,
-                    capture_output=True,
-                    text=True,
-                    check=False,
                     timeout=policy.verification_timeout_seconds,
                 )
             except subprocess.TimeoutExpired:
@@ -871,6 +1064,7 @@ class _CodexRepairTool(Tool):
         verification_runner: Runner,
         verification_commands: Sequence[Sequence[str]] | None,
         defer_promotion: bool,
+        auth_mode: str | None,
     ) -> None:
         super().__init__(
             "codex_repair_agent",
@@ -885,6 +1079,7 @@ class _CodexRepairTool(Tool):
         self._verification_runner = verification_runner
         self._verification_commands = verification_commands
         self._defer_promotion = defer_promotion
+        self._auth_mode = auth_mode
 
     def run(self, _parameters: dict[str, Any]) -> dict[str, Any]:
         return _run_repair_cycle_direct(
@@ -896,6 +1091,7 @@ class _CodexRepairTool(Tool):
             verification_runner=self._verification_runner,
             verification_commands=self._verification_commands,
             defer_promotion=self._defer_promotion,
+            auth_mode=self._auth_mode,
         )
 
     def get_parameters(self) -> list[ToolParameter]:
@@ -985,6 +1181,7 @@ def run_repair_cycle(
     verification_runner: Runner = subprocess.run,
     verification_commands: Sequence[Sequence[str]] | None = None,
     defer_promotion: bool = False,
+    auth_mode: str | None = None,
 ) -> dict[str, Any]:
     """Run an isolated repair as a Policy-controlled Agent Core action."""
     findings = request.get("findings")
@@ -1010,6 +1207,7 @@ def run_repair_cycle(
             verification_runner=verification_runner,
             verification_commands=verification_commands,
             defer_promotion=defer_promotion,
+            auth_mode=auth_mode,
         )
     )
     targets = request.get("retry_targets")
@@ -1088,6 +1286,7 @@ def run_repair_cycle(
             verification_runner=verification_runner,
             verification_commands=verification_commands,
             defer_promotion=defer_promotion,
+            auth_mode=auth_mode,
         )
     result["agent_loop"] = agent_loop_result_to_dict(loop_result)
     result_path = Path(str(result.get("result_path") or ""))
@@ -1387,6 +1586,31 @@ def _review_fingerprints(label: str, reason: str) -> list[dict[str, Any]]:
                 "field_label": label,
             }
         )
+    elif "checkbox" in normalized_reason and (
+        "needs saved answer" in normalized_reason
+        or "no checkbox option matches" in normalized_reason
+        or "browser reports field as invalid" in normalized_reason
+    ):
+        fingerprints.append(
+            {
+                "code": "checkbox_option_or_commit_failure",
+                "field_label": label,
+            }
+        )
+    elif "browser reports field as invalid" in normalized_reason:
+        fingerprints.append(
+            {
+                "code": "dynamic_field_validation_failure",
+                "field_label": label,
+            }
+        )
+    elif "no matching option" in normalized_reason:
+        fingerprints.append(
+            {
+                "code": "option_mapping_failure",
+                "field_label": label,
+            }
+        )
     elif normalized_reason.startswith("fill error:"):
         fingerprints.append(
             {
@@ -1395,6 +1619,133 @@ def _review_fingerprints(label: str, reason: str) -> list[dict[str, Any]]:
             }
         )
     return fingerprints
+
+
+def _is_control_mapping_failure(reason: str) -> bool:
+    return any(
+        marker in reason
+        for marker in (
+            "browser reports field as invalid",
+            "checkbox",
+            "combobox",
+            "dropdown selection",
+            "fill error:",
+            "no matching option",
+            "option mismatch",
+        )
+    )
+
+
+def _is_reproducible_control_defect(reason: str) -> bool:
+    return any(
+        marker in reason
+        for marker in (
+            "adapter mapping",
+            "made no progress",
+            "selection readback",
+            "selection could not be verified",
+        )
+    )
+
+
+def _prior_package_has_approved_answer(
+    application: Mapping[str, Any],
+    item: Mapping[str, Any],
+    *,
+    run_dir: Path,
+) -> bool:
+    """Detect a persisted fact without copying its value into a repair request."""
+    return _prior_package_approved_answer(
+        application,
+        item,
+        run_dir=run_dir,
+    ) is not None
+
+
+def _prior_package_approved_answer(
+    application: Mapping[str, Any],
+    item: Mapping[str, Any],
+    *,
+    run_dir: Path,
+) -> Any | None:
+    """Return a persisted approved fact only inside the trusted main process."""
+    script_value = str(application.get("script_path") or "").strip()
+    if script_value:
+        script_path = Path(script_value)
+    else:
+        package_value = str(application.get("package_dir") or "").strip()
+        if not package_value:
+            return None
+        script_path = Path(package_value) / "autofill-runtime.js"
+    if not script_path.is_absolute():
+        script_path = run_dir / script_path
+    try:
+        resolved = script_path.resolve()
+        resolved.relative_to(run_dir.resolve())
+        payload = load_runtime_payload(resolved)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    profile = payload.get("profile")
+    if not isinstance(profile, Mapping):
+        return None
+    label = str(item.get("label") or "").strip()
+    if not label:
+        return None
+    if bool(item.get("sensitive")):
+        answer = resolve_sensitive_answer(label, dict(profile))
+        if answer is not None and str(answer).strip():
+            return answer
+    answers = profile.get("answers")
+    normalized_label = re.sub(r"[^a-z0-9]+", " ", label.casefold()).strip()
+    if isinstance(answers, Mapping):
+        for key, value in answers.items():
+            normalized_key = re.sub(
+                r"[^a-z0-9]+",
+                " ",
+                str(key).casefold(),
+            ).strip()
+            if normalized_key == normalized_label and str(value).strip():
+                return value
+    return match_screening_rule(
+        label,
+        profile.get("screening_answer_rules"),
+    )
+
+
+def _approved_answer_is_compatible_with_control_failure(
+    item: Mapping[str, Any],
+    answer: Any,
+) -> bool:
+    """Distinguish a commit defect from an incompatible saved candidate fact."""
+    reason = str(item.get("reason") or "")
+    marker = re.search(r"available options:\s*(.+)$", reason, flags=re.IGNORECASE)
+    if marker is None:
+        return True
+    available = re.sub(r"[^a-z0-9]+", " ", marker.group(1).casefold()).strip()
+    wanted = re.sub(r"[^a-z0-9]+", " ", str(answer).casefold()).strip()
+    if not available or not wanted:
+        return False
+    if wanted in available:
+        return True
+    binary_available = bool(
+        re.search(r"(?:^|\s)yes(?:\s|$)", available)
+        and re.search(r"(?:^|\s)no(?:\s|$)", available)
+    )
+    if binary_available:
+        positive_prefixes = (
+            "yes", "true", "i agree", "i acknowledge", "i have ",
+            "i am ", "i can ", "i do ", "i require", "i will require",
+        )
+        negative_prefixes = (
+            "no", "false", "i do not", "i have not", "i am not",
+            "i cannot", "never",
+        )
+        raw = str(answer).strip().casefold()
+        if raw.startswith((*positive_prefixes, *negative_prefixes)):
+            return True
+    if wanted in {"not applicable", "n a", "none"} and "none of the above" in available:
+        return True
+    return False
 
 
 def _repeated_combobox_fields(value: Any, *, run_dir: Path) -> list[str]:
@@ -1692,7 +2043,10 @@ def _repair_prompt(request: Mapping[str, Any]) -> str:
         "answers. You may modify only src/job_agent/, related tests, AGENTS.md, "
         "docs/DAILY_APPLICATION_SOP.md, docs/PROJECT_MAP.md, and "
         "ops/daily.example.json. Do not weaken or delete regression tests. Make the "
-        "smallest product fix that addresses the fingerprints, run focused offline "
+        "smallest product fix that addresses the fingerprints. First inspect whether "
+        "the current code and existing tests already address every supplied fingerprint; "
+        "if they do, do not edit files because an unchanged workspace can be independently "
+        "verified as already fixed. Otherwise run focused offline "
         "tests, and finish after the code repair is ready for independent verification.\n\n"
         f"Repair request:\n{serialized}\n"
     )
@@ -1869,6 +2223,7 @@ def _repair_agent_environment(
     *,
     for_exec: bool = False,
     route: _RepairAgentRoute | None = None,
+    auth_mode: str | None = None,
 ) -> dict[str, str]:
     selected_route = route or _RepairAgentRoute()
     allowed = {
@@ -1895,7 +2250,11 @@ def _repair_agent_environment(
         for key, value in os.environ.items()
         if key in allowed or key.startswith("CODEX_")
     }
-    if selected_route.auth_mode == "provider_env":
+    if auth_mode == "login":
+        env.pop("CODEX_ACCESS_TOKEN", None)
+        env.pop("CODEX_API_KEY", None)
+        env.pop("OPENAI_API_KEY", None)
+    elif selected_route.auth_mode == "provider_env":
         for key in ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"):
             if key != selected_route.provider_env_key:
                 env.pop(key, None)
@@ -1958,9 +2317,7 @@ def _verification_environment(staging: Path) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if key in allowed}
     env.update(
         {
-            "BROWSER_HEADLESS": "1",
             "CAPMONSTER_SOLVE_CAPTCHA": "0",
-            "JOB_AGENT_SUBMIT_COMPLETE": "0",
             "PYTHONPATH": str(staging / "src"),
             "RESUME_SOURCE_DIR": "",
         }

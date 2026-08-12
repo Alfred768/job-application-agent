@@ -14,17 +14,19 @@ from hello_agents.core.contracts import (
 from hello_agents.core.trace import agent_loop_result_to_dict
 
 
-_MISSING_FACT_MARKERS = (
+_EXPLICIT_MISSING_FACT_MARKERS = (
     "candidate fact needs explicit approved answer",
-    "needs saved answer",
     "no approved answer",
     "profile has no approved",
     "missing candidate fact",
-    "no option matches saved answer",
     "truthfulness gate",
     "user-authored",
 )
 _USER_AUTHORED_FIELD_MARKERS = (
+    "exceptional ability",
+    "provide us with 3-4 examples",
+    "provide us with 3 4 examples",
+    "this is your moment to wow us",
     "most interesting paper",
     "paper, blog post",
     "blog post, or documentation",
@@ -35,6 +37,55 @@ _USER_AUTHORED_FIELD_MARKERS = (
     "recently read",
 )
 _CANDIDATE_FACT_FIELD_MARKERS = (
+    "accommodation",
+    "able to start",
+    "authorization",
+    "citizen",
+    "citizenship",
+    "company employment",
+    "contractor",
+    "country",
+    "currently located",
+    "currently live",
+    "education",
+    "employee",
+    "employment",
+    "english level",
+    "english proficiency",
+    "expected graduation",
+    "graduation",
+    "how familiar",
+    "familiarity",
+    "have you used",
+    "engineering blog",
+    "intern season",
+    "what season",
+    "work on-site",
+    "work onsite",
+    "work on site",
+    "commute",
+    "sms",
+    "whatsapp",
+    "security clearance",
+    "export control",
+    "immigration",
+    "nationality",
+    "native name",
+    "legal name",
+    "offer deadline",
+    "other offer",
+    "prior work",
+    "previously work",
+    "related to",
+    "relationship",
+    "relocat",
+    "school",
+    "sponsorship",
+    "start full time",
+    "current residence",
+    "years of experience",
+    "not including internships",
+    "excluding internships",
     "high school name",
     "high school graduation",
     "secondary school name",
@@ -140,7 +191,7 @@ def requires_approved_candidate_fact(item: Mapping[str, Any]) -> bool:
     label = str(item.get("label") or "").casefold()
     reason = str(item.get("reason") or "").casefold()
     return bool(item.get("sensitive")) or any(
-        marker in reason for marker in _MISSING_FACT_MARKERS
+        marker in reason for marker in _EXPLICIT_MISSING_FACT_MARKERS
     ) or any(
         marker in label
         for marker in (
@@ -254,6 +305,22 @@ class JobApplicationRecoveryPlanner:
             return self._email_verification(normalized, merged)
         if normalized == "candidate_account_required":
             return self._candidate_account(normalized, merged)
+        if normalized in {"autofill_failed", "autofill_timed_out"} and (
+            bool(merged.get("network_failure"))
+            or str(merged.get("error") or "") in {
+                "browser_navigation_network_error",
+                "browser_launch_error",
+                "browser_session_closed",
+                "network_circuit_breaker_active",
+            }
+        ):
+            return self._network_health(normalized, merged)
+        if (
+            normalized == "autofill_failed"
+            and str(merged.get("error") or "")
+            == "application_form_unavailable"
+        ):
+            return self._application_form(normalized, merged)
         if normalized == "submit_clicked_unconfirmed":
             return self._clicked_unconfirmed(normalized)
         if (
@@ -265,6 +332,89 @@ class JobApplicationRecoveryPlanner:
         if normalized == "autofill_completed_blocked":
             return self._blocked_fields(normalized, merged)
         return None
+
+    def _network_health(
+        self,
+        status: str,
+        context: Mapping[str, Any],
+    ) -> RecoveryPlan:
+        raw_seconds = context.get("network_cooldown_seconds") or 300
+        try:
+            cooldown_seconds = max(30, int(raw_seconds))
+        except (TypeError, ValueError):
+            cooldown_seconds = 300
+        return RecoveryPlan(
+            status=status,
+            strategy="batch_network_health_recovery",
+            actions=(
+                RecoveryAction(
+                    "preserve_network_failure_evidence",
+                    "Preserve the redacted browser/network failure code and batch health snapshot.",
+                    automatic=True,
+                ),
+                RecoveryAction(
+                    "wait_for_network_health",
+                    "Keep the global browser/network circuit open during a bounded cooldown.",
+                    automatic=True,
+                    parameters={"cooldown_seconds": cooldown_seconds},
+                ),
+                RecoveryAction(
+                    "recheck_network_health",
+                    "Run a read-only health check before considering this application again.",
+                    automatic=True,
+                ),
+            ),
+            retry_allowed=True,
+            retry_after_seconds=cooldown_seconds,
+            retry_scope="single_application",
+            retry_condition=(
+                "The global network circuit is closed, the read-only health check passes, "
+                "and no application was created by the failed attempt."
+            ),
+            evidence_required=("network_failure", "network_health_rechecked"),
+            reason="A cross-company browser/network failure is an environment condition, not a coding repair candidate.",
+        )
+
+    def _application_form(
+        self,
+        status: str,
+        _context: Mapping[str, Any],
+    ) -> RecoveryPlan:
+        return RecoveryPlan(
+            status=status,
+            strategy="application_form_reconciliation",
+            actions=(
+                RecoveryAction(
+                    "preserve_application_form_navigation_evidence",
+                    "Preserve the redacted redirect and form-entry evidence.",
+                    automatic=True,
+                ),
+                RecoveryAction(
+                    "recheck_application_form_entry",
+                    "Recheck the application entry in read-only mode before any retry.",
+                    automatic=True,
+                ),
+                RecoveryAction(
+                    "request_application_form_review",
+                    "Request review when the application form remains unavailable.",
+                    automatic=False,
+                    requires_user=True,
+                ),
+            ),
+            retry_allowed=True,
+            retry_scope="single_application",
+            retry_condition=(
+                "The application form is reachable in a read-only recheck and no application was created."
+            ),
+            evidence_required=(
+                "application_form_navigation",
+                "application_form_rechecked",
+            ),
+            reason=(
+                "The form entry is unavailable or unsupported; preserve evidence and recheck the single job, "
+                "without treating it as a coding repair candidate."
+            ),
+        )
 
     def _anti_spam(
         self,
@@ -417,13 +567,18 @@ class JobApplicationRecoveryPlanner:
                     "Check the portal and confirmation inbox for an existing application.",
                     automatic=True,
                 ),
+                RecoveryAction(
+                    "persist_confirmed_outcome",
+                    "Persist an exact existing-submission confirmation without clicking Submit again.",
+                    automatic=True,
+                ),
             ),
             retry_allowed=True,
             retry_condition=(
                 "Evidence proves no application was created and the site processing "
                 "error is no longer present."
             ),
-            evidence_required=("processing_error", "no_existing_submission"),
+            evidence_required=("processing_error", "outcome_reconciled"),
             reason="A site processing error requires outcome reconciliation first.",
         )
 

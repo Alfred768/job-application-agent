@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -3664,7 +3665,7 @@ def test_cli_pipeline_run_builds_auditable_application_batch(tmp_path, monkeypat
     )
 
     assert result.exit_code == 0, result.output
-    assert shortlist_calls[-1]["diversify_companies"] is True
+    assert shortlist_calls[-1]["unique_companies"] is True
     manifest = json.loads((out_dir / "pipeline-manifest.json").read_text())
     expected_sha = hashlib.sha256(b"%PDF-1.4\n").hexdigest()
     assert manifest["counts"] == {"imported": 1, "shortlisted": 1, "prepared": 1}
@@ -3689,6 +3690,170 @@ def test_cli_pipeline_run_builds_auditable_application_batch(tmp_path, monkeypat
     assert "tailored-resume.docx" not in script
     assert '"headless": false' in script
     assert ".click('submit')" not in script
+
+
+def test_cli_pipeline_run_excludes_sibling_batch_urls(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSER_HEADLESS", "false")
+    monkeypatch.setattr(
+        "job_agent.cli.convert_docx_to_pdf",
+        lambda docx_path, pdf_path: Path(pdf_path).write_bytes(b"%PDF-1.4\n") > 0,
+    )
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Agent Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-agent</link>
+        <description>Build production LLM agents with Python, RAG, FastAPI, and Docker.</description>
+        <category>Remote</category>
+        </item></channel></rss>"""
+    )
+    sources_path = tmp_path / "sources.json"
+    sources_path.write_text(
+        json.dumps({"sources": [{"type": "rss", "source": "company-rss", "rss_file": str(rss_path)}]})
+    )
+    resume_path = tmp_path / "resume.pdf"
+    resume_path.write_bytes(b"%PDF-1.4\n")
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"name": "Candidate", "email": "candidate@example.com"}))
+    day_dir = tmp_path / "daily"
+    prior_run = day_dir / "100000"
+    prior_run.mkdir(parents=True)
+    (prior_run / "applications").mkdir()
+    (prior_run / "run-state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "100000",
+                "phase": "prepared",
+                "updated_at": "2026-01-01T00:00:00-04:00",
+            }
+        )
+    )
+    (prior_run / "applications" / "batch-summary.json").write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Acme AI",
+                    "title": "Agent Engineer",
+                    "apply_url": "https://jobs.example.com/acme-agent",
+                    "runtime_script_path": str(
+                        prior_run / "applications" / "acme-runtime.js"
+                    ),
+                }
+            ]
+        )
+    )
+    (prior_run / "execution-audit.json").write_text(
+        json.dumps(
+            {
+                "applications": [
+                    {
+                        "company": "Acme AI",
+                        "apply_url": "https://jobs.example.com/acme-agent",
+                        "script_path": str(
+                            prior_run / "applications" / "acme-runtime.js"
+                        ),
+                        "status": "submitted",
+                    }
+                ]
+            }
+        )
+    )
+    out_dir = day_dir / "200000"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "pipeline",
+            "run",
+            str(sources_path),
+            "--out-dir",
+            str(out_dir),
+            "--required-resume-pdf",
+            str(resume_path),
+            "--profile",
+            str(profile_path),
+            "--min-score",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((out_dir / "pipeline-manifest.json").read_text())
+    assert manifest["counts"] == {"imported": 1, "shortlisted": 0, "prepared": 0}
+    screening = json.loads((out_dir / "candidate-screening.json").read_text())
+    assert screening[0]["company"] == "Acme AI"
+    assert "already prepared in a sibling batch" in screening[0]["reasons"][0]
+
+
+def test_cli_pipeline_run_releases_sibling_batch_without_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv("BROWSER_HEADLESS", "false")
+    monkeypatch.setattr(
+        "job_agent.cli.convert_docx_to_pdf",
+        lambda docx_path, pdf_path: Path(pdf_path).write_bytes(b"%PDF-1.4\n") > 0,
+    )
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Platform Engineer at Acme AI</title>
+        <link>https://jobs.example.com/acme-platform</link>
+        <description>Build production LLM agents with Python, RAG, FastAPI, and Docker.</description>
+        <category>Remote</category>
+        </item></channel></rss>"""
+    )
+    sources_path = tmp_path / "sources.json"
+    sources_path.write_text(
+        json.dumps({"sources": [{"type": "rss", "source": "company-rss", "rss_file": str(rss_path)}]})
+    )
+    resume_path = tmp_path / "resume.pdf"
+    resume_path.write_bytes(b"%PDF-1.4\n")
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"name": "Candidate", "email": "candidate@example.com"}))
+    day_dir = tmp_path / "daily"
+    prior_run = day_dir / "100000"
+    prior_run.mkdir(parents=True)
+    (prior_run / "applications").mkdir()
+    (prior_run / "run-state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "100000",
+                "phase": "prepared",
+                "updated_at": "2026-01-01T00:00:00-04:00",
+            }
+        )
+    )
+    (prior_run / "applications" / "batch-summary.json").write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Acme AI",
+                    "title": "Agent Engineer",
+                    "apply_url": "https://jobs.example.com/acme-agent",
+                }
+            ]
+        )
+    )
+    out_dir = day_dir / "200000"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "pipeline",
+            "run",
+            str(sources_path),
+            "--out-dir",
+            str(out_dir),
+            "--required-resume-pdf",
+            str(resume_path),
+            "--profile",
+            str(profile_path),
+            "--min-score",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = json.loads((out_dir / "pipeline-manifest.json").read_text())
+    assert manifest["counts"] == {"imported": 1, "shortlisted": 1, "prepared": 1}
 
 
 def test_cli_pipeline_init_workspace_writes_templates_and_runbook(tmp_path):
@@ -3844,11 +4009,36 @@ def test_cli_pipeline_run_passes_sensitive_kb_to_runtime_package(tmp_path, monke
     assert '"answer": "Yes"' in runtime_script
 
 
+def test_cli_rejects_direct_production_execution_entrypoint(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "__file__", str(tmp_path / "src" / "job_agent" / "cli.py"))
+    production_dir = tmp_path / "output" / "daily" / "2026-08-10" / "120000"
+    production_dir.mkdir(parents=True)
+    summary = production_dir / "applications" / "batch-summary.json"
+    summary.parent.mkdir()
+    summary.write_text("[]")
+    audit = production_dir / "execution-audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "applications",
+            "execute-batch",
+            str(summary),
+            "--audit-out",
+            str(audit),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Production execution must be started by scripts/daily_sop.py" in result.output
+
+
 def test_cli_pipeline_execute_batch_runs_generated_runtime_with_fake_playwright(tmp_path, monkeypatch):
     if shutil.which("node") is None:
         pytest.skip("node executable is required for end-to-end execution smoke test")
 
     monkeypatch.setenv("BROWSER_HEADLESS", "true")
+    monkeypatch.setenv("JOB_AGENT_LLM_ANSWERS", "0")
     # This test supplies a local Node Playwright shim; prevent the CLI's
     # project .env from routing it through the real Gmail/Python runtime.
     monkeypatch.setenv("JOB_AGENT_GMAIL_TOKEN_FILE", "")
@@ -4312,7 +4502,7 @@ def test_cli_reconcile_root_recovers_confirmed_package(tmp_path, monkeypatch):
     assert row == ("submitted",)
 
 
-def test_previously_submitted_filter_matches_by_url_or_title():
+def test_previously_submitted_filter_prefers_exact_url_and_uses_title_without_url():
     job = Job(
         company="Acme AI",
         title="Machine Learning Engineer",
@@ -4322,7 +4512,7 @@ def test_previously_submitted_filter_matches_by_url_or_title():
     )
     submitted_titles = {("acme ai", "machine learning engineer")}
 
-    assert cli._was_previously_submitted(
+    assert not cli._was_previously_submitted(
         job,
         {"https://jobs.example.com/acme/old-role"},
         submitted_titles,
@@ -4925,7 +5115,7 @@ def test_cli_pipeline_run_does_not_skip_company_after_matching_successful_submis
     )
 
     assert result.exit_code == 0, result.output
-    assert prepared == [("Acme AI", "Agent Engineer"), ("Acme AI", "Backend Engineer")]
+    assert prepared == [("Acme AI", "Agent Engineer")]
     assert not (out_dir / "prior-terminal-outcomes.json").exists()
 
 

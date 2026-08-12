@@ -33,7 +33,9 @@ cp ops/daily.example.json ops/daily.local.json
   `min_terminal_audit_coverage` 默认要求 100% 完整终态审计。最终合格执行岗位的确认率只作
   诊断；原始导入目标也不能作为绕过资格、去重或安全门的理由。
 - `auto_repair`：受控 coding repair 策略。`enabled` 决定是否自动启动隔离修复，
-  `max_cycles` 限制修复轮数，`combobox_no_progress_seconds` 是单个下拉字段的无进展上限，
+  `max_cycles` 限制同一修复阶段在最近一次已验证修复之后的连续逻辑失败轮数，且脚本硬上限为 5；
+  已验证修复经过后续浏览器执行后，新暴露的指纹进入新的有界修复阶段，但 artifact cycle 仍全局递增。
+  `combobox_no_progress_seconds` 是单个下拉字段的无进展上限，
   `retry_after_verified_repair` 决定验证通过后是否只重试受影响岗位。
 
 所有路径相对于项目根目录；`${RESUME_SOURCE_DIR}` 这类值从 `.env` 读取。不要把密钥或候选人答案写进 SOP 配置。
@@ -101,8 +103,13 @@ output/daily/YYYY-MM-DD/HHMMSS/
 准备阶段验收：
 
 - manifest 的 `prepared` 不超过配置的 `limit`。
-- 有足够多不同公司的合格岗位时，有限批次先为每家公司保留一个名额，再按分数用同公司
-  的其他岗位补足，避免单一故障公司占满整批。
+- 每个准备批次内，同一家公司只保留一个岗位，避免对同一家公司重复投递；若候选池不足，
+  仍按分数取其他公司岗位补足。
+- 同一天内已经由更早批次取得真实页面确认提交的公司，会在后续准备批次中继续排除，避免跨批次重复。
+  仅准备但未执行、或执行后没有确认成功的旧岗位标记为未投递并释放同公司新岗位；
+  原始终态仍保留在数据库和审计中，具体 URL 继续受 submitted/terminal Recovery 门保护。
+- 短名单默认按「创业公司 → 中型公司 → 大型公司」的顺序排序，在每个公司层级内再按匹配
+  分数排序。
 - `candidate-screening.json` 没有被拒绝却进入准备队列的候选人。
 - 每个包的职位、公司和申请 URL 对应。
 - 每个包使用配置允许的外部原始 PDF；不得出现包内生成的简历。
@@ -140,9 +147,18 @@ Policy Gate；LinkedIn 自动访问、未验证档案、重复/受保护终态�
 
 执行阶段只允许使用准备阶段生成的 `batch-summary.json`。不要重新拼接 `pipeline run-execute`，也不要把另一次运行的包混入本次目录。
 
+生产运行目录下的浏览器执行只能由本 SOP 的 `execute` 或 `run --execute` 授权。
+`pipeline run-execute` 与 `applications execute-batch` 仅用于内部受控调用、离线 fixture
+或诊断；它们直接指向 `output/daily/` 时会拒绝执行。`check` 和 `report` 还会校验阶段与
+完整审计的一致性：若发现 `progress.complete=true` 但运行仍是 `prepared`、
+`prepared_empty`、`waiting_for_candidates` 或 `executing`，必须报错并先做审计对账，不能
+静默生成日报或把运行当作未执行。
+
 每个岗位的自动恢复顺序固定为：
 
 1. 依据真实档案、approved sensitive KB 和受约束的非敏感 LLM 回答填写字段；
+   动态下拉若在规划时尚未暴露选项，会在控件打开后把真实可见选项重新交给受控生成器；
+   生成结果必须回映射到页面原始选项并通过读回校验，不能提交页面不存在的自由文本；
 2. 对动态字段、读回失败和可恢复的普通填写错误执行最多
    `JOB_AGENT_SELF_HEAL_PASSES` 次有界重检，即使同页另有人工阻塞字段也继续修复可恢复项；
    CAPTCHA 或服务端校验后的重检会先验证并复用与批准答案匹配的已提交 combobox 值，
@@ -212,15 +228,21 @@ Goal achieved。反垃圾、CAPTCHA、邮箱验证、账户、点击未确认、
    `examples verify-offline`；修复 Agent 不能通过删除或削弱旧测试获得通过；
 7. 浏览器批次退出后再次检查主工作区哈希，仅在全部通过后提升代码，记录
    `repair_verified`，并从原 batch 生成只含修复指纹关联岗位、带
-   `repair_verified=true` 和 `retry_scope=single_application` 的 retry batch；
-8. 达到 `max_cycles` 仍未通过时记录 `repair_exhausted` 并返回失败，不把命令成功退出误报
-   为投递完成。
+   `repair_verified=true` 和 `retry_scope=single_application` 的 retry batch；SOP 随后在主进程
+   从原始规范化岗位、当前已批准 profile/sensitive KB 和已提升代码重建这些包，避免旧包内嵌
+   的旧运行时代码或旧事实快照进入重试，同时不向隔离 Repair Agent 暴露私密事实；
+8. 最近一次已验证修复之后连续达到 `max_cycles` 仍未通过时记录 `repair_exhausted` 并返回失败，
+   不把命令成功退出误报为投递完成；尚未真正启动 Codex 的 `exhausted` 门检和基础设施失败
+   都不消耗逻辑周期。
 
 活动浏览器进程不会热改源码。验证后的重试会启动新的执行子进程，因此加载的是已提升代码；
 SQLite 继续保护已确认提交，非修复终态不会被带入 retry batch。
 
 Codex 认证/配置/网络/限流错误属于 repair 基础设施不可用：记录独立 attempt 编号和
 `repair_unavailable`，但不增加逻辑 `max_cycles` 计数，也不立即重复同一个确定性失败。
+若外部中断使运行残留在 `repairing`，先确认对应 Repair 进程已经退出，再运行
+`repair --recover-interrupted`；它会记录基础设施中断并保留当前审计范围，不消耗 coding
+repair cycle，也不会自动打开浏览器。
 修复环境恢复后运行：
 
 ```bash
@@ -273,10 +295,12 @@ Codex Repair，但每条执行审计必须包含 `recovery_plan`。SOP 会把其
 教育经历（包括高中名称和毕业年份），过往/当前任职、承包或投递面试经历，其他 offer
 及其截止日期，亲属关系与利益冲突，雇主限制与便利需求，母语/本地文字法定姓名，以及
 产品/地点/工作方向等个人偏好和明确的每周到岗承诺必须视为候选人事实。
-只有规范化后与表单字段精确对应的 profile answer，或该
-字段适用且已批准的 sensitive KB 才能作答；不得把简历缺失解释为 `No`，也不得从一般搬迁、
-远程偏好或低频到岗意愿推导固定到岗承诺。缺少精确答案时保持 `waiting_for_user`。
-运行时明确返回 `candidate fact needs explicit approved answer` 时必须走同一
+优先使用规范化后与表单字段精确对应的 profile answer，或该字段适用且已批准的 sensitive KB；
+当已保存答案与表单选项语义兼容时，允许使用受控 closest-match 回退，约束条件为：
+否定极性一致、不选 "Other"/"Select"/"None" 等占位选项、达到置信度阈值、
+不把简历缺失解释为 `No`，也不从一般搬迁、远程偏好或低频到岗意愿推导固定到岗承诺。
+缺少可匹配事实时保持 `waiting_for_user`。运行时明确返回
+`candidate fact needs explicit approved answer` 时必须走同一
 `candidate_fact_resolution`，不能误分流到 coding repair。
 
 Gmail 查询、SQLite reconciliation、证据检查和 tenant 冷却有内置执行器；账户、
@@ -293,6 +317,8 @@ CAPTCHA 或浏览器恢复只有在对应外部适配器和所需上下文已配
 `recover` 会使用当前分类规则重新生成每条 Recovery Plan，通过 Agent Core 回放自动动作，
 更新原审计并写入 `recovery-execution.json`。默认不打开浏览器，也不会重投；只有恢复证据
 已经完整并显式增加 `--retry-verified` 时，才执行生成的单岗位 retry batch。
+如果当前回放没有任何 `retry_ready` 目标，SOP 会清除 state/manifest 中上一轮的
+`recovery_retry_batch` 指针，防止已经提交或仍缺确认的历史目标被后续 Repair 合并回来。
 存在多次 execution attempt 时，Recovery 按 application ID 合并全部完整审计，以最后一次
 终态覆盖同一岗位，同时保留只出现在早期批次的岗位；重新规划后的 recovery 注解写回该岗位
 最后出现的原始 attempt 审计，不把合并视图覆写成某一次浏览器执行的证据。
@@ -501,6 +527,7 @@ Lever 和 Ashby 按公司或 board 隔离。CAPTCHA solver 的 unsupported/error
 
 - `JOB_AGENT_FAILURE_CIRCUIT_BREAKER_HOURS=6`；
 - `JOB_AGENT_FAILURE_CIRCUIT_BREAKER_THRESHOLD=2`。
+- `JOB_AGENT_NETWORK_HEALTH_CIRCUIT_THRESHOLD=3`。
 
 在时间窗口内，同公司或同 ATS tenant/adapter 连续两次出现相同的
 `application_form_unavailable`、`autofill_completed_blocked`、`autofill_failed`、
@@ -509,7 +536,17 @@ Lever 和 Ashby 按公司或 board 隔离。CAPTCHA solver 的 unsupported/error
 仍生成完整 Agent 轨迹和 `skipped_policy_denied` 终态，但
 `JobApplicationPolicyGate` 必须以 `failure_circuit_breaker_active` 拒绝
 `browser_execute`，不再打开浏览器。不同失败状态、后续确认成功或窗口过期会关闭熔断；
-不得借此重投已有终态。
+不得借此重投已有终态。只有已生成的精确单岗位 retry 同时携带 `retry=true`、
+`retry_scope=single_application` 和 `repair_verified=true` 或 `recovery_verified=true` 时，才可
+解除该目标的旧普通失败熔断；反垃圾冷却和当前批次全局网络健康熔断仍不可绕过。
+
+跨公司浏览器或网络故障另有批次级健康熔断。连续达到阈值的网络故障会写入
+`batch_health.network` 和每岗位的 `network_health_observation`，后续岗位仍经过 Agent
+Core，但由 Policy Gate 拒绝新的 `browser_execute`，不再创建浏览器会话。每个网络终态
+都会生成 `batch_network_health_recovery` Recovery Plan，先保留脱敏故障证据、执行有界
+冷却，再等待只读健康检查；没有 `network_health_rechecked` 证据时不得自动重试。CAPTCHA、
+点击未确认、候选人事实缺失和表单入口不可用仍分别进入各自的 Recovery Plan，不会被网络
+熔断误分类。
 
 ## 8. 改代码后的额外门槛
 

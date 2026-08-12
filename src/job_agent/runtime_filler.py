@@ -429,6 +429,10 @@ function requiresExplicitCandidateFact(label) {
     "original language",
   ].some((phrase) => n.includes(phrase))
     && ["legal name", "full name", "name"].some((phrase) => n.includes(phrase));
+  const identityOrLanguageLevel = ["nationality", "what is your nationality"].includes(n)
+    || n.includes("country of nationality")
+    || n.includes("english level")
+    || n.includes("english proficiency");
   const offerStatus = n.includes("offer")
     && ["deadline", "pending", "upcoming", "anticipate", "anticipated"]
       .some((phrase) => n.includes(phrase));
@@ -482,6 +486,7 @@ function requiresExplicitCandidateFact(label) {
     "previously interviewed",
     "interviewed with",
     "interviewed at",
+    "career fair",
   ].some((phrase) => n.includes(phrase));
   const priorEngagement = ["previously", "currently", "current"].some((term) => n.includes(term))
     && ["contractor", "consultant", "engaged with", "access to"].some((term) => n.includes(term));
@@ -545,19 +550,57 @@ function requiresExplicitCandidateFact(label) {
       "required to work",
       "required to be",
       "come into the office",
+      "regularly commute",
+      "commute and work",
       "willing to commute",
       "willing to work",
       "willing and able",
       "acknowledge and agree",
     ].some((phrase) => n.includes(phrase));
-  return nativeLegalName || offerStatus || highSchoolHistory || personalPreference
+  const subjectiveHistory = [
+    "how familiar", "familiarity", "used our product", "have you used our product",
+    "engineering blog", "influence your decision"
+  ].some((phrase) => n.includes(phrase));
+  const internshipPreference = n.includes("intern season")
+    || (n.includes("what season") && n.includes("interested"));
+  const communicationConsent = ["sms", "text message", "whatsapp"].some((phrase) => n.includes(phrase))
+    && ["consent", "agree", "contact", "receive"].some((phrase) => n.includes(phrase));
+  const startCommitment = n.includes("2026")
+    && ["start", "available", "begin"].some((phrase) => n.includes(phrase));
+  const experienceThreshold = n.includes("experience")
+    && [
+      "minimum of", "at least", "years of experience", "year of experience",
+      "not including internships", "excluding internships"
+    ].some((phrase) => n.includes(phrase));
+  return nativeLegalName || identityOrLanguageLevel || offerStatus || highSchoolHistory || personalPreference
     || employmentHistory || priorApplication || priorEngagement
     || employmentConstraints || relationshipOrConflict || accommodation
-    || regulatedHistory || officeCommitment;
+    || regulatedHistory || officeCommitment || subjectiveHistory
+    || internshipPreference || communicationConsent || startCommitment
+    || experienceThreshold;
 }
 
 function structuredExplicitCandidateFactAnswer(label, profile) {
   const n = norm(label);
+  if (n.includes("experience")) {
+    if (n.includes("how many years of professional experience") && n.includes("excluding internships")) {
+      return zeroBasedProfessionalExperienceRangeAnswer(profile);
+    }
+    if ((n.includes("full time software engineer") || n.includes("full time software engineering"))
+        && n.includes("excluding internships")) {
+      return hasFullTimeSoftwareEngineeringExperience(profile) ? "Yes" : "No";
+    }
+    const threshold = n.match(/(?:at least\s+)?(\d+)\s+years?(?:\s+of)?(?:\s+[a-z]+){0,4}\s+experience/);
+    if (threshold) {
+      const nums = Array.from(String(yearsExperienceValue(profile) || "").matchAll(/\d+(?:\.\d+)?/g))
+        .map((match) => Number(match[0]));
+      if (nums.length) return Math.max(...nums) >= Number(threshold[1]) ? "Yes" : "No";
+    }
+    if (n.includes("how many years") && n.includes("relevant") && n.includes("post college")) {
+      const nums = Array.from(String(yearsExperienceValue(profile) || "").matchAll(/\d+(?:\.\d+)?/g));
+      if (nums.length) return nums[0][0];
+    }
+  }
   if (!["high school", "secondary school"].some((phrase) => n.includes(phrase))) {
     return null;
   }
@@ -580,6 +623,54 @@ function structuredExplicitCandidateFactAnswer(label, profile) {
       || null;
   }
   return null;
+}
+
+function candidateFactFamily(label) {
+  const n = norm(label);
+  if (!n) return null;
+  if (["sms", "text message", "whatsapp"].some((part) => n.includes(part))
+      && ["consent", "agree", "contact", "receive", "communications"].some((part) => n.includes(part))) {
+    return "communication_consent";
+  }
+  if (["on site", "onsite", "in office", "in-office"].some((part) => n.includes(part))
+      && [
+        "able to work", "willing to work", "can you work", "requires me to work",
+        "required to work", "commit", "confirm"
+      ].some((part) => n.includes(part))) {
+    return "onsite_commitment";
+  }
+  if (n.includes("intern season") || (n.includes("season") && n.includes("interested"))) {
+    return "intern_season";
+  }
+  if (["have you used", "used our product", "used the product"].some((part) => n.includes(part))) {
+    return "product_use";
+  }
+  if (["how familiar", "familiarity"].some((part) => n.includes(part))) {
+    return "familiarity";
+  }
+  return null;
+}
+
+function semanticCandidateFactAnswer(label, answers) {
+  const family = candidateFactFamily(label);
+  if (!family || !answers) return null;
+  const matches = Object.entries(answers)
+    .filter(([key, value]) => candidateFactFamily(key) === family
+      && !PLACEHOLDER_ANSWERS.has(norm(String(value))))
+    .map(([, value]) => value);
+  if (new Set(matches.map((value) => norm(String(value)))).size !== 1) return null;
+  return matches[0];
+}
+
+function approvedCandidateFactAnswer(label, profile) {
+  const answers = profile.answers || {};
+  const exact = findExactAnswer(label, answers);
+  if (exact != null) return exact;
+  const structured = structuredExplicitCandidateFactAnswer(label, profile);
+  if (structured != null) return structured;
+  const semantic = semanticCandidateFactAnswer(label, answers);
+  if (semantic != null) return semantic;
+  return matchScreeningRule(label, profile.screening_answer_rules);
 }
 
 function requiresUserAuthoredAnswer(label, profile) {
@@ -803,8 +894,7 @@ function autoAnswer(label, profile, sensitive = false) {
   const title = String(profile.target_title || "this role");
   const answers = profile.answers || {};
   if (requiresExplicitCandidateFact(label)) {
-    const savedCandidateFact = findExactAnswer(label, answers)
-      || structuredExplicitCandidateFactAnswer(label, profile);
+    const savedCandidateFact = approvedCandidateFactAnswer(label, profile);
     if (savedCandidateFact != null) return String(savedCandidateFact);
     if (sensitive) return matchSensitive(label);
     return null;
@@ -996,7 +1086,7 @@ function autoAnswer(label, profile, sensitive = false) {
     return "At DHL Express, I took ownership of a customer-retention ML workflow where the problem was not handed to me as a clean technical spec. I had to turn a broad business goal into usable data, model behavior, and reporting outputs. I built SQL/Pandas ETLs, trained an XGBoost churn model with SHAP explainability, handled class imbalance, and productionized retraining/reporting workflows using AWS ECS Fargate, MLflow, Jenkins, and Power BI. I kept iterating with business stakeholders until the workflow was measurable and useful; it improved retention targeting precision by 30% and reduced model reporting latency by 30%.";
   }
   if (n.includes("relative") && (n.includes("work for") || n.includes("currently work") || n.includes("employed")) && !n.includes("if so") && !n.includes("who")) {
-    return "No";
+    return null;
   }
   if (
     (n.includes("open to working") || n.includes("willing to work") || n.includes("able to work") || n.includes("come into the")) &&
@@ -1223,7 +1313,7 @@ function autoAnswer(label, profile, sensitive = false) {
   }
   const otherCountries = otherCountriesLocationAnswer(label, profile);
   if (otherCountries != null) return otherCountries;
-  const yearsMatch = n.match(/at least\s+(\d+)\s*(?:\+)?\s+years?/);
+  const yearsMatch = n.match(/(?:at least\s+)?(\d+)\s+years?(?:\s+of)?(?:\s+[a-z]+){0,4}\s+experience/);
   if (yearsMatch && n.includes("experience")) {
     const rawYears = String(profile.years_experience || profile.relevant_years_experience || profile.post_college_years_experience || "");
     const nums = Array.from(rawYears.matchAll(/\d+/g)).map((match) => Number(match[0]));
@@ -1345,6 +1435,136 @@ function autoAnswer(label, profile, sensitive = false) {
     return `I am a strong fit for ${titleText} because my background combines LLM/RAG evaluation, distributed model training workflows, and production ML engineering. At Intellisys Lab, I built federated LLM fine-tuning and evaluation workflows with Kubernetes, Kafka, MLflow, TensorFlow Federated, and custom RAG metrics. At DHL Express, I productionized ML retraining, monitoring, Dockerized model services, and SQL/Pandas data pipelines with measurable business impact.`;
   }
   if (n.includes("additional information") || n.includes("anything else")) return String(answers["Additional Information"] || "");
+
+  if (
+    n.includes("academic institution") &&
+    (n.includes("last") || n.includes("within")) &&
+    (n.includes("year") || n.includes("years"))
+  ) {
+    const education = profile.education || [];
+    if (education.length) {
+      const endYear = String(currentEducationValue(profile, "end_year") || educationEndDateValue(profile) || "2026");
+      if (Number(endYear) >= 2022) return "Yes";
+    }
+    return null;
+  }
+  if (
+    n.includes("python") &&
+    (n.includes("proficiency") || n.includes("rate your") || n.includes("how would you rate")) &&
+    (n.includes("data analysis") || n.includes("pandas") || n.includes("pytorch") || n.includes("numpy"))
+  ) {
+    return hasProfileEvidence(profileEvidenceText(profile), "python", "pandas", "pytorch", "numpy") ? "Advanced" : null;
+  }
+  // Factual screening questions the owner has authorized the agent to answer
+  // from profile evidence / closest-match when no explicit saved answer exists.
+  if (n.includes("how frequently") && n.includes("python")) {
+    return hasProfileEvidence(profileEvidenceText(profile), "python") ? "Daily" : null;
+  }
+  if (n.includes("gpa")) {
+    const tokens = n.replace(/,/g, "").split(" ").filter(Boolean);
+    let threshold = null;
+    for (const token of tokens) {
+      const value = Number(token);
+      if (!Number.isNaN(value) && value > 0 && value <= 4.0) threshold = value;
+    }
+    if (threshold != null) {
+      let gpa = profile.gpa;
+      if ((gpa == null || String(gpa).trim() === "") && profile.education && profile.education.length) {
+        const gpas = profile.education.map((e) => String(e.gpa || "").trim()).filter(Boolean);
+        gpa = gpas[0];
+      }
+      if (gpa != null && String(gpa).trim() !== "") {
+        return Number(gpa) >= threshold ? "Yes" : "No";
+      }
+      return null;
+    }
+  }
+  if (n.includes("years") && n.includes("experience") && (n.includes("how many") || n.includes("do you have"))) {
+    const years = yearsExperienceValue(profile);
+    if (years != null) {
+      const y = Number(years);
+      if (!Number.isNaN(y)) {
+        const candidates = [`${y}+ years`, `${y} years`, `${y}+`];
+        if (y >= 1) {
+          candidates.push(`${Math.max(0, y - 1)}-${y + 1} years`);
+          candidates.push(`${y}-${y + 2} years`);
+        }
+        return candidates.join("; ");
+      }
+      return String(years);
+    }
+  }
+  if (
+    (n.includes("where are you located") || n.includes("what is your current location") || n.includes("current location")) &&
+    (n.includes("region") || n.includes("country") || n.includes("located"))
+  ) {
+    const location = profile.location || "";
+    const country = profile.country || inferCountry(profile) || "United States";
+    if (location && country && !location.toLowerCase().includes(country.toLowerCase())) {
+      return `${location}; ${country}`;
+    }
+    return location || country;
+  }
+  const basedInMetro = basedInMetroQuestionAnswer(label, profile);
+  if (basedInMetro != null) return basedInMetro;
+  if (n.includes("which locations are you open to working from") || n.includes("locations are you open to")) {
+    const candidates = [];
+    const savedKeys = ["Select all locations you would be open to being placed", "Which locations are you open to working from?", "Please indicate all of the locations that you would be interested in relocating to for this position."];
+    for (const key of savedKeys) {
+      const saved = answers[key];
+      if (typeof saved === "string" && saved.trim()) candidates.push(saved.trim());
+    }
+    const prefs = desiredLocationValues(profile);
+    if (prefs.length) candidates.push(prefs.join("; "));
+    if (profile.location) candidates.push(profile.location);
+    return candidates.filter((v, i, a) => a.indexOf(v) === i).join("; ");
+  }
+  // Language fluency is a candidate fact. Absence is not a negative answer.
+  if (
+    n.includes("language") &&
+    (n.includes("fluent") || n.includes("speak") || n.includes("written") || n.includes("spoken")) &&
+    (n.includes("other than english") || n.includes("other than eng") || n.includes("in addition to english"))
+  ) {
+    let langs = profile.languages || profile.language || [];
+    if (typeof langs === "string") langs = [langs];
+    if (Array.isArray(langs) && langs.length) return langs.map(String).join("; ");
+    return null;
+  }
+  // Primary office / location preference.
+  if (
+    n.includes("office") &&
+    (n.includes("primarily") || n.includes("preferred") || n.includes("interested in")) &&
+    !n.includes("additional")
+  ) {
+    const prefs = desiredLocationValues(profile);
+    if (prefs.length) return prefs[0];
+    return null;
+  }
+  // Additional offices open to.
+  if (n.includes("additional") && n.includes("office") && (n.includes("open to") || n.includes("consider"))) {
+    const prefs = desiredLocationValues(profile);
+    return prefs.length ? prefs.join("; ") : null;
+  }
+  // Department / category.
+  if (n.includes("categories") || n.includes("category") || n.includes("department")) {
+    const titleNorm = norm(title);
+    if (titleNorm.includes("engineer") || titleNorm.includes("software") || titleNorm.includes("data")) return "Engineering";
+    if (titleNorm.includes("product")) return "Product";
+    if (titleNorm.includes("design")) return "Design";
+    return "Engineering";
+  }
+  // Work-location / digital-first preference checkbox groups.
+  if (
+    n.includes("primary work location") ||
+    n.includes("work location preference") ||
+    n.includes("where would you like to work") ||
+    (n.includes("digital-first") && n.includes("location"))
+  ) {
+    const prefs = desiredLocationValues(profile);
+    if (prefs.length) return prefs.join("; ");
+    return null;
+  }
+
   if (sensitive) return matchSensitive(label) || demographicAnswer(label, profile);
   return null;
 }
@@ -1419,6 +1639,80 @@ function motivationAnswerForLabel(label, profile) {
     answer += " I am especially interested in this team because my background includes Kubernetes, Kafka, MLflow, and distributed model-training workflows.";
   }
   return answer;
+}
+
+function mentionedMetros(text) {
+  const aliases = {
+    "san francisco": ["san francisco", "bay area"],
+    "mountain view": ["mountain view"],
+    "sunnyvale": ["sunnyvale"],
+    "palo alto": ["palo alto"],
+    "new york": ["new york", "nyc", "brooklyn", "manhattan", "queens"],
+    "seattle": ["seattle"],
+    "austin": ["austin"],
+    "los angeles": ["los angeles"],
+    "boston": ["boston"],
+    "chicago": ["chicago"],
+    "denver": ["denver"],
+    "washington": ["washington", "washington dc", "dc"],
+    "raleigh": ["raleigh"],
+    "germantown": ["germantown"],
+    "baltimore": ["baltimore"],
+    "mclean": ["mclean"],
+    "fort worth": ["fort worth"],
+  };
+  const found = [];
+  for (const [alias, candidates] of Object.entries(aliases)) {
+    if (candidates.some((candidate) => new RegExp(`\\b${candidate.replace(/ /g, "\\s+")}\\b`, "i").test(text))) {
+      found.push(alias);
+    }
+  }
+  return found;
+}
+
+function basedInMetroQuestionAnswer(label, profile) {
+  const n = norm(label || "");
+  const markers = [
+    "are you based in", "based in the", "currently based in", "currently located in",
+    "are you currently in", "are you located in", "do you currently live in", "do you live in",
+    "are you a resident of", "resident of", "currently reside in", "do you currently reside in",
+    "reside in", "residing in", "are you local to", "are you local", "local to the", "located within",
+  ];
+  if (!markers.some((marker) => n.includes(marker))) return null;
+  if (["willing to relocate", "open to relocate", "open to relocating", "ready to relocate", "willing to move", "plan to relocate", "commutable", "commute to"].some((marker) => n.includes(marker))) return null;
+  const cityMatch = n.match(/\b([a-z][a-z .-]*?)\s*,\s*([a-z]{2})\b/);
+  const stopTokens = new Set([
+    "a", "am", "an", "are", "at", "based", "be", "can", "could", "currently",
+    "did", "do", "does", "for", "i", "if", "in", "is", "live", "living",
+    "local", "located", "me", "my", "of", "on", "or", "our", "please",
+    "role", "the", "this", "to", "we", "will", "work", "working", "would",
+    "you", "your",
+  ]);
+  if (cityMatch) {
+    const cityTokens = [];
+    const rawTokens = String(cityMatch[1]).split(" ").filter(Boolean);
+    for (let i = rawTokens.length - 1; i >= 0; i--) {
+      const token = rawTokens[i].toLowerCase();
+      if (stopTokens.has(token)) break;
+      cityTokens.unshift(token);
+    }
+    const city = cityTokens.join(" ").toLowerCase();
+    const profileLocation = norm(profile.location || profile.city || "");
+    if (city && profileLocation.includes(city)) return "Yes";
+    if (city) return "No";
+  }
+  const residentMatch = n.match(/resident of\s+([a-z][a-z .-]*?)(?:\?|$)/);
+  if (residentMatch) {
+    const place = norm(residentMatch[1]);
+    const profileLocation = norm(profile.location || profile.city || "");
+    if (place && profileLocation.includes(place)) return "Yes";
+    if (place) return "No";
+  }
+  const mentioned = mentionedMetros(n);
+  if (!mentioned.length) return null;
+  const profileLocation = norm(profile.location || profile.city || "");
+  if (mentioned.some((alias) => profileLocation.includes(alias))) return "Yes";
+  return "No";
 }
 
 function priorityAutoAnswer(label, profile) {
@@ -1589,11 +1883,31 @@ function priorityAutoAnswer(label, profile) {
   if (n.includes("citizenship") && (n.includes("employment eligibility") || n.includes("work eligibility"))) {
     return autoAnswer(label, profile, false);
   }
+  if (
+    (n.includes("currently based") || n.includes("currently living")) &&
+    (n.includes("san francisco") || n.includes("bay area")) &&
+    n.includes("ready to relocate")
+  ) {
+    // A binary relocation fact cannot choose between multiple timelines.
+    return null;
+  }
   if ((n.includes("currently based") || n.includes("currently living")) && (n.includes("san francisco") || n.includes("bay area"))) {
     return autoAnswer(label, profile, false);
   }
   if (n.includes("candidate privacy policy") && profileCompanySlug(profile) === "airbnb") {
     return autoAnswer(label, profile, false);
+  }
+  if (
+    (n.includes("travel") || n.includes("attend")) &&
+    ["interview", "finalist", "in person", "office", "expenses covered"].some((marker) => n.includes(marker))
+  ) {
+    const travel = matchScreeningRule("willing to travel", profile.screening_answer_rules)
+      || (profile.answers || {})["Are you willing to travel?"];
+    if (travel != null) return truthyAnswer(travel) ? "Yes" : "No";
+    const onsite = matchScreeningRule("onsite", profile.screening_answer_rules)
+      || approvedSensitiveEntryAnswer(profile, "office")
+      || approvedSensitiveEntryAnswer(profile, "relocation");
+    if (truthyAnswer(onsite)) return "Yes";
   }
   return null;
 }
@@ -1776,10 +2090,11 @@ function isCandidateAccountCreationConsentCheckbox(field, ctx) {
 // approved answer; only approved entries are used.
 function matchSensitive(label) {
   const kb = (CFG.profile && CFG.profile.sensitive_answers) || {};
-  const specificKeys = new Set(["citizenship", "active_security_clearance", "security_clearance_eligibility", "security_clearance", "sponsorship_type", "ai_notetaker_consent"]);
+  const specificKeys = new Set(["citizenship", "active_security_clearance", "security_clearance_eligibility", "security_clearance", "security_clearance_level_never_held", "sponsorship_type", "ai_notetaker_consent"]);
   const broadPreferenceKeys = new Set(["security_clearance_interest"]);
+  const highestPriorityKeys = new Set(["us_export_control_status", "security_clearance_level_never_held"]);
   const priority = ([key, entry]) => {
-    const group = specificKeys.has(key) ? 0 : (broadPreferenceKeys.has(key) ? 2 : 1);
+    const group = highestPriorityKeys.has(key) ? -1 : (specificKeys.has(key) ? 0 : (broadPreferenceKeys.has(key) ? 2 : 1));
     const longest = Math.max(0, ...((entry && entry.patterns) || []).map((p) => String(p || "").length));
     return [group, -longest];
   };
@@ -1822,6 +2137,89 @@ function approvedSensitiveEntryAnswer(profile, key) {
 
 function truthyAnswer(value) {
   return ["yes", "true", "1", "y"].includes(norm(value));
+}
+
+const VISA_TYPE_REGEX = /\b(h\s*1\s*b|opt|cpt|tn|e\s*3|l\s*1|o\s*1|f\s*1)\b|optional practical training|curricular practical training/;
+const NON_OPT_VISA_TYPE_REGEX = /\b(h\s*1\s*b|tn|e\s*3|l\s*1|o\s*1)\b/;
+const OPT_VISA_FAMILY_REGEX = /\bopt\b|optional practical training|curricular practical training|f\s*1|cpt/;
+
+function visaTypeText(value) {
+  return VISA_TYPE_REGEX.test(norm(String(value || "")));
+}
+
+function nonOptVisaTypeText(value) {
+  return NON_OPT_VISA_TYPE_REGEX.test(norm(String(value || "")));
+}
+
+function optVisaFamilyText(value) {
+  return OPT_VISA_FAMILY_REGEX.test(norm(String(value || "")));
+}
+
+function sameVisaFamily(optionTextValue, answer) {
+  const text = norm(String(optionTextValue || ""));
+  const want = norm(String(answer || ""));
+  if (!visaTypeText(text)) return true;
+  if (!visaTypeText(want)) return false;
+  if (optVisaFamilyText(want)) return optVisaFamilyText(text) && !nonOptVisaTypeText(text);
+  if (/\bh\s*1\s*b\b/.test(want)) return /\bh\s*1\s*b\b/.test(text);
+  return visaTypeText(text);
+}
+
+function fieldSponsorshipTypeContext(field) {
+  const f = field || {};
+  const n = norm([
+    f.label, f.id, f.name, f.section, f.ariaLabel, f.ariaDescription,
+    f.placeholder, f.autocomplete,
+  ].filter(Boolean).join(" "));
+  if (/sponsor|visa|work author|immigration|right to work|work permit|if yes|select type|employment status/.test(n)) return true;
+  return (f.options || []).some((option) => visaTypeText(optionText(option)));
+}
+
+function safeVisaOptionForAnswer(optionTextValue, answer) {
+  if (!visaTypeText(optionTextValue)) return true;
+  return sameVisaFamily(optionTextValue, answer);
+}
+
+function approvedSponsorshipType(profile) {
+  const p = profile || {};
+  const direct = approvedSensitiveEntryAnswer(p, "sponsorship_type");
+  if (direct) return direct;
+  const answers = p.answers || {};
+  const matches = Object.entries(answers)
+    .filter(([key, value]) => {
+      const n = norm(key);
+      return /visa|sponsor/.test(n) && /type|status|which/.test(n);
+    })
+    .map(([, value]) => String(value).trim())
+    .filter((value) => value && !PLACEHOLDER_ANSWERS.has(norm(value)));
+  if (matches.length && new Set(matches.map(norm)).size === 1) return matches[0];
+  const questionnaire = p.agent_policy && p.agent_policy.axon_legal_questionnaire;
+  if (questionnaire && (questionnaire.f1_opt_cpt || questionnaire.sponsorship_type)) {
+    return String(questionnaire.f1_opt_cpt || questionnaire.sponsorship_type);
+  }
+  if (p.sponsorship_type) return String(p.sponsorship_type);
+  return null;
+}
+
+function sponsorshipTypeFieldPlan(field, profile, required) {
+  const options = (field && field.options) || [];
+  if (!options.length || !options.some((option) => visaTypeText(optionText(option)))) return null;
+  const approvedType = approvedSponsorshipType(profile);
+  if (!approvedType) {
+    return { action: "skip", reason: "approved sponsorship type option not available", sensitive: true, blocking: !!required };
+  }
+  const option = options.find((candidate) => sameVisaFamily(optionText(candidate), approvedType));
+  if (!option) {
+    return { action: "skip", reason: "approved sponsorship type option not available", sensitive: true, blocking: !!required };
+  }
+  const kind = field.kind;
+  if (kind === "radiogroup" || kind === "buttongroup") {
+    return { action: kind === "buttongroup" ? "buttonclick" : "check", option, sensitive: true };
+  }
+  if (field.role === "combobox") return { action: "combobox", value: optionText(option), sensitive: true };
+  if (field.tag === "select") return { action: "select", value: optionText(option), sensitive: true };
+  if (field.tag === "button") return { action: "customselect", value: optionText(option), sensitive: true };
+  return { action: "checkmany", options: [option], sensitive: true };
 }
 
 function requiresExternalApplicationPortal(label) {
@@ -1954,9 +2352,16 @@ const LOCATION_STATE_NAMES = {
 };
 
 function expandedLocationText(value) {
-  return norm(value).split(" ").flatMap((token) => {
+  const ambiguousWords = new Set(["in", "or", "me", "hi", "ok", "id", "ma"]);
+  const rawTokens = String(value || "").match(/[A-Za-z]+/g) || [];
+  if (!rawTokens.length) return norm(value);
+  return rawTokens.flatMap((rawToken) => {
+    const token = rawToken.toLowerCase();
     if (token === "us" || token === "usa") return ["united", "states"];
-    return (LOCATION_STATE_NAMES[token] || token).split(" ");
+    if (LOCATION_STATE_NAMES[token] && (rawToken === rawToken.toUpperCase() || !ambiguousWords.has(token))) {
+      return LOCATION_STATE_NAMES[token].split(" ");
+    }
+    return [token];
   }).join(" ");
 }
 
@@ -2004,6 +2409,186 @@ function optionMatches(option, answer) {
     ) return false;
     return true;
   });
+}
+
+function containsNegation(text) {
+  if (!text) return false;
+  const tokens = new Set(norm(text).split(" ").filter(Boolean));
+  const negationTokens = new Set([
+    "not", "no", "never", "none", "nothing", "nobody", "neither", "nor",
+    "dont", "doesnt", "didnt", "wont", "wouldnt", "cant", "cannot",
+    "couldnt", "shouldnt", "havent", "hasnt", "hadnt", "isnt", "arent",
+    "wasnt", "werent", "hasn", "haven", "hadn", "don", "doesn", "didn",
+    "wouldn", "couldn", "shouldn", "isn", "aren", "wasn", "weren"
+  ]);
+  for (const token of tokens) {
+    if (negationTokens.has(token)) return true;
+  }
+  return false;
+}
+
+function usageNegationMatch(answer, opt) {
+  const a = String(answer || "").toLowerCase();
+  const o = String(opt || "").toLowerCase();
+  const noUsagePhrases = [
+    "not used", "never used", "haven't used", "havent used", "no experience",
+    "do not have experience", "have not used", "did not use", "don't use"
+  ];
+  const answerNoUsage = noUsagePhrases.some((p) => a.includes(p));
+  if (!answerNoUsage) return false;
+  const optionNoUsage = noUsagePhrases.concat([
+    "i haven't", "i have not", "new to", "excited to learn"
+  ]).some((p) => o.includes(p));
+  return optionNoUsage;
+}
+
+function bestOptionMatch(options, answer) {
+  const rawAnswer = String(answer || "").trim();
+  if (!rawAnswer) return null;
+  const answerNorm = norm(rawAnswer);
+  const answerTokens = new Set(answerNorm.split(" ").filter(Boolean));
+  if (answerTokens.size === 0) return null;
+
+  const genericOptions = new Set([
+    "other", "no answer", "select", "select one", "choose", "please select",
+    "none", "prefer not to say", "decline to self identify", "decline",
+    "prefer not", "i prefer not to say"
+  ]);
+  const binaryOptions = new Set(["yes", "no", "true", "false"]);
+
+  // Approved source answers and other saved synonyms can have canonical
+  // ATS labels that are not lexically related (LinkedIn -> Social Media).
+  for (const alias of answerAliases(rawAnswer)) {
+    const aliasNorm = norm(alias);
+    if (!aliasNorm || genericOptions.has(aliasNorm)) continue;
+    if (["yes", "no", "true", "false"].includes(aliasNorm)) {
+      const polarity = binaryAnswerPolarity(rawAnswer);
+      const aliasPolarity = ["yes", "true"].includes(aliasNorm);
+      if (polarity == null || polarity !== aliasPolarity) continue;
+    }
+    for (const opt of options || []) {
+      const optText = String(optionText(opt) || optionValue(opt) || opt || "").trim();
+      if (norm(optText) === aliasNorm) return optText;
+    }
+  }
+
+  const answerNeg = containsNegation(rawAnswer);
+  const answerLower = rawAnswer.toLowerCase();
+
+  function startsWord(prefix) {
+    const lower = answerLower;
+    if (lower === prefix) return true;
+    const delimChars = " .,;!?";
+    if (lower.startsWith(prefix) && delimChars.includes(lower.charAt(prefix.length))) return true;
+    return false;
+  }
+
+  const answerStartsYes = startsWord("yes") || [
+    "i agree", "i acknowledge", "acknowledge", "agree", "true", "confirmed", "confirm",
+    "i have ", "i've ", "i am ", "i can ", "i do ", "i use ", "i built ",
+    "i deployed ", "i operated ", "i worked with ", "i have experience ", "experience with ",
+    "i require ", "i require/", "i will require ", "i need ",
+  ].some((p) => answerLower.startsWith(p));
+  const answerStartsNo = startsWord("no") || [
+    "false", "i do not", "i don't", "i have not", "i haven't", "i am not",
+    "i cannot", "i can't", "no experience", "never", "disagree"
+  ].some((p) => answerLower.startsWith(p));
+
+  let bestText = null;
+  let bestScore = 0;
+  let bestTied = false;
+  const threshold = 65;
+
+  for (const opt of options || []) {
+    const optText = String(optionText(opt) || optionValue(opt) || opt || "").trim();
+    const optNorm = norm(optText);
+    if (!optNorm || genericOptions.has(optNorm)) continue;
+    const optTokens = new Set(optNorm.split(" ").filter(Boolean));
+    if (optTokens.size === 0) continue;
+
+    const optNeg = containsNegation(optText);
+    if (answerNeg !== optNeg) continue;
+
+    let score = 0;
+    if (optNorm === answerNorm) {
+      score = 100;
+    } else {
+      const shorter = optNorm.length <= answerNorm.length ? optNorm : answerNorm;
+      const longer = optNorm.length <= answerNorm.length ? answerNorm : optNorm;
+      const binaryAndShort = shorter.length < 4 && binaryOptions.has(shorter);
+      if (
+        shorter.length >= 3 && longer.length >= 3 && longer.includes(shorter) &&
+        !binaryAndShort &&
+        (!shorter.startsWith("no") || longer === shorter || " .,;!?".includes(longer.charAt(shorter.length)) || longer.endsWith(" " + shorter))
+      ) {
+        score = Math.max(score, 80);
+      }
+    }
+
+    const common = new Set([...answerTokens].filter((t) => optTokens.has(t)));
+    const recall = answerTokens.size ? common.size / answerTokens.size : 0;
+    const precision = optTokens.size ? common.size / optTokens.size : 0;
+    const f1 = (precision + recall) === 0 ? 0 : 2 * precision * recall / (precision + recall);
+    score = Math.max(score, Math.floor(f1 * 100), Math.floor(recall * 70));
+
+    const expandedAnswer = expandedLocationText(rawAnswer);
+    const expandedOpt = expandedLocationText(optText);
+    if (expandedAnswer && expandedOpt && expandedAnswer !== expandedOpt) {
+      const answerExpandedTokens = new Set(expandedAnswer.split(" ").filter(Boolean));
+      const optExpandedTokens = new Set(expandedOpt.split(" ").filter(Boolean));
+      const sharedCountries = [...answerExpandedTokens].filter((t) => optExpandedTokens.has(t));
+      if (sharedCountries.length) {
+        score = Math.max(score, 40 + Math.min(30, sharedCountries.length * 10));
+      }
+    }
+    for (const countryPhrase of [
+      "united states", "canada", "united kingdom", "australia", "india"
+    ]) {
+      if ((` ${expandedAnswer} `).includes(` ${countryPhrase} `)
+          && (` ${expandedOpt} `).includes(` ${countryPhrase} `)) {
+        score = Math.max(score, 75);
+      }
+    }
+    // A profile location can contain only a US city/state (for example,
+    // "Hoboken, NJ") while the ATS exposes the regional option
+    // "United States/Canada".  State expansion is approved geography
+    // evidence; the country need not be repeated by the generated answer.
+    if (
+      expandedOpt.includes("united states") &&
+      Object.values(LOCATION_STATE_NAMES).some((stateName) =>
+        (` ${expandedAnswer} `).includes(` ${stateName} `)
+      )
+    ) {
+      score = Math.max(score, 75);
+    }
+
+    const optLower = optText.toLowerCase();
+    const isPlainYes = ["yes", "true"].includes(optLower);
+    const isPlainNo = ["no", "false"].includes(optLower);
+    if (isPlainYes && answerStartsYes && !answerNeg) score = Math.max(score, 90);
+    if (isPlainNo && answerStartsNo && answerNeg) score = Math.max(score, 90);
+
+    if (usageNegationMatch(rawAnswer, optText)) score = Math.max(score, 75);
+
+    if (score > bestScore && score >= threshold) {
+      bestScore = score;
+      bestText = optText;
+      bestTied = false;
+    } else if (score === bestScore && score >= threshold && optText !== bestText) {
+      bestTied = true;
+    }
+  }
+
+  // If the answer contains semicolon-separated candidate values, try each one.
+  if ((bestText == null || bestTied) && rawAnswer.includes(";")) {
+    const candidates = rawAnswer.split(";").map((c) => c.trim()).filter(Boolean);
+    for (const candidate of candidates) {
+      const candidateMatch = bestOptionMatch(options, candidate);
+      if (candidateMatch != null) return candidateMatch;
+    }
+  }
+
+  return bestTied ? null : bestText;
 }
 
 function desiredLocationValues(profile) {
@@ -2067,6 +2652,40 @@ function officeLocationCheckboxPlan(f, profile) {
   return { action: "skip", reason: "office location option not selected from candidate preferences", blocking: false };
 }
 
+function locationCheckboxGroupPlan(f, profile) {
+  const options = (f && f.options) || [];
+  if (!options.length) return null;
+  const context = norm([f.label, f.section, f.ariaLabel, f.ariaDescription, f.name, f.id].filter(Boolean).join(" "));
+  const optionTexts = options.map((option) => norm(optionText(option)));
+  if (!(
+    ["location", "locations", "office", "relocate", "relocation", "placed"].some((marker) => context.includes(marker)) &&
+    optionTexts.some((text) => looksLikeLocationCheckboxOption(text) || text === "international")
+  )) return null;
+  const desired = desiredLocationValues(profile);
+  const answers = profile.answers || {};
+  for (const key of [
+    "Select all locations you would be open to being placed",
+    "Which locations are you open to working from?",
+    "Please indicate all of the locations that you would be interested in relocating to for this position.",
+  ]) {
+    const raw = answers[key];
+    if (typeof raw === "string" && raw.trim()) {
+      for (const segment of raw.split(";")) {
+        const city = segment.split(",")[0].trim();
+        if (city) desired.push(city);
+      }
+    }
+  }
+  if (!desired.length) return null;
+  const matched = options.filter((option) => {
+    const text = optionText(option);
+    if (norm(text) === "international") return false;
+    return desired.some((part) => locationsCompatible(text, part));
+  });
+  if (!matched.length) return null;
+  return { action: "checkmany", options: matched };
+}
+
 function preferredOfficeLocationOption(f, profile) {
   const label = norm(f.label || "");
   if (!(
@@ -2124,12 +2743,29 @@ function isNegativeVeteranOption(optionTextValue) {
 }
 
 function findOption(options, answer) {
-  return (options || []).find((option) => optionMatches(option, answer)) || null;
+  const direct = (options || []).find((option) => optionMatches(option, answer));
+  if (direct) return direct;
+  const best = bestOptionMatch(options, answer);
+  if (!best) return null;
+  // Return the original option object if its text matches, preserving value/ids.
+  const original = (options || []).find((option) => optionText(option) === best || optionValue(option) === best);
+  if (original) return original;
+  return { label: best, value: best };
 }
 
 function isSourceQuestion(label) {
   const n = norm(label);
   return n.includes("how did you hear") || n.includes("where did you hear") || n.includes("where have you learned about");
+}
+
+function looksLikeSourceOptionGroup(field) {
+  const options = new Set((field.options || []).map((option) => norm(optionText(option))));
+  const markers = new Set([
+    "linkedin", "friend", "recruiter current employee",
+    "school job posting career fair", "advertisement e g billboard",
+    "online article press",
+  ]);
+  return [...options].filter((value) => markers.has(value)).length >= 2;
 }
 
 function isCompanyWebsiteAnswer(answer) {
@@ -2138,20 +2774,225 @@ function isCompanyWebsiteAnswer(answer) {
   ]).has(norm(answer));
 }
 
-function matchingOptions(field, answer) {
-  const matches = (field.options || []).filter((option) => optionMatches(option, answer));
-  if (matches.length || !isSourceQuestion(field.label) || !isCompanyWebsiteAnswer(answer)) return matches;
-  return (field.options || []).filter((option) => norm(optionText(option)) === "other");
+function citizenshipStatusOption(field, profile) {
+  const options = (field && field.options) || [];
+  if (!options.length) return null;
+  const normalized = norm(field.label || "");
+  if (!normalized.includes("citizenship") || !normalized.includes("status")) return null;
+  const approved = matchSensitive(field.label || "") || approvedSensitiveEntryAnswer(profile, "citizenship");
+  if (approved == null || !containsNegation(approved)) return null;
+  return options.find((option) => {
+    const text = norm(optionText(option));
+    return text.includes("other") && text.includes("please explain");
+  }) || null;
+}
+
+function optionDeniesSponsorship(option) {
+  const text = norm(optionText(option));
+  return [
+    "do not require sponsorship",
+    "does not require sponsorship",
+    "will not require sponsorship",
+    "no sponsorship is required",
+    "no, i do not require",
+    "without sponsorship",
+  ].some((marker) => text.includes(marker));
+}
+
+function profileRequiresSponsorship(profile) {
+  const raw = approvedSensitiveEntryAnswer(profile, "sponsorship")
+    || String((profile.work_authorization_by_country || {}).requires_sponsorship || "");
+  if (!raw) return null;
+  return truthyAnswer(raw);
+}
+
+function relocationStatementOption(field, profile) {
+  const options = (field && field.options) || [];
+  if (!options.length) return null;
+  const normalized = norm(field.label || "");
+  if (!["relocat", "relocation", "willing to move", "open to moving"].some((marker) => normalized.includes(marker))) return null;
+  const relocation = (profile.answers || {})["Are you open to relocation?"]
+    || matchScreeningRule("open to relocation", profile.screening_answer_rules)
+    || approvedSensitiveEntryAnswer(profile, "relocation");
+  if (relocation == null) return null;
+  if (truthyAnswer(relocation)) {
+    const relocationOptions = [];
+    for (const option of options) {
+      const text = norm(optionText(option));
+      if (!["relocat", "willing to move", "open to moving", "can relocate"].some((marker) => text.includes(marker))) continue;
+      if (["not", "no ", "unable", "don t", "do not", "won t"].some((marker) => text.includes(marker))) continue;
+      relocationOptions.push(option);
+    }
+    if (relocationOptions.length === 1) return relocationOptions[0];
+    return null;
+  }
+  return options.find((option) => {
+    const text = norm(optionText(option));
+    return ["do not want to work in office", "not willing to relocate", "cannot relocate", "do not want to relocate"].some((marker) => text.includes(marker));
+  }) || null;
+}
+
+function sponsorshipStatementOption(field, profile) {
+  const options = (field && field.options) || [];
+  if (!options.length) return null;
+  const normalized = norm(field.label || "");
+  const optionTextAll = options.map((option) => norm(optionText(option))).join(" ");
+  if (
+    !["sponsor", "sponsorship", "visa"].some((marker) => normalized.includes(marker)) &&
+    !["sponsor", "sponsorship"].some((marker) => optionTextAll.includes(marker))
+  ) return null;
+  const sponsorship = approvedSensitiveEntryAnswer(profile, "sponsorship")
+    || String((profile.work_authorization_by_country || {}).requires_sponsorship || "");
+  if (!sponsorship) return null;
+  if (truthyAnswer(sponsorship)) {
+    const candidates = options.filter((option) => {
+      if (optionDeniesSponsorship(option)) return false;
+      const text = norm(optionText(option));
+      return [
+        "require new sponsorship",
+        "would require sponsorship",
+        "will require sponsorship",
+        "require immigration sponsorship",
+        "require sponsorship",
+      ].some((marker) => text.includes(marker));
+    });
+    if (!candidates.length) return null;
+    const preference = (option) => {
+      const text = norm(optionText(option));
+      if (text.includes("new sponsorship")) return 0;
+      if (text.includes("transfer")) return 1;
+      return 2;
+    };
+    return candidates.slice().sort((left, right) => preference(left) - preference(right))[0];
+  }
+  return options.find((option) => {
+    const text = norm(optionText(option));
+    return text.includes("do not require sponsorship") || text.includes("does not require sponsorship");
+  }) || null;
+}
+
+function optionClaimsLocalResidency(text) {
+  const normalized = norm(text);
+  return [
+    "live locally", "currently live", "currently based", "currently in",
+    "currently located in", "already live", "already based", "already in",
+    "currently reside", "i am local", "i m local", "i live in",
+    "i m based in", "i am based in",
+  ].some((marker) => normalized.includes(marker));
+}
+
+function guardLocalResidencyOption(field, option, profile, label) {
+  const text = optionText(option);
+  if (!optionClaimsLocalResidency(text)) return option;
+  const profileLocation = norm(profile.location || profile.city || "");
+  const combined = norm(`${label} ${text}`);
+  if (combined.includes("tri state") && profileLocation.includes("jersey city")) return option;
+  if (combined.includes("nyc") && profileLocation.includes("jersey city")) {
+    return (field.options || []).find((candidate) => {
+      const candidateText = norm(optionText(candidate));
+      return ["relocat", "willing to move", "open to moving", "can relocate"].some((marker) => candidateText.includes(marker));
+    }) || null;
+  }
+  return option;
+}
+
+function clearanceLevelChoice(field, profile) {
+  const normalized = norm(field.label || "");
+  if (![
+    "current security clearance level", "level of security clearance",
+    "clearance level do you hold", "which level of security clearance",
+    "security clearance level", "clearance level hold",
+  ].some((marker) => normalized.includes(marker))) return null;
+  const active = approvedSensitiveEntryAnswer(profile, "active_security_clearance");
+  if (active != null && !truthyAnswer(active)) {
+    const none = (field.options || []).find((option) => norm(optionText(option)) === "none");
+    return none ? optionText(none) : "None";
+  }
+  return null;
+}
+
+function englishLevelChoice(field, profile) {
+  const normalized = norm(field.label || "");
+  if (!normalized.includes("english level") && !normalized.includes("english proficiency")) return null;
+  const saved = findAnswer(field.label || "", (profile.answers || {})) || matchSensitive(field.label || "");
+  if (saved == null) return null;
+  const savedNorm = norm(saved);
+  if (!["fluent", "native", "native speaker", "c1", "c2"].includes(savedNorm)) return null;
+  const preferred = savedNorm === "fluent" ? ["c1", "c2"] : ["c2", "c1"];
+  for (const level of preferred) {
+    const option = (field.options || []).find((candidate) => norm(optionText(candidate)) === level);
+    if (option) return optionText(option);
+  }
+  return null;
+}
+
+function bachelorGraduationYearChoice(field, profile) {
+  const normalized = norm(field.label || "");
+  if (!normalized.includes("year did you graduate") || !normalized.includes("bachelor")) return null;
+  for (const entry of profile.education || []) {
+    if (!entry || !norm(String(entry.degree || "")).includes("bachelor")) continue;
+    const year = String(entry.end_year || "").trim();
+    if (year) return year;
+  }
+  return null;
+}
+
+function matchingOptions(field, answer, profile) {
+  const seen = new Set();
+  let sourceOptions = (field.options || []).slice();
+  if (profile && profileRequiresSponsorship(profile)) {
+    sourceOptions = sourceOptions.filter((option) => !optionDeniesSponsorship(option));
+  }
+  const usableOptions = fieldSponsorshipTypeContext(field)
+    ? sourceOptions.filter((option) => safeVisaOptionForAnswer(optionText(option), answer))
+    : sourceOptions;
+  const matches = usableOptions.filter((option) => {
+    if (!optionMatches(option, answer)) return false;
+    const key = norm(optionText(option));
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  if (matches.length) return matches;
+  const best = bestOptionMatch(usableOptions, answer);
+  if (best) {
+    const original = usableOptions.find((option) => optionText(option) === best || optionValue(option) === best);
+    return original ? [original] : [{ label: best, value: best }];
+  }
+  if (!isSourceQuestion(field.label) || !isCompanyWebsiteAnswer(answer)) return [];
+  return usableOptions.filter((option) => norm(optionText(option)) === "other");
 }
 
 function isNegativeAnswer(answer) {
   return ["no", "false", "none", "n/a", "na", "do not consent", "i do not consent"].includes(norm(answer));
 }
 
+function binaryAnswerPolarity(answer) {
+  const raw = String(answer || "").trim().toLowerCase();
+  if (!raw) return null;
+  const n = norm(raw);
+  if (["yes", "true", "1"].includes(n)) return true;
+  if (["no", "false", "0"].includes(n)) return false;
+  if (/^(no|false)([\s,.;:!?-]|$)/.test(raw)) return false;
+  if ([
+    "i do not ", "i don't ", "i have not ", "i haven't ",
+    "i am not ", "i'm not ", "i cannot ", "i can't ",
+    "never ", "no experience", "disagree",
+  ].some((prefix) => raw.startsWith(prefix))) return false;
+  if (/^(yes|true)([\s,.;:!?-]|$)/.test(raw)) return true;
+  if ([
+    "i agree", "i acknowledge", "acknowledge", "agree", "confirm",
+    "i have ", "i've ", "i am ", "i'm ", "i can ", "i do ",
+    "i require ", "i require/", "i will require ", "i need ",
+  ].some((prefix) => raw.startsWith(prefix)) && !containsNegation(raw)) return true;
+  return null;
+}
+
 function answerAliases(answer) {
   const raw = String(answer || "");
   const aliases = [raw];
   aliases.push(...graduationDateAliases(raw));
+  aliases.push(...sourceAnswerAliases(raw));
   const n = norm(raw);
   if ([
     "prefer not to say", "prefer not to answer", "decline", "decline to answer",
@@ -2176,8 +3017,8 @@ function answerAliases(answer) {
   if (["yes", "confirmed", "agree", "i agree", "acknowledge", "i acknowledge"].includes(n)) {
     aliases.push("I Agree", "I Acknowledge", "Yes, I agree", "Yes, I acknowledge", "Confirmed");
   }
-  if (["master s degree", "masters degree", "master degree"].includes(n)) {
-    aliases.push("Master's Degree", "Master Degree");
+  if (["master s degree", "masters degree", "master degree", "masters", "master"].includes(n)) {
+    aliases.push("Master's Degree", "Master Degree", "Masters");
   }
   if (["within a month", "in one month", "one month", "immediately", "as soon as possible", "asap"].includes(n)) {
     aliases.push(
@@ -2220,8 +3061,18 @@ function answerAliases(answer) {
       "No, I do not have a disability",
       "No, I don't have a disability",
       "No, I don't have a disability and have not had one in the past",
-      "No - I do not consent to receiving text messages"
+      "No - I do not consent to receiving text messages",
+      "N/A - have never held U.S. security clearance",
+      "N/A - have never held US security clearance",
+      "None of the above",
+      "None"
     );
+  }
+  if (["not applicable", "n/a", "na", "none"].includes(n)) {
+    aliases.push("None of the above", "None", "Not applicable", "N/A");
+  }
+  if (n.includes("never held") && n.includes("clearance")) {
+    aliases.push("None", "None of the above", "N/A", "Not applicable");
   }
   if (["company website", "company site", "company careers", "company career site", "career site", "career website", "careers website", "careers site"].includes(n)) {
     aliases.push(
@@ -2246,6 +3097,15 @@ function answerAliases(answer) {
   if (n.startsWith("no") && n.length > 2) {
     aliases.push("No");
   }
+  const negMarkers = [" do not ", " have not ", " has not ", " does not ", " don t ", " haven t ", " cannot "];
+  const declineMarkers = [" do not wish to answer ", " don t wish to answer ", " prefer not to say ", " prefer not to answer "];
+  const spaced = " " + n + " ";
+  if (negMarkers.some((m) => spaced.includes(m)) && !declineMarkers.some((m) => spaced.includes(m))) {
+    aliases.push("No");
+  }
+  if (spaced.includes(" yes ") || (spaced.includes(" i do ") && !negMarkers.some((m) => spaced.includes(m)))) {
+    aliases.push("Yes");
+  }
   // Work authorization / sponsorship intents.
   if (n.includes("authorized") && n.includes("work") && n.includes("any employer")) {
     aliases.push(
@@ -2266,6 +3126,51 @@ function answerAliases(answer) {
   if (n.includes("he") && n.includes("him")) aliases.push("He / Him");
   if (n.includes("she") && n.includes("her")) aliases.push("She / Her");
   if (n.includes("they") && n.includes("them")) aliases.push("They / Them");
+  return aliases;
+}
+
+
+function sourceAnswerAliases(answer) {
+  const raw = String(answer || "").trim();
+  const n = norm(raw);
+  if (!n) return [];
+  const linkedin = ["linkedin", "linked in", "linkedin jobs", "linkedin url"].includes(n);
+  const jobBoard = [
+    "indeed", "glassdoor", "ziprecruiter", "handshake", "builtin", "built in",
+    "dice", "monster", "angel", "wellfound", "job board", "job boards",
+    "job site", "third party", "third-party", "online job",
+  ].some((marker) => n.includes(marker));
+  const social = [
+    "facebook", "twitter", "instagram", "youtube", "tiktok", "reddit",
+    "social media", "social network",
+  ].some((marker) => n.includes(marker));
+  const google = ["google", "google jobs", "google search", "google search results"].includes(n);
+  const referral = [
+    "referral", "referred", "refer", "employee referral", "friend", "family", "current employee",
+  ].some((marker) => n.includes(marker));
+  const website = [
+    "website", "web site", "company site", "company website", "career site",
+    "careers site", "careers page", "career website", "careers website", "career page",
+  ].some((marker) => n.includes(marker));
+  const event = [
+    "event", "career fair", "hackathon", "meetup", "campus", "job fair", "hiring event",
+  ].some((marker) => n.includes(marker));
+  const recruiter = [
+    "recruiter", "recruiting agency", "staffing", "headhunter", "agency",
+  ].some((marker) => n.includes(marker));
+  const press = ["press", "news", "article", "blog", "media"].some((marker) => n.includes(marker));
+  const email = ["email", "newsletter", "mailing list", "outreach"].some((marker) => n.includes(marker));
+  const aliases = [];
+  if (linkedin) aliases.push("Social Media", "LinkedIn Jobs", "Third Party Job Board", "Job Board");
+  if (jobBoard) aliases.push("Third Party Job Board", "Job Board", "Online Job Board");
+  if (social) aliases.push("Social Media", "Social Network");
+  if (google) aliases.push("Google", "Search Engine", "Online Search", "Third Party Job Board");
+  if (referral) aliases.push("Employee Referral", "Referral", "Current Employee", "Friend or Family");
+  if (website) aliases.push("Company Website", "Company Career Site", "Company Careers", "Careers Site");
+  if (event) aliases.push("Career Fair", "Event", "Campus Event", "Hiring Event");
+  if (recruiter) aliases.push("Recruiting Agency", "Recruiter", "Staffing Agency", "Headhunter");
+  if (press) aliases.push("Press", "News", "Online Article", "Article");
+  if (email) aliases.push("Email", "Newsletter", "Email Outreach", "Email Notification");
   return aliases;
 }
 
@@ -2735,6 +3640,9 @@ function mapTextValue(fieldOrLabel, profile) {
   if (compact.includes("selfidentifieddisabilitydata") && n.includes("name")) return profile.name || null;
   if (n.includes("date of birth") || n.includes("birthday")) return profile.birthday || null;
   if (n === "date") return `${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}/${today.getFullYear()}`;
+  if (n.includes("date of application") || n.includes("application date") || n.includes("date applied") || n.includes("date you are applying")) {
+    return `${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}/${String(today.getFullYear()).slice(-2)}`;
+  }
   if (compact.includes("datesignedon") && n.includes("month")) return String(today.getMonth() + 1).padStart(2, "0");
   if (compact.includes("datesignedon") && n.includes("day")) return String(today.getDate()).padStart(2, "0");
   if (compact.includes("datesignedon") && n.includes("year")) return String(today.getFullYear());
@@ -2762,7 +3670,11 @@ function mapTextValue(fieldOrLabel, profile) {
   if (n.includes("years") && n.includes("experience")) return yearsExperienceValue(profile);
   if (n.includes("graduation date") || n.includes("anticipated graduation")) return profile.graduation_date || educationEndDateValue(profile);
   if (n.includes("preferred programming language")) return profile.preferred_programming_language || "Python";
-  if (n.split(" ").length <= 14 && ["university", "school", "college", "institution"].some((term) => hasWholePhrase(n, term))) return currentEducationValue(profile, "school");
+  if (
+    n.split(" ").length <= 14 &&
+    ["university", "school", "college", "institution"].some((term) => hasWholePhrase(n, term)) &&
+    !(n.includes("academic institution") && (n.includes("last") || n.includes("within")) && (n.includes("year") || n.includes("years")))
+  ) return currentEducationValue(profile, "school");
   if (n.includes("degree")) return currentEducationValue(profile, "degree");
   if (n.includes("field of study") || n.includes("major")) return currentEducationValue(profile, "field");
   if (compact.includes("gradeaverage") || n.includes("gpa")) return currentEducationValue(profile, "gpa");
@@ -3036,7 +3948,10 @@ async function scrapeFields(page) {
         node.getAttribute("data-qa") || "", node.getAttribute("data-test") || "",
         node.getAttribute("data-field-label") || "", node.getAttribute("data-question") || "",
       ].join(" ").toLowerCase();
-      return /(^|\s)(label|legend)(\s|$)|question|prompt|field.?title|form.?title|heading/.test(marker) ||
+      return node.hasAttribute("data-field-label") ||
+        node.hasAttribute("data-question-label") ||
+        node.hasAttribute("data-label") ||
+        /(^|\s)(label|legend)(\s|$)|question|prompt|field.?title|form.?title|heading/.test(marker) ||
         /^H[1-6]$/.test(node.tagName || "") || node.getAttribute("role") === "heading";
     };
     const genericPromptLabel = (control) => {
@@ -3121,12 +4036,58 @@ async function scrapeFields(page) {
           node.id || "",
           typeof node.className === "string" ? node.className : "",
           node.getAttribute ? (node.getAttribute("data-automation-id") || "") : "",
+          node.getAttribute ? (node.getAttribute("data-field-path") || "") : "",
         ].join(" ").toLowerCase();
         if (marker.includes("education")) return "education";
         if (marker.includes("employment") || marker.includes("work-history") || marker.includes("work_history") || marker.includes("work-experience") || marker.includes("workexperience") || marker.includes("employment-history") || marker.includes("employmenthistory")) return "work";
       }
       return "";
     };
+    const ashbyEduInfo = (control) => {
+      const block = control.closest('[data-field-path^="_systemfield_education"], [data-field-path*="education" i]');
+      if (!block) return {};
+      const path = block.getAttribute("data-field-path") || "";
+      const firstOption = control.tagName === "SELECT" && control.options && control.options.length
+        ? String(control.options[0].textContent || "").trim()
+        : "";
+      const placeholder = String(control.getAttribute("placeholder") || firstOption || "").trim();
+      const idName = String((control.id || "") + " " + (control.name || "") + " " + placeholder).toLowerCase();
+      const role = String(control.getAttribute("role") || "").toLowerCase();
+      let subfield = "";
+      if (idName.includes("search schools") || role === "combobox" || idName.includes("school")) subfield = "school";
+      else if (idName.includes("degree")) subfield = "degree";
+      else if (idName.includes("major") || idName.includes("field of study")) subfield = "field";
+      else if (idName.includes("start") && idName.includes("month")) subfield = "start_month";
+      else if (idName.includes("start") && idName.includes("year")) subfield = "start_year";
+      else if (idName.includes("end") && idName.includes("month")) subfield = "end_month";
+      else if (idName.includes("end") && idName.includes("year")) subfield = "end_year";
+      else if (idName.includes("still student")) subfield = "still_student";
+      if (!subfield && (placeholder.toLowerCase().startsWith("month") || placeholder.toLowerCase().startsWith("year"))) {
+        const entry = control.closest("[data-field-path], .ashby-application-form-field-entry");
+        const isMonth = placeholder.toLowerCase().startsWith("month");
+        const startLabel = Array.from(entry ? entry.querySelectorAll("*") : []).find((node) => /start date/i.test(String(node.textContent || "")) && node.children.length === 0);
+        const endLabel = Array.from(entry ? entry.querySelectorAll("*") : []).find((node) => /end date/i.test(String(node.textContent || "")) && node.children.length === 0);
+        const labelBefore = (label) => Boolean(label && control.compareDocumentPosition && (control.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_PRECEDING));
+        const labelAfter = (label) => Boolean(label && control.compareDocumentPosition && (control.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING));
+        if (labelBefore(startLabel) && labelAfter(endLabel)) {
+          if (isMonth) subfield = "start_month"; else subfield = "start_year";
+        } else if (labelBefore(startLabel) && labelBefore(endLabel)) {
+          if (isMonth) subfield = "end_month"; else subfield = "end_year";
+        }
+      }
+      return { dataFieldPath: path, ashbyEduSubfield: subfield };
+    };
+    const ashbyEduSubfieldLabel = (subfield) => ({
+      school: "School",
+      degree: "Degree",
+      field: "Field of Study",
+      start_month: "Start Date Month",
+      start_year: "Start Date Year",
+      end_month: "End Date Month",
+      end_year: "End Date Year",
+      still_student: "Still Student?",
+    }[subfield] || "");
+    const normLocal = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
     const metadataFor = (control) => ({
       ariaLabel: control.getAttribute("aria-label") || "",
       ariaDescription: textForIds(control.getAttribute("aria-describedby")),
@@ -3136,6 +4097,7 @@ async function scrapeFields(page) {
       ariaControls: control.getAttribute("aria-controls") || "",
       ariaOwns: control.getAttribute("aria-owns") || "",
       contentEditable: Boolean(control.isContentEditable),
+      disabled: Boolean(control.disabled || control.getAttribute("aria-disabled") === "true"),
     });
     const ashbyRequired = (control) => {
       const entry = control && control.closest && control.closest(
@@ -3232,12 +4194,68 @@ async function scrapeFields(page) {
           if (c.required || c.getAttribute("aria-required") === "true") checkboxesByName[c.name].required = true;
           return;
         }
+        const genericGroupLabel = groupLabelFor(c);
+        const genericOptionLabel = optionLabelFor(c);
+        const sameNameBoxes = c.name
+          ? Array.from(document.querySelectorAll('input[type="checkbox"]')).filter((box) =>
+              box.name === c.name && isHitVisibleElement(box)
+            )
+          : [];
+        if (
+          genericGroupLabel &&
+          c.name &&
+          sameNameBoxes.length > 1 &&
+          cleanQuestionText(genericGroupLabel) !== cleanQuestionText(genericOptionLabel)
+        ) {
+          if (!checkboxesByName[c.name]) {
+            checkboxesByName[c.name] = {
+              kind: "checkboxgroup", type: "checkbox", label: genericGroupLabel,
+              name: c.name, required: false, options: [],
+            };
+          }
+          checkboxesByName[c.name].options.push({
+            id: c.id, value: c.value, label: genericOptionLabel, autofillId,
+          });
+          if (
+            c.required ||
+            c.getAttribute("aria-required") === "true" ||
+            /\\*/.test(genericGroupLabel)
+          ) checkboxesByName[c.name].required = true;
+          return;
+        }
+        const singleCheckboxQuestion = cleanQuestionText(
+          genericGroupLabel || questionnaireLabel(c)
+        );
+        if (
+          genericOptionLabel &&
+          singleCheckboxQuestion &&
+          cleanQuestionText(genericOptionLabel) !== singleCheckboxQuestion
+        ) {
+          out.push({
+            kind: "single", tag: "input", type: "checkbox",
+            label: genericOptionLabel, section: singleCheckboxQuestion,
+            id: c.id || "", name: c.name || "",
+            role: c.getAttribute("role") || "", autofillId,
+            required: Boolean(
+              c.required ||
+              c.getAttribute("aria-required") === "true" ||
+              /\\*/.test(singleCheckboxQuestion)
+            ),
+            options: [], value: c.checked ? (c.value || genericOptionLabel) : "",
+          });
+          return;
+        }
       }
       const tag = c.tagName.toLowerCase();
       const options = tag === "select"
         ? Array.from(c.options).map((o) => o.textContent.trim()).filter(Boolean)
         : [];
-      const label = labelFor(c) || workdayFieldLabel(c);
+      const ashbyEdu = ashbyEduInfo(c);
+      let label = labelFor(c) || workdayFieldLabel(c);
+      const ashbySubfieldLabel = ashbyEdu.dataFieldPath ? ashbyEduSubfieldLabel(ashbyEdu.ashbyEduSubfield) : "";
+      if (ashbySubfieldLabel && !normLocal(label).includes(normLocal(ashbySubfieldLabel))) {
+        label = [label, ashbySubfieldLabel].filter(Boolean).join(" ");
+      }
       const role = c.getAttribute("role") || "";
       if (!label && !c.id && !c.name) return;
       out.push({
@@ -3246,6 +4264,10 @@ async function scrapeFields(page) {
         section: sectionFor(c), ...metadataFor(c),
         required: Boolean(c.required || c.getAttribute("aria-required") === "true" || /\\*/.test(label)),
         options, value: c.value || workdaySelectedText(c),
+        ...(ashbyEdu.dataFieldPath ? {
+          dataFieldPath: ashbyEdu.dataFieldPath,
+          ashbyEduSubfield: ashbyEdu.ashbyEduSubfield,
+        } : {}),
       });
     });
     // Capability-based support for modern custom selects. These controls are
@@ -3553,6 +4575,25 @@ function normalizeComboboxAnswer(ans) {
   return ans;
 }
 
+function normalizeBinaryComboboxAnswer(label, answer) {
+  if (answer == null) return answer;
+  const question = norm(label);
+  const value = norm(answer);
+  const binaryQuestion = (
+    question.includes("sponsor") ||
+    question.includes("commute") ||
+    question.includes("on site") ||
+    question.includes("onsite") ||
+    question.includes("in an office") ||
+    question.includes("work in an office")
+  );
+  if (!binaryQuestion) return normalizeComboboxAnswer(answer);
+  const negative = containsNegation(value) || /\b(unable|not able|won t|will not|would not)\b/.test(value);
+  if (negative) return "No";
+  if (/\b(require|able|can|commute|work|yes|agree|confirm)\b/.test(value)) return "Yes";
+  return normalizeComboboxAnswer(answer);
+}
+
 function comboboxAnswer(label, mappingLabel, profile, sensitive, priorityAns, answers, field) {
   if (!sensitive && isSourceQuestion(label)) {
     const preferred = autoAnswer(label, profile);
@@ -3569,7 +4610,7 @@ function comboboxAnswer(label, mappingLabel, profile, sensitive, priorityAns, an
   if (!sensitive && profile.location && (mapped.includes("location") || mapped.includes("city"))) {
     ans = profile.location;
   }
-  return normalizeComboboxAnswer(ans);
+  return normalizeBinaryComboboxAnswer(label, ans);
 }
 
 function planField(f, profile, ctx) {
@@ -3599,26 +4640,32 @@ function planField(f, profile, ctx) {
   if (requiresExternalApplicationPortal(`${label} ${mappingLabel}`)) {
     return { action: "skip", reason: "external application portal required", sensitive: false, blocking: true };
   }
+  const visaTypePlan = sponsorshipTypeFieldPlan(f, profile, !!f.required);
+  if (visaTypePlan) return visaTypePlan;
   // Distinguish a candidate's dated work/education history from an
   // availability question for the new role. Both may say "start date", but
   // only the latter requires the sensitive-answer policy.
   const sensitive = !profileDateSemantic && (isSensitive(label) || (
-    (["radiogroup", "buttongroup", "checkboxgroup"].includes(f.kind) || f.tag === "button") && isSensitive(mappingLabel)
+    (["radiogroup", "buttongroup", "checkboxgroup"].includes(f.kind)
+      || f.tag === "button"
+      || ["checkbox", "radio"].includes(f.type)
+      || ["checkbox", "radio", "switch"].includes(f.role)) && isSensitive(mappingLabel)
   ));
   const explicitCandidateFact = requiresExplicitCandidateFact(answerLabel);
   let explicitCandidateAnswer = explicitCandidateFact
-    ? findExactAnswer(answerLabel, answers)
+    ? approvedCandidateFactAnswer(answerLabel, profile)
     : null;
-  if (explicitCandidateFact && explicitCandidateAnswer == null) {
-    explicitCandidateAnswer = structuredExplicitCandidateFactAnswer(answerLabel, profile);
-  }
   if (explicitCandidateFact && explicitCandidateAnswer == null && sensitive) {
     explicitCandidateAnswer = matchSensitive(answerLabel);
   }
+  // Candidate facts must never be invented. Unrelated open-ended fields can
+  // still reach the grounded generation fallback below.
   if (explicitCandidateFact && explicitCandidateAnswer == null) {
     return {
       action: "skip",
-      reason: "candidate fact needs explicit approved answer",
+      reason: f.required
+        ? "candidate fact needs explicit approved answer"
+        : "non-required unmapped field",
       sensitive,
       blocking: !!f.required,
     };
@@ -3629,9 +4676,7 @@ function planField(f, profile, ctx) {
       return { action: "skip", reason: "optional demographic left unselected", sensitive: true, blocking: false };
     }
   }
-  let priorityAns = explicitCandidateFact
-    ? explicitCandidateAnswer
-    : priorityAutoAnswer(answerLabel, profile);
+  let priorityAns = explicitCandidateAnswer || priorityAutoAnswer(answerLabel, profile);
   if (priorityAns == null) {
     priorityAns = workAuthorizationDropdownAnswer(answerLabel, profile);
   }
@@ -3666,7 +4711,33 @@ function planField(f, profile, ctx) {
   // Radio/button group: map the QUESTION (legend/field label) to an answer,
   // then pick the option.
   if (f.kind === "radiogroup" || f.kind === "buttongroup") {
-    const ans = priorityAns || (sensitive ? (matchSensitive(answerLabel) || demographicAnswer(answerLabel, profile) || autoAnswer(answerLabel, profile, true)) : (findAnswer(label, answers) || mapTextValue(f, profile) || mapTextValue(mappingLabel, profile) || autoAnswer(answerLabel, profile)));
+    const ans = priorityAns || (sensitive
+      ? (matchSensitive(answerLabel) || demographicAnswer(answerLabel, profile) || autoAnswer(answerLabel, profile, true))
+      : (findAnswer(label, answers) || matchScreeningRule(answerLabel, profile.screening_answer_rules) || mapTextValue(f, profile) || mapTextValue(mappingLabel, profile) || autoAnswer(answerLabel, profile)));
+    const relocationOption = relocationStatementOption(f, profile);
+    if (relocationOption) {
+      const guarded = guardLocalResidencyOption(f, relocationOption, profile, label);
+      if (guarded) {
+        if (f.kind === "buttongroup") {
+          return { action: "buttonclick", optionAutofillId: guarded.autofillId, optionValue: guarded.value, optionText: optionText(guarded) };
+        }
+        return { action: "check", optionId: guarded.id, optionValue: guarded.value, optionText: optionText(guarded), optionAutofillId: guarded.autofillId, groupName: f.name };
+      }
+    }
+    const sponsorshipOption = sponsorshipStatementOption(f, profile);
+    if (sponsorshipOption) {
+      if (f.kind === "buttongroup") {
+        return { action: "buttonclick", optionAutofillId: sponsorshipOption.autofillId, optionValue: sponsorshipOption.value, optionText: optionText(sponsorshipOption) };
+      }
+      return { action: "check", optionId: sponsorshipOption.id, optionValue: sponsorshipOption.value, optionText: optionText(sponsorshipOption), optionAutofillId: sponsorshipOption.autofillId, groupName: f.name };
+    }
+    const citizenshipOption = citizenshipStatusOption(f, profile);
+    if (citizenshipOption) {
+      if (f.kind === "buttongroup") {
+        return { action: "buttonclick", optionAutofillId: citizenshipOption.autofillId, optionValue: citizenshipOption.value, optionText: optionText(citizenshipOption) };
+      }
+      return { action: "check", optionId: citizenshipOption.id, optionValue: citizenshipOption.value, optionText: optionText(citizenshipOption), optionAutofillId: citizenshipOption.autofillId, groupName: f.name };
+    }
     if (ans == null) {
       const privacyOption = privacyPreservingPronounOption(f);
       if (privacyOption) {
@@ -3681,7 +4752,11 @@ function planField(f, profile, ctx) {
       if (!f.required) return { action: "skip", reason: "non-required unmapped field", sensitive, blocking: false };
       return { action: "skip", reason: "no approved answer for screening question", sensitive };
     }
-    const opt = matchingOptions(f, ans)[0] || null;
+    const matches = matchingOptions(f, ans, profile);
+    if (["yes", "no", "true", "false"].includes(norm(ans)) && matches.length > 1) {
+      return { action: "skip", reason: "no option matches saved answer", sensitive };
+    }
+    const opt = matches[0] || null;
     if (opt && f.kind === "buttongroup") {
       return { action: "buttonclick", optionAutofillId: opt.autofillId, optionValue: opt.value, optionText: optionText(opt) };
     }
@@ -3694,15 +4769,28 @@ function planField(f, profile, ctx) {
     if (isNegativeAnswer(ans) && !f.required) {
       return { action: "skip", reason: "approved No answer has no matching optional option", sensitive, blocking: false };
     }
+    if (!(f.options || []).length && ans && f.required) {
+      return {
+        action: f.kind === "buttongroup" ? "buttonclick" : "check",
+        value: String(ans),
+        deferLiveOptions: true,
+        sensitive,
+      };
+    }
     return { action: "skip", reason: "no option matches saved answer", sensitive };
   }
   if (f.kind === "checkboxgroup") {
-    const ans = priorityAns || (sensitive ? (matchSensitive(mappingLabel) || demographicAnswer(mappingLabel, profile) || autoAnswer(label, profile, true)) : (findAnswer(label, answers) || mapTextValue(f, profile) || mapTextValue(mappingLabel, profile) || autoAnswer(label, profile)));
+    const locationGroupPlan = locationCheckboxGroupPlan(f, profile);
+    if (locationGroupPlan) return locationGroupPlan;
+    const sourceAnswer = isSourceQuestion(mappingLabel) || looksLikeSourceOptionGroup(f)
+      ? preferredSourceAnswer(mappingLabel, profile, answers)
+      : null;
+    const ans = priorityAns || sourceAnswer || (sensitive ? (matchSensitive(mappingLabel) || demographicAnswer(mappingLabel, profile) || autoAnswer(label, profile, true)) : (findAnswer(label, answers) || mapTextValue(f, profile) || mapTextValue(mappingLabel, profile) || autoAnswer(label, profile)));
     if (ans == null) {
       if (!f.required) return { action: "skip", reason: "non-required unmapped field", sensitive, blocking: false };
       return { action: "skip", reason: "checkbox group needs saved answer / manual selection", sensitive };
     }
-    const matches = matchingOptions(f, ans);
+    const matches = matchingOptions(f, ans, profile);
     if (matches.length) return { action: "checkmany", options: matches };
     if (isNegativeAnswer(ans) && !f.required) {
       return { action: "skip", reason: "approved No answer has no matching optional checkbox option", sensitive, blocking: false };
@@ -3737,7 +4825,13 @@ function planField(f, profile, ctx) {
   }
   // Custom ATS dropdown/combobox controls, e.g. Greenhouse React Select.
   if (f.role === "combobox") {
-    const ans = comboboxAnswer(label, mappingLabel, profile, sensitive, priorityAns, answers, f);
+    let ans = comboboxAnswer(label, mappingLabel, profile, sensitive, priorityAns, answers, f);
+    const clearanceChoice = clearanceLevelChoice(f, profile);
+    if (clearanceChoice != null) ans = clearanceChoice;
+    const englishChoice = englishLevelChoice(f, profile);
+    if (englishChoice != null) ans = englishChoice;
+    const bachelorChoice = bachelorGraduationYearChoice(f, profile);
+    if (bachelorChoice != null) ans = bachelorChoice;
     const current = fieldSelectedText(f);
     if (current && current !== "expanded") {
       if (ans == null) return { action: "skip", reason: "combobox already selected" };
@@ -3745,7 +4839,9 @@ function planField(f, profile, ctx) {
       if (last && current.includes(last)) return { action: "skip", reason: "combobox already selected" };
     }
     if (ans != null) {
-      const opt = matchingOptions(f, ans)[0] || null;
+      const citizenshipOpt = citizenshipStatusOption(f, profile);
+      if (citizenshipOpt) return { action: "combobox", value: optionText(citizenshipOpt) };
+      const opt = matchingOptions(f, ans, profile)[0] || null;
       return { action: "combobox", value: opt ? optionText(opt) : String(ans) };
     }
     if (!f.required) {
@@ -3773,6 +4869,14 @@ function planField(f, profile, ctx) {
     const level = degreeFieldQuestion(label);
     let ans = priorityAns || (sensitive ? (matchSensitive(label) || demographicAnswer(label, profile) || autoAnswer(label, profile, true)) : (findAnswer(label, answers) || mapTextValue(f, profile) || mapTextValue(mappingLabel, profile) || autoAnswer(label, profile)));
     if (level) ans = educationFieldForLevel(profile, level) || ans;
+    const clearanceChoice = clearanceLevelChoice(f, profile);
+    if (clearanceChoice != null) ans = clearanceChoice;
+    const englishChoice = englishLevelChoice(f, profile);
+    if (englishChoice != null) ans = englishChoice;
+    const bachelorChoice = bachelorGraduationYearChoice(f, profile);
+    if (bachelorChoice != null) ans = bachelorChoice;
+    const citizenshipOpt = citizenshipStatusOption(f, profile);
+    if (citizenshipOpt) return { action: "select", value: optionText(citizenshipOpt) };
     const opt = ans ? findOption(f.options, ans) : null;
     if (opt) {
       return { action: "select", value: optionText(opt) };
@@ -3781,13 +4885,25 @@ function planField(f, profile, ctx) {
       const other = (f.options || []).find((option) => norm(optionText(option)) === "other");
       if (other) return { action: "select", value: optionText(other) };
     }
-    const sourceOpt = matchingOptions(f, ans)[0] || null;
+    const sourceOpt = matchingOptions(f, ans, profile)[0] || null;
     if (sourceOpt) return { action: "select", value: optionText(sourceOpt) };
     if (!f.required) return { action: "skip", reason: "non-required unmapped field", blocking: false };
     return { action: "skip", reason: "no matching option / answer", sensitive };
   }
   // Checkbox (e.g. consent / yes-no screening)
   if (f.type === "checkbox") {
+    const optionPolarity = binaryAnswerPolarity([f.label, f.value, f.ariaLabel].filter(Boolean).join(" "));
+    const optionQuestion = [f.section, f.ariaDescription].filter(Boolean).join(" ");
+    if (optionPolarity != null && optionQuestion) {
+      const optionAnswer = (isSensitive(optionQuestion) ? matchSensitive(optionQuestion) : null)
+        || matchScreeningRule(optionQuestion, profile.screening_answer_rules)
+        || findExactAnswer(optionQuestion, answers);
+      const answerPolarity = binaryAnswerPolarity(optionAnswer);
+      if (answerPolarity != null) {
+        if (answerPolarity === optionPolarity) return { action: "check" };
+        return { action: "skip", reason: "option polarity does not match approved answer", sensitive, blocking: false };
+      }
+    }
     const officeLocationPlan = officeLocationCheckboxPlan(f, profile);
     if (officeLocationPlan) return officeLocationPlan;
     if (norm(mappingLabel).includes("preferred name")) return { action: "skip", reason: "preferred name checkbox not needed", blocking: false };
@@ -3880,6 +4996,10 @@ function planField(f, profile, ctx) {
   const ans = findAnswer(label, answers);
   if (ans != null) {
     return { action: "fill", value: String(ans) };
+  }
+  const approvedRule = matchScreeningRule(label, profile.screening_answer_rules);
+  if (approvedRule != null) {
+    return { action: "fill", value: String(approvedRule) };
   }
   const auto = autoAnswer(label, profile);
   if (auto) return { action: "fill", value: String(auto) };
@@ -4075,6 +5195,11 @@ function isSchoolComboboxField(field) {
   const label = norm((field && field.label) || "");
   if (label.includes("schoolwork") || label.includes("school work")) return false;
   if ((label.includes("experience") || label.includes("years")) && label.includes("college")) return false;
+  if (
+    label.includes("academic institution") &&
+    (label.includes("last") || label.includes("within")) &&
+    (label.includes("year") || label.includes("years"))
+  ) return false;
   return ["school", "university", "institution", "college"].includes(label)
     || ["school", "university", "institution", "college"].some((term) => hasWholePhrase(label, term));
 }
@@ -4358,7 +5483,111 @@ async function selectWorkdayNestedPromptOption(page, answer, field) {
   }
 }
 
+async function collectVisibleGroupOptions(page, f) {
+  try {
+    const values = await page.evaluate((context) => {
+      const visible = (node) => !!(node && (node.offsetParent || node.getClientRects().length));
+      const text = (node) => String((node && node.textContent) || "").replace(/\s+/g, " ").trim();
+      const byAutofill = context.autofillId
+        ? document.querySelector(`[data-job-agent-autofill-index="${context.autofillId}"]`)
+        : null;
+      const control = byAutofill || (context.id ? document.getElementById(context.id) : null) || document.activeElement;
+      if (!control) return [];
+      const root = control.closest(
+        "fieldset, .application-question, .ashby-application-form-field-entry, [data-field-entry-id], [data-field-path], form"
+      ) || control.parentElement;
+      if (!root) return [];
+      const nodes = Array.from(root.querySelectorAll(
+        'label, [role="radio"], [role="menuitemradio"], [data-automation-id="radioBtn"], [role="option"]'
+      ));
+      const leaves = nodes.filter((node) => visible(node) && !node.querySelector(
+        'label, [role="radio"], [role="menuitemradio"], [data-automation-id="radioBtn"], [role="option"]'
+      ));
+      const values = leaves.map(text).filter((value) => value && value.length <= 200);
+      return Array.from(new Set(values)).slice(0, 100);
+    }, { id: String(f.id || ""), autofillId: String(f.autofillId || "") });
+    return values || [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function chooseDeferredOption(texts, f, profile, requested) {
+  if (!texts || !texts.length) return null;
+  const synthetic = { ...f, options: texts.map((t) => ({ label: t, value: t })) };
+  const relocation = relocationStatementOption(synthetic, profile);
+  if (relocation) return optionText(relocation);
+  const sponsorship = sponsorshipStatementOption(synthetic, profile);
+  if (sponsorship) return optionText(sponsorship);
+  const citizenship = citizenshipStatusOption(synthetic, profile);
+  if (citizenship) return optionText(citizenship);
+  const metro = basedInMetroQuestionAnswer(f.label || "", profile);
+  if (metro != null) {
+    if (metro === "No") {
+      const relocationWilling = (profile.answers || {})["Are you open to relocation?"]
+        || matchScreeningRule("open to relocation", profile.screening_answer_rules)
+        || approvedSensitiveEntryAnswer(profile, "relocation");
+      if (relocationWilling != null && truthyAnswer(relocationWilling)) {
+        const willing = texts.find((t) => {
+          const text = norm(t);
+          return text.includes("relocat") &&
+            ["willing", "wiling", "would", "open to", "plan to", "will relocate", "happy to"].some((marker) => text.includes(marker)) &&
+            !["not willing", "unwilling", "not open", "do not want", "don t want", "cannot relocate", "can t relocate"].some((marker) => text.includes(marker));
+        });
+        if (willing) return willing;
+      }
+    }
+    const exact = texts.find((t) => norm(t) === norm(metro));
+    if (exact) return exact;
+  }
+  if (requested) {
+    const direct = texts.find((t) => optionMatches(t, requested));
+    if (direct) return direct;
+    const best = bestOptionMatch(texts, requested);
+    if (best) return best;
+  }
+  const sensitiveValue = matchSensitive(f.label || "");
+  if (sensitiveValue != null) {
+    const direct = texts.find((t) => optionMatches(t, sensitiveValue));
+    if (direct) return direct;
+    const best = bestOptionMatch(texts, sensitiveValue);
+    if (best) return best;
+  }
+  return null;
+}
+
 async function applyFill(page, f, plan) {
+  if ((plan.action === "check" || plan.action === "buttonclick") && plan.deferLiveOptions) {
+    const profile = CFG.profile || {};
+    const texts = await collectVisibleGroupOptions(page, f);
+    const choice = chooseDeferredOption(texts, f, profile, plan.value || "");
+    if (!choice) {
+      const suffix = texts.length ? `; available options: ${texts.join(", ")}` : "";
+      throw new Error("no grounded answer could be generated from live option group" + suffix);
+    }
+    let clicked = false;
+    if (f.kind !== "buttongroup") {
+      try {
+        await page.getByRole("radio", { name: choice, exact: true }).first().click({ timeout: 3000 });
+        clicked = true;
+      } catch (error) {}
+    }
+    if (!clicked) {
+      try {
+        await page.getByText(choice, { exact: true }).last().click({ timeout: 3000 });
+        clicked = true;
+      } catch (error) {}
+    }
+    if (!clicked) {
+      try {
+        await page.locator("label").filter({ hasText: choice }).last().click({ timeout: 3000 });
+        clicked = true;
+      } catch (error) {}
+    }
+    if (!clicked) throw new Error(`could not click live option: ${choice}`);
+    await page.waitForTimeout(400);
+    return `selected: ${choice}`;
+  }
   if (plan.action === "check" && plan.optionId) {
     const locator = page.locator(attrSelector("id", plan.optionId)).first();
     await checkedWithFallback(locator);
@@ -4423,7 +5652,16 @@ async function applyFill(page, f, plan) {
     }
   } else if (plan.action === "select") {
     if (!sel) throw new Error("no selector");
-    await page.locator(sel).first().selectOption({ label: plan.value });
+    const locator = page.locator(sel).first();
+    const disabled = typeof locator.evaluate === "function"
+      ? await locator.evaluate((el) => Boolean(
+        el.disabled || el.getAttribute("aria-disabled") === "true"
+      )).catch(() => false)
+      : false;
+    if (disabled) {
+      throw new Error("disabled control pending dependency; no selectOption wait was attempted");
+    }
+    await locator.selectOption({ label: plan.value });
   } else if (plan.action === "upload") {
     if (!sel) throw new Error("no selector");
     await page.locator(sel).first().setInputFiles(plan.value);
@@ -4564,7 +5802,23 @@ async function applyFill(page, f, plan) {
             .filter((node) => node.offsetParent || node.getClientRects().length)
             .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
         )).filter(Boolean).slice(0, 100)).catch(() => []);
-        const fallbackChoice = available.find((text) => optionMatches(text, step));
+        let fallbackChoice = null;
+        if (fieldSponsorshipTypeContext(f) && available.some((text) => visaTypeText(text))) {
+          const approvedType = approvedSponsorshipType(CFG.profile || {});
+          if (approvedType) {
+            fallbackChoice = available.find((text) => sameVisaFamily(text, approvedType)) || null;
+          }
+        }
+        if (!fallbackChoice && !(fieldSponsorshipTypeContext(f) && available.some((text) => visaTypeText(text)))) {
+          fallbackChoice = available.find((text) => optionMatches(text, step));
+          if (!fallbackChoice) {
+            fallbackChoice = bestOptionMatch(available, step);
+          }
+          const deferred = chooseDeferredOption(available, f, CFG.profile || {}, step);
+          if (deferred && (fallbackChoice == null || deferred !== fallbackChoice)) {
+            fallbackChoice = deferred;
+          }
+        }
         if (fallbackChoice) {
           if (typeof page.getByRole === "function") {
             await page.getByRole("option", { name: fallbackChoice, exact: true }).first().click({ timeout: 3000 }).then(() => {
@@ -4674,8 +5928,8 @@ async function clickVisibleOptionWithPlaywright(page, answer, field = null) {
     if (["company website", "company site", "company careers", "company career site", "career site", "career website", "careers website", "careers site"].includes(want)) {
       wants.push("corporate website", "career site", "careers website", "career website", "company careers", "careers site", "company careers page website");
     }
-    if (["master s degree", "masters degree", "master degree"].includes(want)) {
-      wants.push("master degree", "masters degree", "master s degree");
+    if (["master s degree", "masters degree", "master degree", "masters", "master"].includes(want)) {
+      wants.push("master degree", "masters degree", "master s degree", "masters");
     }
     if (["east asian", "asian"].includes(want)) {
       wants.push("asian", "asian not hispanic or latino");
@@ -4693,6 +5947,22 @@ async function clickVisibleOptionWithPlaywright(page, answer, field = null) {
     if (want.includes("she") && want.includes("her")) wants.push("she her");
     if (want.includes("they") && want.includes("them")) wants.push("they them");
     const context = payload.field || {};
+    const fieldText = normLocal([
+      context.label, context.id, context.name, context.section,
+      context.ariaLabel, context.ariaDescription, context.placeholder, context.autocomplete,
+    ].filter(Boolean).join(" "));
+    const visaTypeText = (value) => /\b(h\s*1\s*b|opt|cpt|tn|e\s*3|l\s*1|o\s*1|f\s*1)\b|optional practical training|curricular practical training/.test(normLocal(value));
+    const nonOptVisa = (value) => /\b(h\s*1\s*b|tn|e\s*3|l\s*1|o\s*1)\b/.test(normLocal(value));
+    const optFamily = (value) => /\bopt\b|optional practical training|curricular practical training|f\s*1|cpt/.test(normLocal(value));
+    const sponsorshipTypeContext = (context.options || []).some((option) => visaTypeText(option && (option.label || option.value))) || /sponsor|visa|work author|immigration|right to work|work permit|if yes|select type/.test(fieldText);
+    const answerVisaType = wants.find(visaTypeText) || "";
+    const safeVisaOption = (text) => {
+      if (!visaTypeText(text)) return true;
+      if (!answerVisaType) return false;
+      if (optFamily(answerVisaType)) return optFamily(text) && !nonOptVisa(text);
+      if (/\bh\s*1\s*b\b/.test(answerVisaType)) return /\bh\s*1\s*b\b/.test(text);
+      return visaTypeText(text);
+    };
     const control = context.id ? document.getElementById(context.id) :
       (context.autofillId ? document.querySelector(`[data-job-agent-autofill-index="${context.autofillId}"]`) : document.activeElement);
     const controlledIds = [
@@ -4708,8 +5978,8 @@ async function clickVisibleOptionWithPlaywright(page, answer, field = null) {
       ...Array.from(document.querySelectorAll('[role="listbox"], [role="menu"]')),
       ...Array.from(document.querySelectorAll('[role="tree"], [role="dialog"], [data-automation-id="activeListContainer"], [data-popper-placement], [data-radix-popper-content-wrapper], [data-headlessui-state~="open"]')),
     ])).filter(visible);
-	    let roots = controlledIds.filter(visible);
-	    if (listboxes.length) {
+    let roots = controlledIds.filter(visible);
+    if (!roots.length && listboxes.length) {
 	      const labelled = control && control.id
 	        ? listboxes.filter((node) => String((node.getAttribute && node.getAttribute("aria-labelledby")) || "").split(/\s+/).includes(control.id))
 	        : [];
@@ -4723,7 +5993,7 @@ async function clickVisibleOptionWithPlaywright(page, answer, field = null) {
 	        };
 	        return distance(left) - distance(right);
 	      });
-	      roots = Array.from(new Set([...roots, ...candidates.slice(0, roots.length ? 2 : 1)]));
+      roots = candidates.slice(0, 1);
 	    }
     const optionSelector = '[role="option"], [role="menuitem"], [role="radio"], [role="checkbox"], [data-automation-id="menuItem"], [data-option-value], [data-value], li, button';
     const optionNodes = roots.length
@@ -4744,6 +6014,9 @@ async function clickVisibleOptionWithPlaywright(page, answer, field = null) {
         return { id: node.id || "", text, value, autofillId: canTarget ? autofillId : null };
       })
       .filter((node) => node.text || node.value);
+    const scorableOptions = sponsorshipTypeContext
+      ? options.filter((node) => safeVisaOption(normLocal(`${node.text} ${node.value}`)))
+      : options;
     const score = (node) => {
       const text = normLocal(`${node.text} ${node.value}`);
       return wants.reduce((best, candidate) => {
@@ -4756,7 +6029,7 @@ async function clickVisibleOptionWithPlaywright(page, answer, field = null) {
         return best;
       }, 0);
     };
-    const option = options.map((node, index) => ({ ...node, index, score: score(node) }))
+    const option = scorableOptions.map((node, index) => ({ ...node, index, score: score(node) }))
       .filter((node) => node.score > 0)
       .sort((a, b) => b.score - a.score || a.index - b.index)[0];
     if (!option) return null;
@@ -5267,7 +6540,10 @@ function hasSuccessfulFillReadback(label, filled) {
   for (const item of filled || []) {
     if (!sameRequiredField(label, item && item.label || "")) continue;
     const readback = item && item.readback;
-    if (readback === null || readback === undefined || readback === false || readback === "" || readback === "readback-error") continue;
+    if (
+      readback === null || readback === undefined || readback === false || readback === "" ||
+      readback === "readback-error" || readback === "selected-unverified"
+    ) continue;
     if (typeof readback === "string" && readback.startsWith("selected: ")) return true;
     if (readback === "file-selected") return true;
     if (String(readback).trim()) return true;
@@ -5276,10 +6552,10 @@ function hasSuccessfulFillReadback(label, filled) {
 }
 
 function invalidFindingCanUseSuccessfulReadback(label) {
-  const n = norm(label);
-  return n.includes("email") ||
-    (n.includes("full time") && n.includes("internship")) ||
-    n.includes("when will you graduate");
+  // Custom ATS controls may leave a stale aria-invalid marker after a
+  // committed selection. The readback itself is the stronger evidence, but
+  // only callers that have a non-empty, verified readback may use it.
+  return true;
 }
 
 function filterSuccessfulReadbackReviews(review, filled) {
@@ -5463,6 +6739,8 @@ async function fillPage(page, profile) {
   const filled = [];
   const review = [];
   const handled = new Set();
+  const deferredDisabled = new Map();
+  const deferredReviewed = new Set();
   const fieldIdentity = (field) => {
     const kind = String(field.kind || "single");
     if (field.autofillId) return `marker\u0000${kind}\u0000${field.autofillId}`;
@@ -5477,6 +6755,10 @@ async function fillPage(page, profile) {
   for (const f of batch) {
     const identity = fieldIdentity(f);
     if (handled.has(identity)) continue;
+    if (f.disabled) {
+      deferredDisabled.set(identity, f);
+      continue;
+    }
     const plan = planField(f, profile, ctx);
     if (plan.action === "skip") {
       handled.add(identity);
@@ -5533,6 +6815,25 @@ async function fillPage(page, profile) {
     }
   }
   };
+  const retryDeferredDisabledFields = async () => {
+    for (let pass = 0; pass < 3; pass++) {
+      const currentFields = await scrapeFields(page);
+      const ready = [];
+      for (const identity of Array.from(deferredDisabled.keys())) {
+        const candidate = currentFields.find((field) =>
+          fieldIdentity(field) === identity && !field.disabled
+        );
+        if (candidate) {
+          deferredDisabled.delete(identity);
+          ready.push(candidate);
+        }
+      }
+      if (!ready.length) return;
+      await processFields(ready);
+      if (!deferredDisabled.size) return;
+      await page.waitForTimeout(250);
+    }
+  };
   const fileDescriptors = fields.filter((field) => field.type === "file")
     .sort((left, right) => Number(norm(left.label).includes("cover letter")) - Number(norm(right.label).includes("cover letter")));
   for (const descriptor of fileDescriptors) {
@@ -5550,6 +6851,7 @@ async function fillPage(page, profile) {
   let nonFileFields = fields.filter((field) => field.type !== "file");
   await processFields(nonFileFields.filter((field) => field.kind === "buttongroup" && field.required));
   await processFields(nonFileFields);
+  await retryDeferredDisabledFields();
   // A choice or resume upload can reveal conditional questions without a page
   // transition. Re-scan until the visible form structure stabilizes, while
   // avoiding duplicate interaction with controls already completed above.
@@ -5571,6 +6873,17 @@ async function fillPage(page, profile) {
     nonFileFields = (await scrapeFields(page)).filter((field) => field.type !== "file");
     await processFields(nonFileFields.filter((field) => field.kind === "buttongroup" && field.required));
     await processFields(nonFileFields);
+    await retryDeferredDisabledFields();
+  }
+  for (const [identity, field] of deferredDisabled.entries()) {
+    if (deferredReviewed.has(identity) || !field.required) continue;
+    deferredReviewed.add(identity);
+    review.push({
+      label: field.label || field.id || field.name || "unlabeled field",
+      reason: "disabled control pending dependency; no selectOption wait was attempted",
+      sensitive: isSensitive(String(field.label || "")),
+      blocking: true,
+    });
   }
   return { filled, review };
 }
@@ -5738,7 +7051,7 @@ async function embeddedApplicationFrameUrl(page) {
       const frames = Array.from(document.querySelectorAll('iframe[src]'))
         .map((frame) => String(frame.src || '').trim())
         .filter(Boolean);
-      return frames.find((src) => /boards\.greenhouse\.io\/embed\/job_app\?/i.test(src)) || null;
+      return frames.find((src) => /(?:boards|job-boards)\.greenhouse\.io\/embed\/job_app\?/i.test(src)) || null;
     });
     return String(frameUrl || "").trim() || null;
   } catch (error) {
@@ -7529,15 +8842,11 @@ async function solveCaptchaIfConfigured(page) {
   const visionCfg = captchaVisionConfig();
   const challenge = await discoverCaptcha(page);
   if (!challenge || typeof challenge !== "object" || !challenge.kind) return { status: "none", detail: "no supported CAPTCHA detected" };
-  if (challenge.kind === "hcaptcha") {
-    if (visionCfg.enabled) return solveHcaptchaWithVision(page);
-    return {
-      status: "unsupported",
-      detail: "hcaptcha is not supported by CapMonster token tasks; vision fallback disabled or missing API key",
-    };
-  }
   if (!cfg.enabled && !visionCfg.enabled) return { status: "skipped", detail: "disabled" };
-  if (!cfg.enabled) return { status: "skipped", detail: "CapMonster disabled" };
+  if (!cfg.enabled) {
+    if (challenge.kind === "hcaptcha" && visionCfg.enabled) return solveHcaptchaWithVision(page);
+    return { status: "skipped", detail: "CapMonster disabled" };
+  }
   const tasks = capMonsterTasksFor(challenge, cfg);
   if (!tasks.length) return { status: "unsupported", detail: challenge.kind || "unknown" };
   try {

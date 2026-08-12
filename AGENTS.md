@@ -44,6 +44,8 @@
 - 本地唯一配置：`ops/daily.local.json`（已被 git 忽略）。
 - 可提交模板：`ops/daily.example.json`。
 - 唯一入口：`.venv/bin/python scripts/daily_sop.py <command>`。
+- 生产输出目录下的 `pipeline run-execute` 和 `applications execute-batch` 只能由
+  `daily_sop.py execute`/`run --execute` 的受控调用授权；直接调用下层入口必须拒绝。
 - 单批准备上限：`ops/daily.local.json` 的 `limit`，当前为 100，脚本硬限制为 100。
   该值不绕过资格、去重、反垃圾、候选人事实或最终提交确认门。
 - 每日确认目标：`ops/daily.local.json` 的 `daily_submit_target` 是绝对数量下限，当前为
@@ -80,9 +82,14 @@
   标记且没有活跃进程的目录。
 - 受控自动修复：`ops/daily.local.json` 的 `auto_repair`。字段/运行时故障进入
   `needs_repair`，在隔离副本中修复并完成目标测试、全量测试和离线验证后，才允许提升代码
-  和重试受影响岗位。全量测试使用修复启动前冻结的测试副本，不能由修复 Agent 改写。
+  和重试受影响岗位。`max_cycles` 的脚本硬上限为 5，限制最近一次已验证修复之后的连续逻辑
+  失败轮数；已验证修复经过后续浏览器执行后，新暴露的指纹进入新的有界阶段，但 artifact
+  cycle 必须继续单调递增。全量测试使用修复启动前冻结的测试副本，
+  不能由修复 Agent 改写。
 - `execute` 默认在当前批次完整审计后继续准备新候选，直到达到每日确认目标或进入
   `waiting_for_candidates`；仅在明确需要单批诊断时使用 `execute --one-batch`。
+- `check`/`report` 发现完整执行审计而阶段仍为 `prepared`、`prepared_empty`、
+  `waiting_for_candidates` 或 `executing` 时必须报错，不能静默收尾或生成完成报告。
 - `check` 会用只读、无工具的远程 `codex exec` 验证隔离 Codex 的真实可用性，不能只相信
   `codex login status`。自动化优先使用单次 `CODEX_API_KEY`，未配置时可从已有
   `OPENAI_API_KEY` 注入该次 exec。选中 custom Codex provider 时，必须投影其 base URL、
@@ -97,12 +104,17 @@
   浏览器，只有显式 `--retry-verified` 才执行已验证的单岗位 retry batch。
   只刷新 request 范围时使用 `repair --refresh-request-only`；该模式不得检查 Codex
   readiness、创建 repair attempt 或消耗 cycle。
+  若 Repair 进程已确认退出但运行仍停在 `repairing`，使用
+  `repair --recover-interrupted` 如实记录基础设施中断并恢复；不得在旧进程仍活跃时并发恢复，
+  该中断不消耗 coding repair cycle。
 - 历史完整审计中的 Recovery Plan 使用
   `scripts/daily_sop.py recover --run-dir <run>` 回放。该命令会从当前审计重新规划并写入
   `recovery-execution.json`，默认不打开浏览器；只有显式 `--retry-verified` 且恢复证据
   完整时才执行生成的单岗位 retry batch。存在多次 execution attempt 时必须按 application
   ID 合并全部完整终态再规划，但 recovery 注解只写回岗位最后出现的原 attempt 审计，不能
-  用最近一次窄 retry 指针遮住早期未解决岗位或覆写执行证据边界。
+  用最近一次窄 retry 指针遮住早期未解决岗位或覆写执行证据边界。当前 Recovery 已无
+  `retry_ready` 目标时必须清除 state/manifest 中旧的 `recovery_retry_batch` 指针，不能把
+  已提交或仍待证据的历史目标重新并入 Repair batch。
 
 不要临时拼接一条新的 `pipeline run-execute` 命令。需要改变来源、上限、分数、简历策略或
 提交模式时，先改 `ops/daily.local.json`，再执行 `check`，让状态文件记录配置哈希。
@@ -113,13 +125,17 @@
 - 简历只能从配置指定的原始 PDF 或 PDF 目录选择并原样上传，不生成或改写经历。
 - 敏感、法律、授权、薪资、人口统计等答案只能来自已批准的 sensitive KB。
 - LLM 只能补充未知的非敏感问题，并且只能依据候选人已保存的事实。
+  动态下拉在规划时没有选项、运行时才暴露真实选项时，允许再次调用受控 LLM 在这些页面原始
+  选项中选择最有事实依据的一项；结果必须映射回原始选项并验证读回。个人事实、敏感字段和
+  明确禁止 AI 的问题不得进入该生成回退。
 - 教育经历（包括高中名称和毕业年份），过往/当前任职、承包或投递面试经历，其他 offer
   及其截止日期，亲属关系与利益冲突，雇主限制与便利需求，母语/本地文字法定姓名，以及
   产品/地点/工作方向等个人偏好和明确的每周到岗承诺都属于候选人事实。
-  只能使用与字段规范化后精确对应的 profile answer，或该
-  字段适用且已批准的 sensitive KB；简历中没有记录不能推导为 `No`，一般的搬迁意愿、
-  远程偏好或低频到岗意愿也不能推导固定到岗承诺。缺少精确事实时必须进入
-  `candidate_fact_resolution`。
+  优先使用与字段规范化后精确对应的 profile answer，或该字段适用且已批准的 sensitive KB；
+  当选项集合与已保存答案语义兼容时，允许使用受控的 closest-match 作为回退，但须满足
+  以下约束：否定极性必须一致、不选择 "Other"/"Select"/"None" 等占位选项、
+  分数达到安全阈值、不将简历缺失推导为 `No`，也不从一般搬迁意愿或低频到岗意愿推导
+  固定到岗承诺。缺少可匹配事实时仍须进入 `candidate_fact_resolution`。
 - 配置中的 `profile` JSON 和其中的 `answers` 是普通事实与自定义答案的权威源；
   `sensitive_kb` 是敏感、法律、身份和授权答案的权威源。`profile_vector_db` 只是由批准事实
   生成的长期检索索引，不得绕过 JSON 权威源直接加入未经批准的答案；`database` 只记录投递
@@ -142,6 +158,11 @@
   删除或更换数据库来规避已有记录。
 - 新 application 使用规范化申请 URL 作为数据库唯一键，自动忽略常见 tracking 参数；
   没有 URL 时才使用规范化公司与岗位。数据库返回已有 application ID 时必须复用。
+- 每个准备批次内，同一家公司只保留一个岗位（`unique_companies=True`），避免重复投递同一家公司。
+  同一天内已经由更早批次取得真实页面确认提交的公司才会从后续批次中排除，避免跨批次重复。
+  仅准备但未执行、或执行后没有确认成功的旧岗位必须标记为未投递并释放同公司新岗位；
+  其原始终态仍保留在数据库和审计中，具体 URL 继续受 submitted/terminal Recovery 门保护。
+  短名单默认按「创业公司 → 中型公司 → 大型公司」的顺序排序，在每个公司层级内再按匹配分数排序。
 - `email_verification_required`、`submission_blocked_by_anti_spam`、
   `submit_clicked_unconfirmed`、`submission_processing_error`、
   `candidate_account_required` 都是终态分流，不是立即重试信号。
@@ -199,8 +220,12 @@ coding repair。后续岗位继续执行；候选修复只能在浏览器批次�
 `needs_repair -> repairing -> repair_verified`，失败则记录 `repair_failed` 或
 `repair_exhausted`。`needs_repair` 不是完成态。只有 `repair_verified` 才能生成仅含该指纹
 关联岗位且带 `repair_verified=true`、`retry_scope=single_application` 的 retry batch；
-不得用原始整批重试，也不得把反垃圾等终态带回。repair 基础设施失败记录尝试编号但不占用
-逻辑修复周期，也不得用同一个确定性 401 重复耗尽 `max_cycles`。
+生成 retry batch 时必须在主进程从原始规范化岗位、当前已批准 profile/sensitive KB 和已提升
+代码重建这些单岗位申请包，不能复用内嵌旧代码或旧事实快照的原包；私密事实仍不得进入隔离
+Repair Agent。不得用原始整批重试，也不得把反垃圾等终态带回。repair 基础设施失败记录尝试编号但不占用
+逻辑修复周期，尚未启动 Codex 的 `exhausted` 门检也不占用周期；不得用同一个确定性 401
+重复耗尽 `max_cycles`。候选人事实字段只有在已有批准答案而控件提交/读回仍失败时才可进入
+coding repair；仅因控件可复现或暴露了选项，不能把缺失事实误分到 Repair Agent。
 
 手动恢复 retained repair 时必须先从当前完整审计重建 fingerprints，旧 request 仅在审计
 不可用或不完整时兜底。完整审计确认没有 coding-repair 范围时，刷新并持久化空范围后回到
@@ -221,8 +246,12 @@ coding repair。后续岗位继续执行；候选修复只能在浏览器批次�
 吞吐保护：反垃圾冷却按时间窗口和 ATS tenant 隔离；普通表单/适配器失败按配置窗口内
 连续相同状态触发公司或 tenant/adapter 熔断。普通失败计数必须在当前批次每个终态增量
 落盘后立即更新；达到阈值后，后续同范围 `browser_execute` 必须由 Policy Gate 拒绝，
-其他公司继续。有限批次先覆盖不同公司，再用同公司的其他岗位补足。两者都不得累计终身
+其他公司继续。唯一例外是同时带 `retry=true`、`retry_scope=single_application` 以及
+`repair_verified=true` 或 `recovery_verified=true` 的精确目标：已验证证据解除该岗位的旧普通
+失败熔断，但不得解除反垃圾冷却或当前批次的全局网络健康熔断。有限批次先覆盖不同公司，再用同公司的其他岗位补足。两者都不得累计终身
 封死候选池。
+- 跨公司网络/浏览器故障还必须记录批次级健康 Observation、全局熔断和
+  `batch_network_health_recovery` Recovery Plan；只读健康检查未通过前不得自动重试。
 
 ## 6. 代码修改完成标准
 

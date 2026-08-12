@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 from job_agent.ats_adapters import adapter_profile_key_for_field, detect_ats_from_url
 from job_agent.capmonster import (
@@ -67,6 +67,8 @@ APPLICATION_FORM_UNAVAILABLE_LINE_PREFIX = "Application form unavailable:"
 REVIEW_ITEM_LINE_PREFIX = "Review item:"
 CAPTCHA_RECOVERY_ATTEMPTS = 1
 _RUNTIME_TIMEOUT_TRIGGERED = False
+_RUNTIME_WALL_DEADLINE: float | None = None
+_FILL_TIME_BUDGET_SECONDS: list[float] = [0.0]
 _CANDIDATE_ACCOUNT_PASSWORD_STORE_FILENAME = ".job-agent-candidate-passwords.json"
 _CANDIDATE_ACCOUNT_PASSWORD_LENGTH = 20
 _CANDIDATE_ACCOUNT_PASSWORD_SPECIALS = "!@#$%^*_-"
@@ -75,6 +77,14 @@ _DEFAULT_BROWSER_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36"
 )
+
+
+def _check_runtime_wall_deadline() -> None:
+    if _RUNTIME_WALL_DEADLINE is not None and time.monotonic() > _RUNTIME_WALL_DEADLINE:
+        raise RuntimeError(
+            "autofill runtime wall-clock deadline exceeded "
+            f"({max(0.0, _RUNTIME_WALL_DEADLINE - time.monotonic())}s ago)"
+        )
 
 
 def _playwright_driver_pids() -> list[int]:
@@ -185,14 +195,15 @@ def _browser_watchdog(
     deadline_seconds: int,
     browser: Any,
     stop_flag: list[bool],
+    unwound_event: threading.Event,
 ) -> None:
     global _RUNTIME_TIMEOUT_TRIGGERED
     deadline = time.monotonic() + max(1, int(deadline_seconds))
     while time.monotonic() < deadline:
-        if stop_flag[0]:
+        if stop_flag[0] or unwound_event.is_set():
             return
         time.sleep(0.5)
-    if stop_flag[0]:
+    if stop_flag[0] or unwound_event.is_set():
         return
     _RUNTIME_TIMEOUT_TRIGGERED = True
     stop_flag[0] = True
@@ -200,23 +211,15 @@ def _browser_watchdog(
         _terminate_playwright_processes()
     except Exception:
         pass
-    if browser is not None:
-        try:
-            browser.close()
-        except Exception:
-            pass
-    # A stuck Python-side loop can survive the browser driver being killed
-    # (the main thread never surfaces the connection error). If the runtime
-    # still has not unwound after a short grace period, terminate the whole
-    # process group so the SOP can quarantine the application and continue.
-    for _ in range(20):
-        if stop_flag[0]:
-            return
-        time.sleep(0.25)
-    if stop_flag[0]:
+    # Closing the browser from this thread races the sync greenlet loop, so
+    # only the driver processes are killed here.  The pending protocol call
+    # should then surface a connection error in the main thread.  If it does
+    # not unwind within the grace period, terminate this process so the SOP
+    # can quarantine the application instead of hanging the whole batch.
+    if unwound_event.wait(timeout=8):
         return
     try:
-        os.killpg(os.getpgrp(), signal.SIGKILL)
+        os.kill(os.getpid(), signal.SIGKILL)
     except Exception:
         os._exit(124)
 
@@ -295,6 +298,10 @@ SENSITIVE = [
     "attestation",
     "eeo",
     "demographic",
+    "cc 305",
+    "form cc",
+    "self identification",
+    "self-identification",
     "clearance",
     "export control",
     "export licens",
@@ -321,6 +328,8 @@ SENSITIVE = [
     "notetaker",
     "notetakers",
     "transcribe",
+    "gdpr",
+    "age-identifying information",
 ]
 PLACEHOLDER_ANSWERS = {"needs review", "n/a", "tbd", "na", ""}
 
@@ -428,6 +437,19 @@ def run_runtime_payload(
         except (TypeError, ValueError):
             watchdog_deadline_seconds = 0
     runtime_started_at = time.monotonic()
+    global _RUNTIME_WALL_DEADLINE
+    _RUNTIME_WALL_DEADLINE = (
+        runtime_started_at + watchdog_deadline_seconds
+        if watchdog_deadline_seconds and watchdog_deadline_seconds > 0
+        else None
+    )
+    try:
+        _FILL_TIME_BUDGET_SECONDS[0] = max(
+            30.0,
+            float(os.getenv("JOB_AGENT_FILL_TIME_BUDGET_SECONDS") or "240"),
+        )
+    except (TypeError, ValueError):
+        _FILL_TIME_BUDGET_SECONDS[0] = 240.0
 
     def _check_runtime_deadline() -> None:
         if watchdog_deadline_seconds and watchdog_deadline_seconds > 0:
@@ -464,11 +486,17 @@ def run_runtime_payload(
             context = browser.new_context(**_browser_context_options())
             _install_browser_fingerprint_mitigation(context)
             page = context.new_page()
-            page.set_default_timeout(10000)
+            page.set_default_timeout(6000)
             watchdog_stop = [False]
+            watchdog_unwound = threading.Event()
             watchdog = threading.Thread(
                 target=_browser_watchdog,
-                args=(watchdog_deadline_seconds or 0, browser, watchdog_stop),
+                args=(
+                    watchdog_deadline_seconds or 0,
+                    browser,
+                    watchdog_stop,
+                    watchdog_unwound,
+                ),
                 daemon=True,
             )
             if watchdog_deadline_seconds and watchdog_deadline_seconds > 0:
@@ -487,7 +515,21 @@ def run_runtime_payload(
             review_artifact: str | None = None
             review_artifact_reported = False
             if application_url:
-                page.goto(application_url, wait_until="domcontentloaded", timeout=60000)
+                navigation_error: BaseException | None = None
+                for navigation_attempt in range(2):
+                    try:
+                        page.goto(application_url, wait_until="domcontentloaded", timeout=60000)
+                        navigation_error = None
+                        break
+                    except Exception as exc:
+                        navigation_error = exc
+                        print(
+                            f"Initial navigation retry {navigation_attempt + 1}: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        page.wait_for_timeout(2500)
+                if navigation_error is not None:
+                    raise navigation_error
                 try:
                     page.wait_for_load_state("networkidle", timeout=8000)
                 except PlaywrightTimeoutError:
@@ -506,6 +548,7 @@ def run_runtime_payload(
                     application_form_ready = _recover_application_form_from_job_page(
                         page,
                         application_url,
+                        profile,
                     )
                 if not application_form_ready:
                     review = [
@@ -539,6 +582,8 @@ def run_runtime_payload(
             last_workday_sign_in_fill_signature = ""
             workday_account_verification_attempted = False
             workday_error_refreshes = 0
+            repeated_same_page = 0
+            last_filled_page_key: tuple[str, tuple[str, ...]] | None = None
             while pages < max_pages:
                 _check_runtime_deadline()
                 if _candidate_account_password(profile) and _has_workday_login_controls(page):
@@ -653,6 +698,38 @@ def run_runtime_payload(
                     repeated_workday_sign_in_pages = 0
                     last_workday_sign_in_signature = ""
                 step_before = _current_application_step(page)
+                current_page_key = (
+                    _normalized_page_url(str(page.url or "")),
+                    _normalized_field_signature(current_fields),
+                )
+                if last_filled_page_key is not None and current_page_key == last_filled_page_key:
+                    repeated_same_page += 1
+                    if repeated_same_page >= 1:
+                        reason = (
+                            f"Save and Continue did not advance the page: "
+                            f"{step_before or 'application entry'} (page navigation repeat)"
+                        )
+                        artifact = _write_submission_evidence(
+                            page,
+                            payload,
+                            None,
+                            None,
+                            reason,
+                        )
+                        if artifact:
+                            print(f"Application page evidence: {artifact}")
+                        all_review.append(
+                            {
+                                "label": step_before or "Application form",
+                                "reason": reason,
+                                "sensitive": False,
+                                "blocking": True,
+                            }
+                        )
+                        break
+                else:
+                    repeated_same_page = 1
+                    last_filled_page_key = current_page_key
                 print(f"Autofill progress: page {pages} ({step_before or 'application entry'})")
                 result = _runtime_agent_action(
                     action_runner,
@@ -688,7 +765,11 @@ def run_runtime_payload(
                             payload.get("coverLetterFile"),
                         ),
                     )
-                fields_before_next = _form_field_signature(_ensure_application_fields_ready(page))
+                fields_before_next_list = _ensure_application_fields_ready(page)
+                fields_before_next = _form_field_signature(fields_before_next_list)
+                normalized_fields_before_next = _normalized_field_signature(
+                    fields_before_next_list
+                )
                 page_filled = list(result["filled"])
                 for _attempt in range(1, _self_heal_passes()):
                     previous_blocking = sum(item.get("blocking", True) for item in result["review"])
@@ -749,7 +830,13 @@ def run_runtime_payload(
                     last_workday_sign_in_fill_signature = ""
                 if "myworkdayjobs.com" in str(page.url or "").lower():
                     _close_workday_open_menus(page)
-                    fields_before_next = _form_field_signature(_ensure_application_fields_ready(page))
+                    workday_fields_before_next_list = _ensure_application_fields_ready(page)
+                    fields_before_next = _form_field_signature(
+                        workday_fields_before_next_list
+                    )
+                    normalized_fields_before_next = _normalized_field_signature(
+                        workday_fields_before_next_list
+                    )
                 final_required_findings = _audit_required_fields(page)
                 result["review"] = _retain_unresolved_control_reviews(
                     result["review"], final_required_findings
@@ -891,11 +978,17 @@ def run_runtime_payload(
                     step_after = _current_application_step(page)
                     fields_after_next_list = _scrape_fields(page)
                     fields_after_next = _form_field_signature(fields_after_next_list)
+                    normalized_after_next = _normalized_field_signature(
+                        fields_after_next_list
+                    )
                     if _page_did_not_advance(
                         step_before,
                         step_after,
                         fields_before_next,
                         fields_after_next,
+                    ) or (
+                        normalized_fields_before_next
+                        and normalized_fields_before_next == normalized_after_next
                     ):
                         try:
                             selector = _attr_selector(
@@ -923,36 +1016,28 @@ def run_runtime_payload(
                         step_after = _current_application_step(page)
                         fields_after_next_list = _scrape_fields(page)
                         fields_after_next = _form_field_signature(fields_after_next_list)
+                        normalized_after_next = _normalized_field_signature(
+                            fields_after_next_list
+                        )
                         if validation_errors:
-                            recovered_filled, recovered_review, validation_errors = _recover_from_validation_errors(
-                                page,
-                                profile,
-                                payload.get("resumeFile"),
-                                payload.get("coverLetterFile"),
-                                action_runner=action_runner,
-                                application_url=application_url,
-                                page_index=pages,
+                            all_review.extend(
+                                {
+                                    "label": error,
+                                    "reason": "page validation error after Save and Continue fallback",
+                                    "sensitive": False,
+                                    "blocking": True,
+                                }
+                                for error in validation_errors
                             )
-                            _extend_unique_filled(page_filled, recovered_filled)
-                            all_review.extend(recovered_review)
-                            if any(item.get("blocking", True) for item in recovered_review):
-                                break
-                            if validation_errors:
-                                all_review.extend(
-                                    {
-                                        "label": error,
-                                        "reason": "page validation error after Save and Continue",
-                                        "sensitive": False,
-                                        "blocking": True,
-                                    }
-                                    for error in validation_errors
-                                )
-                                break
+                            break
                         if _page_did_not_advance(
                             step_before,
                             step_after,
                             fields_before_next,
                             fields_after_next,
+                        ) or (
+                            normalized_fields_before_next
+                            and normalized_fields_before_next == normalized_after_next
                         ):
                             sign_in_reason = _workday_sign_in_failure_reason(
                                 page,
@@ -1119,6 +1204,74 @@ def run_runtime_payload(
                     return 0
                 verification = _detect_email_verification_request(page)
                 processing_error = _detect_submission_processing_error(page) if not verification else None
+                if (
+                    processing_error
+                    and not verification
+                    and _is_refillable_form_correction(processing_error)
+                ):
+                    correction_refill = _runtime_agent_action(
+                        action_runner,
+                        "ats_fill_fields",
+                        "write",
+                        {
+                            "phase": "correction_refill",
+                            "page_index": pages,
+                            "application_url": application_url,
+                        },
+                        lambda: _fill_page(
+                            page,
+                            profile,
+                            payload.get("resumeFile"),
+                            payload.get("coverLetterFile"),
+                        ),
+                    )
+                    _extend_unique_filled(all_filled, correction_refill["filled"])
+                    correction_blockers = [
+                        item for item in correction_refill["review"] if item.get("blocking", True)
+                    ]
+                    if correction_blockers:
+                        _finalize_post_submit_blockers(
+                            page,
+                            payload,
+                            all_review,
+                            correction_refill["review"],
+                            all_filled,
+                        )
+                        return 0
+                    if correction_refill["filled"]:
+                        print(
+                            f"Autofill correction retry: rechecked/refilled "
+                            f"{len(correction_refill['filled'])} field(s)"
+                        )
+                    correction_submit = _find_button(page, kind="submit")
+                    if correction_submit:
+                        _wait_before_submit(page, skip_delay=True)
+                        _runtime_agent_action(
+                            action_runner,
+                            "ats_submit_application",
+                            "submit",
+                            _runtime_submit_policy_context(
+                                payload,
+                                profile,
+                                [],
+                                application_url,
+                            ),
+                            lambda: _click_button(page, correction_submit),
+                        )
+                        try:
+                            page.wait_for_load_state("networkidle", timeout=10000)
+                        except PlaywrightTimeoutError:
+                            pass
+                        _wait_for_submit_settle(page)
+                        confirmation = _detect_submission_confirmation(page)
+                        if confirmation:
+                            artifact = _write_submission_evidence(page, payload, confirmation)
+                            print(f"{SUBMITTED_LINE_PREFIX} {confirmation}")
+                            if artifact:
+                                print(f"Submission evidence: {artifact}")
+                            return 0
+                        verification = _detect_email_verification_request(page)
+                        processing_error = _detect_submission_processing_error(page) if not verification else None
                 for retry_number in range(1, CAPTCHA_RECOVERY_ATTEMPTS + 1):
                     if not _is_retryable_captcha_error(processing_error):
                         break
@@ -1169,6 +1322,14 @@ def run_runtime_payload(
                         )
                         if not native_restored:
                             processing_error = "captcha native restore failed"
+                            break
+                        retry_captcha = _solve_captcha_if_configured(page)
+                        print(
+                            f"CapMonster CAPTCHA retry {retry_number}: "
+                            f"{retry_captcha['status']} ({retry_captcha['detail']})"
+                        )
+                        if retry_captcha["status"] != "solved":
+                            processing_error = _captcha_recovery_failure(retry_captcha)
                             break
                     else:
                         retry_captcha = _solve_captcha_if_configured(page)
@@ -1283,6 +1444,8 @@ def run_runtime_payload(
     finally:
         if "watchdog_stop" in locals():
             watchdog_stop[0] = True
+        if "watchdog_unwound" in locals():
+            watchdog_unwound.set()
         if browser is not None:
             try:
                 browser.close()
@@ -1732,6 +1895,20 @@ def _detect_submission_processing_error(page) -> str | None:
         url = _safe_evidence_url(str(state.get("url") or ""))
         return f"captcha present at {url or 'current page'}"
     return None
+
+
+def _is_refillable_form_correction(error: str | None) -> bool:
+    """Return whether a processing error means the ATS re-rendered with errors.
+
+    These messages appear when the form was not accepted because a required
+    field is empty or invalid, so one bounded refill and resubmit is safe. It
+    never covers spam, rate-limit, CAPTCHA, or server-processing failures.
+    """
+    normalized = _norm(error)
+    return any(
+        marker in normalized
+        for marker in ("your form needs corrections", "missing entry for required field")
+    )
 
 
 def _is_retryable_captcha_error(error: str | None) -> bool:
@@ -2313,12 +2490,11 @@ def _has_successful_fill_readback(label: str, filled: list[dict[str, Any]] | Non
 
 
 def _invalid_finding_can_use_successful_readback(label: str) -> bool:
-    normalized = _norm(label)
-    return (
-        "email" in normalized
-        or ("full time" in normalized and "internship" in normalized)
-        or "when will you graduate" in normalized
-    )
+    # Custom ATS controls can leave a stale aria-invalid / checkValidity()
+    # marker after a committed selection.  A successful, verified fill
+    # readback is the stronger evidence; callers only consult this predicate
+    # when such a readback exists.
+    return True
 
 
 def _filter_successful_readback_reviews(
@@ -2419,6 +2595,442 @@ def _find_answer(label: str, answers: dict[str, Any]) -> Any | None:
             best_score = score
             best = value
     return best if best_score >= 0.6 else None
+
+
+def _find_exact_answer(label: str, answers: Mapping[str, Any] | None) -> Any:
+    """Return only a normalized-label exact answer from the authority source."""
+    if not answers:
+        return None
+    normalized_label = _norm(label)
+    if not normalized_label:
+        return None
+    for key, value in answers.items():
+        if _norm(key) == normalized_label and _norm(value) not in PLACEHOLDER_ANSWERS:
+            return value
+    return None
+
+
+def _candidate_fact_family(label: str) -> str | None:
+    """Classify only narrow same-fact wording variants.
+
+    Unlike ``_find_answer``, these families cannot convert generic token
+    overlap into a new candidate fact.
+    """
+    normalized = _norm(label)
+    if not normalized:
+        return None
+    if any(
+        marker in normalized
+        for marker in ("sms", "text message", "text me", "via text", "text updates", "whatsapp")
+    ) and any(
+        marker in normalized
+        for marker in ("consent", "agree", "contact", "receive", "updates", "communications", "ok")
+    ):
+        return "communication_consent"
+    if any(marker in normalized for marker in ("on site", "onsite", "in office", "in-office", "office", "hq")) and any(
+        marker in normalized
+        for marker in (
+            "able to work",
+            "willing to work",
+            "can you work",
+            "requires me to work",
+            "required to work",
+            "commit",
+            "confirm",
+            "able to come",
+            "come in to",
+            "come into",
+            "work from",
+            "report to",
+            "comfortable coming",
+            "willing to come",
+        )
+    ):
+        return "onsite_commitment"
+    if "intern season" in normalized or (
+        "season" in normalized and "interested" in normalized
+    ):
+        return "intern_season"
+    if any(marker in normalized for marker in ("have you used", "used our product", "used the product")):
+        return "product_use"
+    if any(marker in normalized for marker in ("how familiar", "familiarity")):
+        return "familiarity"
+    return None
+
+
+def _find_semantic_candidate_fact_answer(
+    label: str,
+    answers: Mapping[str, Any] | None,
+) -> Any:
+    family = _candidate_fact_family(label)
+    if family is None or not answers:
+        return None
+    matches = [
+        value
+        for key, value in answers.items()
+        if _candidate_fact_family(str(key)) == family
+        and _norm(value) not in PLACEHOLDER_ANSWERS
+    ]
+    if len({_norm(value) for value in matches}) != 1:
+        return None
+    return matches[0]
+
+
+def _candidate_fact_inference_allowed(label: str) -> bool:
+    """Whether a non-sensitive candidate-fact family may use the LLM fallback.
+
+    Identity, legal history, employment history, education history, offer
+    status, and relationship/conflict facts stay on the explicit-answer path.
+    Preferences, onsite commitments, consent, subjective experience, start
+    dates, and experience thresholds are grounded in profile facts and may
+    reach the guarded resolver so a missing saved answer does not block an
+    otherwise complete application.
+    """
+    normalized = _norm(label)
+    if not normalized:
+        return False
+    native_legal_name = any(
+        phrase in normalized
+        for phrase in ("native language", "native script", "local language", "local script")
+    ) and any(phrase in normalized for phrase in ("legal name", "full name", "name"))
+    identity_or_language_level = (
+        normalized in {"nationality", "what is your nationality"}
+        or "country of nationality" in normalized
+        or "english level" in normalized
+        or "english proficiency" in normalized
+    )
+    offer_status = "offer" in normalized and any(
+        phrase in normalized
+        for phrase in ("deadline", "pending", "upcoming", "anticipate", "anticipated")
+    )
+    high_school_history = any(
+        phrase in normalized for phrase in ("high school", "secondary school")
+    ) and any(
+        phrase in normalized
+        for phrase in ("name", "graduation", "graduate", "year", "attended")
+    )
+    history = any(
+        phrase in normalized
+        for phrase in (
+            "employment history",
+            "ever worked for",
+            "ever worked at",
+            "previously worked for",
+            "previously worked at",
+            "previously employed by",
+            "currently employed by",
+            "current employee",
+            "previously applied",
+            "ever applied",
+            "previously interviewed",
+            "career fair",
+            "referred by",
+            "employee referral",
+        )
+    )
+    relationship_or_conflict = any(
+        phrase in normalized
+        for phrase in (
+            "related to",
+            "personal relationship",
+            "familial relationship",
+            "relative",
+            "immediate family",
+            "conflict of interest",
+        )
+    )
+    start_commitment = "2026" in normalized and any(
+        phrase in normalized for phrase in ("start", "available", "begin")
+    )
+    experience_threshold = "experience" in normalized and any(
+        phrase in normalized
+        for phrase in (
+            "minimum of",
+            "at least",
+            "years of experience",
+            "year of experience",
+            "not including internships",
+            "excluding internships",
+        )
+    )
+    return not bool(
+        native_legal_name
+        or identity_or_language_level
+        or offer_status
+        or high_school_history
+        or history
+        or relationship_or_conflict
+        or start_commitment
+        or experience_threshold
+    )
+
+
+def _requires_explicit_candidate_fact(label: str) -> bool:
+    """Keep identity, history, preferences, and commitments out of inference."""
+    normalized = _norm(label)
+    if not normalized:
+        return False
+    native_legal_name = any(
+        phrase in normalized
+        for phrase in ("native language", "native script", "local language", "local script")
+    ) and any(phrase in normalized for phrase in ("legal name", "full name", "name"))
+    identity_or_language_level = (
+        normalized in {"nationality", "what is your nationality"}
+        or "country of nationality" in normalized
+        or "english level" in normalized
+        or "english proficiency" in normalized
+    )
+    offer_status = "offer" in normalized and any(
+        phrase in normalized
+        for phrase in ("deadline", "pending", "upcoming", "anticipate", "anticipated")
+    )
+    high_school_history = any(
+        phrase in normalized for phrase in ("high school", "secondary school")
+    ) and any(
+        phrase in normalized
+        for phrase in ("name", "graduation", "graduate", "year", "attended")
+    )
+    personal_preference = "preferred name" not in normalized and (
+        (
+            any(phrase in normalized for phrase in ("preferred", "preference", "would you prefer"))
+            and any(
+                phrase in normalized
+                for phrase in ("location", "office", "product", "role", "company", "work")
+            )
+        )
+        or "resonates the most" in normalized
+        or "intern season" in normalized
+        or ("what season" in normalized and "interested" in normalized)
+    )
+    history = any(
+        phrase in normalized
+        for phrase in (
+            "employment history",
+            "ever worked for",
+            "ever worked at",
+            "previously worked for",
+            "previously worked at",
+            "previously employed by",
+            "currently employed by",
+            "current employee",
+            "previously applied",
+            "ever applied",
+            "previously interviewed",
+            "career fair",
+            "referred by",
+            "employee referral",
+        )
+    )
+    relationship_or_conflict = any(
+        phrase in normalized
+        for phrase in (
+            "related to",
+            "personal relationship",
+            "familial relationship",
+            "relative",
+            "immediate family",
+            "conflict of interest",
+        )
+    )
+    office_commitment = any(
+        phrase in normalized
+        for phrase in ("office", "hq", "in office", "in person", "on site", "onsite", "commute")
+    ) and any(
+        phrase in normalized
+        for phrase in (
+            "day per week",
+            "days per week",
+            "days a week",
+            "able to commit",
+            "able to work",
+            "comfortable",
+            "confirm",
+            "required to work",
+            "requires me to work",
+            "regularly commute",
+            "commute and work",
+            "willing to commute",
+            "willing to work",
+            "acknowledge and agree",
+        )
+    )
+    subjective_history = any(
+        phrase in normalized
+        for phrase in (
+            "how familiar",
+            "familiarity",
+            "used our product",
+            "have you used our product",
+            "engineering blog",
+            "influence your decision",
+        )
+    )
+    communication_consent = any(
+        phrase in normalized for phrase in ("sms", "text message", "whatsapp")
+    ) and any(
+        phrase in normalized for phrase in ("consent", "agree", "contact", "receive")
+    )
+    start_commitment = "2026" in normalized and any(
+        phrase in normalized for phrase in ("start", "available", "begin")
+    )
+    experience_threshold = "experience" in normalized and any(
+        phrase in normalized
+        for phrase in (
+            "minimum of",
+            "at least",
+            "years of experience",
+            "year of experience",
+            "not including internships",
+            "excluding internships",
+        )
+    )
+    return bool(
+        native_legal_name
+        or identity_or_language_level
+        or offer_status
+        or high_school_history
+        or personal_preference
+        or history
+        or relationship_or_conflict
+        or office_commitment
+        or subjective_history
+        or communication_consent
+        or start_commitment
+        or experience_threshold
+    )
+
+
+def _explicit_candidate_fact_answer(label: str, profile: dict[str, Any]) -> str | None:
+    answers = profile.get("answers") or {}
+    exact = _find_exact_answer(label, answers)
+    if exact is not None:
+        return str(exact)
+    normalized = _norm(label)
+    if "high school" in normalized or "secondary school" in normalized:
+        key = (
+            "end_year"
+            if any(marker in normalized for marker in ("graduation", "graduate", "year", "attended"))
+            else "school"
+        )
+        structured = _high_school_value(profile, key)
+        if structured is not None:
+            return str(structured)
+    if "experience" in normalized:
+        if (
+            "how many years of professional experience" in normalized
+            and "excluding internships" in normalized
+        ):
+            structured = _zero_based_professional_experience_range_answer(profile)
+            if structured is not None:
+                return structured
+        if (
+            ("full time software engineer" in normalized or "full time software engineering" in normalized)
+            and "excluding internships" in normalized
+        ):
+            return "Yes" if _has_full_time_software_engineering_experience(profile) else "No"
+        years_match = re.search(
+            r"(?:at least\s+)?(\d+)\s+years?(?:\s+of)?(?:\s+[a-z]+){0,4}\s+experience",
+            normalized,
+        )
+        if years_match:
+            raw_years = _years_experience_value(profile)
+            nums = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", str(raw_years or ""))]
+            if nums:
+                return "Yes" if max(nums) >= int(years_match.group(1)) else "No"
+        if _is_relevant_professional_experience_years_question(label):
+            raw_years = _years_experience_value(profile)
+            nums = re.findall(r"\d+(?:\.\d+)?", str(raw_years or ""))
+            if nums:
+                return nums[0]
+    semantic = _find_semantic_candidate_fact_answer(label, answers)
+    if semantic is not None:
+        return str(semantic)
+    if _label_is_office_commitment(label):
+        approved_office = _approved_office_commitment_answer(profile)
+        if approved_office is not None:
+            return approved_office
+    approved_rule = match_screening_rule(label, profile.get("screening_answer_rules"))
+    return str(approved_rule) if approved_rule is not None else None
+
+
+def _label_is_office_commitment(label: str) -> bool:
+    normalized = _norm(label)
+    return any(
+        phrase in normalized
+        for phrase in ("office", "hq", "in office", "in person", "on site", "onsite", "commute")
+    ) and any(
+        phrase in normalized
+        for phrase in (
+            "day per week",
+            "days per week",
+            "days a week",
+            "able to commit",
+            "able to work",
+            "comfortable",
+            "confirm",
+            "required to work",
+            "requires me to work",
+            "regularly commute",
+            "commute and work",
+            "willing to commute",
+            "willing to work",
+            "acknowledge and agree",
+            "work out of",
+            "work in our",
+            "work from the",
+            "work at the",
+        )
+    )
+
+
+def _approved_office_commitment_answer(profile: Mapping[str, Any]) -> str | None:
+    """Return the user-approved standing answer for office-commitment questions."""
+    answers = profile.get("answers") or {}
+    for key in (
+        "Are you open to working in-person in one of our offices 25% of the time?",
+        "Are you able to commit to working from one of our offices on Anchor Days each week?",
+        "Are you open to a hybrid schedule with in-office days on Monday, Wednesday, and Friday?",
+    ):
+        saved = _find_answer(key, answers)
+        if saved is not None:
+            return str(saved)
+    office_markers = (
+        "office",
+        "onsite",
+        "on site",
+        "in person",
+        "commute",
+        "monday friday",
+        "monday through friday",
+        "days a week",
+        "days per week",
+    )
+    for rule in profile.get("screening_answer_rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        answer = str(rule.get("answer") or "").strip()
+        if not answer:
+            continue
+        if any(
+            any(marker in _norm(str(pattern)) for marker in office_markers)
+            for pattern in rule.get("patterns") or []
+        ):
+            return answer
+    for key in ("office",):
+        approved = _approved_sensitive_entry_answer(profile, key)
+        if approved is not None:
+            return str(approved)
+    return None
+
+
+def _profile_relocation_willing(profile: Mapping[str, Any]) -> bool:
+    raw = (
+        _find_answer("Are you open to relocation?", profile.get("answers") or {})
+        or _approved_sensitive_entry_answer(profile, "relocation")
+        or _match_sensitive("relocation", profile)
+        or match_screening_rule("open to relocation", profile.get("screening_answer_rules"))
+    )
+    return _truthy_answer(raw)
 
 
 def _requires_user_authored_answer(label: str, profile: dict[str, Any]) -> bool:
@@ -2585,6 +3197,44 @@ def _sponsorship_countries_answer(label: str, profile: dict[str, Any]) -> str | 
 
 def _current_based_country_answer(label: str, profile: dict[str, Any]) -> str | None:
     normalized = _norm(label)
+    if any(
+        phrase in normalized
+        for phrase in (
+            "what state",
+            "which state",
+            "state do you currently reside",
+            "state region",
+            "state province",
+            "state in which",
+            "state of residence",
+        )
+    ):
+        return None
+    if (
+        (
+            "currently reside" in normalized
+            or "current residence" in normalized
+            or "do you reside" in normalized
+            or "reside within" in normalized
+        )
+        and (
+            "united states" in normalized
+            or "continental united states" in normalized
+            or "u s" in normalized
+            or "the us" in normalized
+        )
+    ):
+        candidate_country = _norm(_infer_country(profile) or "")
+        if candidate_country in {
+            "united states",
+            "united states of america",
+            "usa",
+            "us",
+        }:
+            return "Yes"
+        if str(profile.get("country") or "").strip():
+            return "No"
+        return None
     if (
         "currently based in the united states" in normalized
         or "currently based in the u s" in normalized
@@ -2674,6 +3324,11 @@ def _prior_employment_engagement_answer(
     employment_terms = (
         "ever been employed",
         "previously been employed",
+        "been employed with",
+        "been employed by",
+        "employed with",
+        "employed by",
+        "employed at",
         "employed full time",
         "ever worked",
         "previously worked",
@@ -2693,7 +3348,7 @@ def _prior_employment_engagement_answer(
     )
     if not any(term in normalized for term in employment_terms + engagement_terms):
         return None
-    if not any(
+    company_specific = any(
         term in normalized
         for term in (
             "company",
@@ -2704,7 +3359,17 @@ def _prior_employment_engagement_answer(
             "this role",
             "this position",
         )
-    ):
+    )
+    employed_directly = any(
+        term in normalized
+        for term in (
+            "been employed with",
+            "been employed by",
+            "employed with",
+            "employed by",
+        )
+    )
+    if not (company_specific or employed_directly):
         return None
     saved = _find_answer(label, profile.get("answers") or {})
     if saved is not None:
@@ -2882,6 +3547,8 @@ def _has_profile_evidence(profile_text: str, *needles: str) -> bool:
 
 def _production_screening_answer(label: str, profile: dict[str, Any]) -> str | None:
     normalized = _norm(label)
+    if _requires_explicit_candidate_fact(label):
+        return _explicit_candidate_fact_answer(label, profile)
     if not (
         "able to work onsite" in normalized
         or "built and deployed" in normalized
@@ -3063,6 +3730,17 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
     company = str(profile.get("target_company") or "the company")
     title = str(profile.get("target_title") or "this role")
     answers = profile.get("answers") or {}
+    age_bucket = _age_bucket_answer(profile)
+    if age_bucket and any(
+        marker in normalized
+        for marker in ("current age", "your age", "age are you", "age bracket", "age group", "what is your age")
+    ):
+        return age_bucket
+    if _requires_explicit_candidate_fact(label):
+        explicit = _explicit_candidate_fact_answer(label, profile)
+        if explicit is not None:
+            return explicit
+        return _match_sensitive(label, profile) if sensitive else None
     profile_text = _profile_technical_evidence_text(profile)
     if (
         "human" in normalized
@@ -3171,6 +3849,10 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
             or _match_sensitive("relocation", profile)
         )
         return "Yes" if _truthy_answer(relocation) else None
+    if _label_is_office_commitment(label):
+        office_answer = _approved_office_commitment_answer(profile)
+        if office_answer is not None:
+            return "Yes" if _truthy_answer(office_answer) else "No"
     if (
         ("foster city" in normalized or "hq 3 days per week" in normalized)
         and ("3 days" in normalized or "three days" in normalized)
@@ -4148,6 +4830,33 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
             return "I acknowledge that I have read and understood the Airbnb Candidate Privacy Policy."
     if normalized == "language":
         return str(profile.get("language") or profile.get("human_language") or "English")
+
+    if (
+        ("where are you located" in normalized or "what is your current location" in normalized or "current location" in normalized)
+        and ("region" in normalized or "country" in normalized or "located" in normalized)
+    ):
+        location = profile.get("location") or ""
+        country = _infer_country(profile) or "United States"
+        if location and country and country.lower() not in location.lower():
+            return f"{location}; {country}"
+        return location or country
+
+    if "which locations are you open to working from" in normalized or "locations are you open to" in normalized:
+        # Collect explicit saved multi-location answers and parsed desired locations
+        # as semicolon-separated candidates; bestOptionMatch will pick whichever ones
+        # actually appear in the form's option list.
+        candidates = []
+        for key in ["Select all locations you would be open to being placed", "Which locations are you open to working from?", "Please indicate all of the locations that you would be interested in relocating to for this position."]:
+            saved = answers.get(key)
+            if isinstance(saved, str) and saved.strip():
+                candidates.append(saved.strip())
+        prefs = _desired_location_values(profile)
+        if prefs:
+            candidates.append("; ".join(prefs))
+        if profile.get("location"):
+            candidates.append(profile.get("location"))
+        return "; ".join(dict.fromkeys(candidates)) if candidates else ""
+
     saved = _find_answer(label, answers)
     if saved is not None:
         return str(saved)
@@ -4178,6 +4887,114 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
         )
     if "additional information" in normalized or "anything else" in normalized:
         return str(answers.get("Additional Information") or "")
+
+    # Factual screening questions the owner has authorized the agent to answer
+    # from profile evidence / closest-match when no explicit saved answer exists.
+    if (
+        "academic institution" in normalized
+        and ("last" in normalized or "within" in normalized)
+        and ("year" in normalized or "years" in normalized)
+    ):
+        education = profile.get("education") or []
+        if education:
+            end_year = str(_current_education_value(profile, "end_year") or _education_end_date_value(profile) or "2026")
+            try:
+                if int(end_year) >= 2022:
+                    return "Yes"
+            except ValueError:
+                pass
+        return None
+    if (
+        "python" in normalized
+        and ("proficiency" in normalized or "rate your" in normalized or "how would you rate" in normalized)
+        and ("data analysis" in normalized or "pandas" in normalized or "pytorch" in normalized or "numpy" in normalized)
+    ):
+        if _has_profile_evidence(profile_text, "python", "pandas", "pytorch", "numpy"):
+            return "Advanced"
+        return None
+    if "how frequently" in normalized and "python" in normalized:
+        return "Daily" if _has_profile_evidence(profile_text, "python") else None
+    if "gpa" in normalized:
+        threshold = None
+        for token in normalized.replace(",", "").split():
+            try:
+                value = float(token)
+                if 0 < value <= 4.0:
+                    threshold = value
+            except ValueError:
+                continue
+        if threshold is not None:
+            gpa = profile.get("gpa")
+            if gpa is None and profile.get("education"):
+                gpas = [str(e.get("gpa", "")).strip() for e in profile.get("education") if e.get("gpa")]
+                gpa = gpas[0] if gpas else None
+            try:
+                if float(str(gpa).strip()) >= threshold:
+                    return "Yes"
+                return "No"
+            except Exception:
+                return None
+    if "years" in normalized and "experience" in normalized and ("how many" in normalized or "do you have" in normalized):
+        years = _years_experience_value(profile)
+        if years is not None:
+            try:
+                y = int(float(years))
+                candidates = [str(y) + "+ years", str(y) + " years", str(y) + "+"]
+                if y >= 1:
+                    candidates.append(f"{max(0, y-1)}-{y+1} years")
+                    candidates.append(f"{y}-{y+2} years")
+                return "; ".join(candidates)
+            except Exception:
+                return str(years)
+    # Language fluency is a candidate fact. Use it only when it is explicitly
+    # present; absence from the profile must not be converted to "None".
+    if (
+        "language" in normalized
+        and ("fluent" in normalized or "speak" in normalized or "written" in normalized or "spoken" in normalized)
+        and ("other than english" in normalized or "other than eng" in normalized or "in addition to english" in normalized)
+    ):
+        langs = profile.get("languages") or profile.get("language") or []
+        if isinstance(langs, str):
+            langs = [langs]
+        if langs:
+            return "; ".join(str(l) for l in langs)
+        return None
+    # Primary office / location preference for a specific company.
+    if (
+        "office" in normalized
+        and ("primarily" in normalized or "preferred" in normalized or "interested in" in normalized)
+        and "additional" not in normalized
+    ):
+        prefs = _desired_location_values(profile)
+        if prefs:
+            return prefs[0]
+        return None
+    # Additional offices the candidate is open to.
+    if "additional" in normalized and "office" in normalized and ("open to" in normalized or "consider" in normalized):
+        prefs = _desired_location_values(profile)
+        return "; ".join(prefs) if prefs else None
+    # Department / category for the role.
+    if "categories" in normalized or "category" in normalized or "department" in normalized:
+        title_norm = _norm(title)
+        if "engineer" in title_norm or "software" in title_norm or "data" in title_norm:
+            return "Engineering"
+        if "product" in title_norm:
+            return "Product"
+        if "design" in title_norm:
+            return "Design"
+        return "Engineering"
+    # Work-location / digital-first preference checkbox groups.
+    if (
+        "primary work location" in normalized
+        or "work location preference" in normalized
+        or "where would you like to work" in normalized
+        or ("digital-first" in normalized and "location" in normalized)
+    ):
+        prefs = _desired_location_values(profile)
+        if prefs:
+            return "; ".join(prefs)
+        return None
+
     if sensitive:
         return _match_sensitive(label, profile)
     return None
@@ -4201,29 +5018,19 @@ def _controlled_option_answer(
                 return option
         return None
 
+    if "export controls" in normalized or "export controlled" in normalized:
+        export_status = _approved_sensitive_entry_answer(
+            profile,
+            "us_export_control_status",
+        )
+        if _norm(export_status) in {"not applicable", "n a", "none"}:
+            return option_with("none of the above")
+
     if "comfortable working in go" in normalized or "coding exercise in go" in normalized:
         skills = " ".join(_norm(skill) for skill in profile.get("skills") or [])
         if " go " in f" {skills} " or "golang" in skills:
             return option_with("yes", "comfortable", "can")
-        return option_with("no", "not")
-    if "fluent" in normalized and "other than english" in normalized:
-        return option_with("chinese", "mandarin")
-    if "engineering blog" in normalized or ("blog" in normalized and "influence" in normalized):
-        return option_with("not at all", "none", "no influence", "very little", "not applicable")
-    if "ideal next role" in normalized and "stack" in normalized:
-        return option_with("backend", "full stack", "full-stack", "data")
-    if "big data architect" in normalized or (
-        "big data" in normalized and "production" in normalized
-    ) or "ingestion transformation storage orchestration" in normalized:
-        return option_with("yes", "somewhat", "no")
-    if "security clearance" in normalized and (
-        "currently hold" in normalized or "have you held" in normalized or "what clearance level" in normalized
-    ):
-        return option_with("no", "none", "not applicable", "do not have")
-    if "export control" in normalized or "export controls" in normalized:
-        return option_with("not applicable", "none", "no", "not a u.s. person")
-    if "minimum of 3 months" in normalized and "technical work" in normalized:
-        return option_with("yes", "no")
+        return None
     return None
 
 
@@ -4400,6 +5207,16 @@ def _high_school_value(profile: dict[str, Any], key: str) -> str | None:
 
 
 def _match_sensitive(label: str, profile: dict[str, Any]) -> str | None:
+    normalized = _norm(label)
+    if "cc 305" in normalized or (
+        "review" in normalized and "boxes below" in normalized
+    ):
+        disability = (
+            resolve_sensitive_answer("disability", profile)
+            or _demographic_answer("disability", profile)
+        )
+        if disability is not None:
+            return disability
     return resolve_sensitive_answer(label, profile) or _demographic_answer(label, profile)
 
 
@@ -4983,6 +5800,71 @@ def _is_demographic_label(label: str) -> bool:
     )
 
 
+def _age_in_years(profile: dict[str, Any]) -> int | None:
+    birthday = _date_target(profile.get("birthday"))
+    if birthday is None:
+        return None
+    today = date.today()
+    return today.year - birthday.year - (
+        (today.month, today.day) < (birthday.month, birthday.day)
+    )
+
+
+def _age_option_matches(age: int | None, option_text: str) -> bool:
+    """Match age-bucket options like ``Under 30`` or ``60 or older``."""
+    if age is None:
+        return False
+    normalized = _norm(option_text)
+    match = re.search(r"under\s+(\d+)", normalized)
+    if match:
+        return age < int(match.group(1))
+    match = re.search(r"(\d+)\s+(?:or older|and over|or above|plus)", normalized)
+    if match:
+        return age >= int(match.group(1))
+    bounds = _numeric_range_bounds(option_text)
+    if bounds is not None:
+        lo, hi = bounds
+        return lo <= age <= (hi if hi != float("inf") else age)
+    return False
+
+
+def _decline_option_texts(available: list[str]) -> list[str]:
+    return [
+        text
+        for text in available
+        if _is_decline_answer(_norm(text))
+        or _norm(text) in {"i don t wish to answer", "i do not wish to answer"}
+    ]
+
+
+def _ethnicity_dynamic_choice(
+    available: list[str],
+    profile: dict[str, Any],
+) -> str | None:
+    """Map the approved ethnicity to common single-select demographic options."""
+    ethnicity = _norm(profile.get("demographics", {}).get("ethnicity") or "")
+    if not ethnicity:
+        sensitive = profile.get("sensitive_answers") or {}
+        for value in sensitive.values():
+            if isinstance(value, Mapping) and _norm(value.get("label") or "") in {
+                "eeo ethnicity",
+                "ethnicity",
+            }:
+                ethnicity = _norm(value.get("answer") or "")
+                break
+    if not ethnicity:
+        return None
+    for text in available:
+        option = _norm(text)
+        if "hispanic" in option and "not" in option and (
+            "asian" in ethnicity or "white" in ethnicity or "black" in ethnicity or "pacific" in ethnicity
+        ):
+            return text
+        if "asian" in option and "asian" in ethnicity:
+            return text
+    return None
+
+
 def _is_decline_answer(answer: Any) -> bool:
     return _norm(answer) in {
         "prefer not to say",
@@ -5023,13 +5905,21 @@ _US_STATE_NAMES = {
 
 
 def _expanded_location_text(value: Any) -> str:
-    tokens = _norm(value).split()
+    raw_tokens = re.findall(r"[A-Za-z]+", str(value or ""))
+    if not raw_tokens:
+        return _norm(value)
     expanded: list[str] = []
-    for token in tokens:
+    ambiguous_words = {"in", "or", "me", "hi", "ok", "id", "ma"}
+    for raw_token in raw_tokens:
+        token = raw_token.casefold()
         if token in {"us", "usa"}:
             expanded.extend(["united", "states"])
+        elif token in _US_STATE_NAMES and (
+            raw_token.isupper() or token not in ambiguous_words
+        ):
+            expanded.extend(_US_STATE_NAMES[token].split())
         else:
-            expanded.extend(_US_STATE_NAMES.get(token, token).split())
+            expanded.append(token)
     return " ".join(expanded)
 
 
@@ -5133,6 +6023,31 @@ def _current_work_value(profile: dict[str, Any], key: str) -> Any | None:
 def _current_education_value(profile: dict[str, Any], key: str) -> Any | None:
     entry = _first_profile_entry(profile.get("education"))
     return entry.get(key) if entry else None
+
+
+def _profile_education_entry(profile: dict[str, Any], index: Any) -> dict[str, Any] | None:
+    """Return the profile education entry corresponding to a form entry index."""
+    entries = [entry for entry in profile.get("education") or [] if isinstance(entry, dict)]
+    if not entries:
+        return None
+    try:
+        idx = int(index)
+    except (TypeError, ValueError):
+        return entries[0]
+    if 0 <= idx < len(entries):
+        return entries[idx]
+    return None
+
+
+def _map_text_value_for_entry(
+    field_or_label: str | dict[str, Any],
+    profile: dict[str, Any],
+    entry: dict[str, Any] | None,
+) -> Any | None:
+    """Resolve an education-history control against one profile entry."""
+    if entry is None:
+        return None
+    return _map_text_value(field_or_label, {**profile, "education": [entry]})
 
 
 _MONTH_NAMES = {
@@ -5556,6 +6471,12 @@ def _map_text_value(field_or_label: str | dict[str, Any], profile: dict[str, Any
         or "if you" in normalized
     ):
         return None
+    if (
+        "academic institution" in normalized
+        and ("last" in normalized or "within" in normalized)
+        and ("year" in normalized or "years" in normalized)
+    ):
+        return None
     workday_phone_type = _workday_phone_device_type_answer(field_or_label, profile)
     if workday_phone_type:
         return workday_phone_type
@@ -5585,6 +6506,10 @@ def _map_text_value(field_or_label: str | dict[str, Any], profile: dict[str, Any
     if (
         "state" in normalized
         and ("currently reside" in normalized or "current residence" in normalized or "reside in" in normalized or "do you live in" in normalized)
+        and not (
+            "united states" in normalized
+            or "continental united states" in normalized
+        )
     ):
         return _profile_us_state_name(profile) or profile.get("region") or profile.get("state")
     if normalized == "state" or "state province" in normalized or "province" in normalized or "countryregion" in compact:
@@ -5690,6 +6615,16 @@ def _map_text_value(field_or_label: str | dict[str, Any], profile: dict[str, Any
         return profile.get("birthday")
     if normalized == "date":
         return f"{today.month:02d}/{today.day:02d}/{today.year}"
+    if any(
+        phrase in normalized
+        for phrase in (
+            "date of application",
+            "application date",
+            "date applied",
+            "date you are applying",
+        )
+    ):
+        return f"{today.month:02d}/{today.day:02d}/{str(today.year)[-2:]}"
     if "datesignedon" in compact and "month" in normalized:
         return f"{today.month:02d}"
     if "datesignedon" in compact and "day" in normalized:
@@ -6004,7 +6939,10 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
               node.getAttribute("data-qa") || "", node.getAttribute("data-test") || "",
               node.getAttribute("data-field-label") || "", node.getAttribute("data-question") || "",
             ].join(" ").toLowerCase();
-            return /(^|\\s)(label|legend)(\\s|$)|question|prompt|field.?title|form.?title|heading/.test(marker) ||
+            return node.hasAttribute("data-field-label") ||
+              node.hasAttribute("data-question-label") ||
+              node.hasAttribute("data-label") ||
+              /(^|\\s)(label|legend)(\\s|$)|question|prompt|field.?title|form.?title|heading/.test(marker) ||
               /^H[1-6]$/.test(node.tagName || "") || node.getAttribute("role") === "heading";
           };
           const genericPromptLabel = (control) => {
@@ -6087,13 +7025,70 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
                 node.id || "",
                 typeof node.className === "string" ? node.className : "",
                 node.getAttribute ? (node.getAttribute("data-automation-id") || "") : "",
+                node.getAttribute ? (node.getAttribute("data-field-path") || "") : "",
               ].join(" ").toLowerCase();
               if (marker.includes("education")) return "education";
               if (marker.includes("employment") || marker.includes("work-history") || marker.includes("work_history") || marker.includes("work-experience") || marker.includes("workexperience") || marker.includes("employment-history") || marker.includes("employmenthistory")) return "work";
             }
             return "";
           };
-          const metadataFor = (control) => ({
+          const ashbyEduInfo = (control) => {
+            const block = control.closest('[data-field-path^="_systemfield_education"], [data-field-path*="education" i]');
+            if (!block) return {};
+            const path = block.getAttribute("data-field-path") || "";
+            const deleteButtons = Array.from(block.querySelectorAll("button"))
+              .filter((btn) => /^delete$/i.test(String((btn.textContent || btn.value || "")).trim()));
+            let entryIndex = 0;
+            if (deleteButtons.length) {
+              let lastBefore = -1;
+              deleteButtons.forEach((btn, index) => {
+                if (btn.compareDocumentPosition && control.compareDocumentPosition && (btn.compareDocumentPosition(control) & 2)) {
+                  lastBefore = index;
+                }
+              });
+              if (lastBefore >= 0) entryIndex = lastBefore;
+            }
+            const firstOption = control.tagName === "SELECT" && control.options && control.options.length
+              ? String(control.options[0].textContent || "").trim()
+              : "";
+            const placeholder = String(control.getAttribute("placeholder") || firstOption || "").trim();
+            const idName = String((control.id || "") + " " + (control.name || "") + " " + placeholder).toLowerCase();
+            const role = String(control.getAttribute("role") || "").toLowerCase();
+            let subfield = "";
+            if (idName.includes("search schools") || role === "combobox" || idName.includes("school")) subfield = "school";
+            else if (idName.includes("degree")) subfield = "degree";
+            else if (idName.includes("major") || idName.includes("field of study")) subfield = "field";
+            else if (idName.includes("start") && idName.includes("month")) subfield = "start_month";
+            else if (idName.includes("start") && idName.includes("year")) subfield = "start_year";
+            else if (idName.includes("end") && idName.includes("month")) subfield = "end_month";
+            else if (idName.includes("end") && idName.includes("year")) subfield = "end_year";
+            else if (idName.includes("still student")) subfield = "still_student";
+            if (!subfield && (placeholder.toLowerCase().startsWith("month") || placeholder.toLowerCase().startsWith("year"))) {
+              const entry = control.closest("[data-field-path], .ashby-application-form-field-entry");
+              const isMonth = placeholder.toLowerCase().startsWith("month");
+              const startLabel = Array.from(entry ? entry.querySelectorAll("*") : []).find((node) => /start date/i.test(String(node.textContent || "")) && node.children.length === 0);
+              const endLabel = Array.from(entry ? entry.querySelectorAll("*") : []).find((node) => /end date/i.test(String(node.textContent || "")) && node.children.length === 0);
+              const labelBefore = (label) => Boolean(label && control.compareDocumentPosition && (control.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_PRECEDING));
+              const labelAfter = (label) => Boolean(label && control.compareDocumentPosition && (control.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING));
+              if (labelBefore(startLabel) && labelAfter(endLabel)) {
+                if (isMonth) subfield = "start_month"; else subfield = "start_year";
+              } else if (labelBefore(startLabel) && labelBefore(endLabel)) {
+                if (isMonth) subfield = "end_month"; else subfield = "end_year";
+              }
+            }
+            return { dataFieldPath: path, ashbyEduEntryIndex: entryIndex, ashbyEduSubfield: subfield };
+          };
+          const ashbyEduSubfieldLabel = (subfield) => ({
+            school: "School",
+            degree: "Degree",
+            field: "Field of Study",
+            start_month: "Start Date Month",
+            start_year: "Start Date Year",
+            end_month: "End Date Month",
+            end_year: "End Date Year",
+            still_student: "Still Student?",
+          }[subfield] || "");
+        const metadataFor = (control) => ({
             ariaLabel: control.getAttribute("aria-label") || "",
             ariaDescription: textForIds(control.getAttribute("aria-describedby")),
             placeholder: control.getAttribute("placeholder") || "",
@@ -6102,7 +7097,8 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
             ariaControls: control.getAttribute("aria-controls") || "",
             ariaOwns: control.getAttribute("aria-owns") || "",
             contentEditable: Boolean(control.isContentEditable),
-          });
+            disabled: Boolean(control.disabled || control.getAttribute("aria-disabled") === "true"),
+        });
           const ashbyRequired = (control) => {
             const entry = control && control.closest && control.closest(
               '.ashby-application-form-field-entry,[data-field-entry-id],[data-field-path]'
@@ -6139,6 +7135,23 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
               return;
             }
             if (type === "checkbox") {
+              const ashbyEduBlock = control.closest('[data-field-path^="_systemfield_education"], [data-field-path*="education" i]');
+              if (ashbyEduBlock) {
+                const ashbyEdu = ashbyEduInfo(control);
+                out.push({
+                  kind: "single", tag: "input", type: "checkbox",
+                  label: optionLabelFor(control) || "Still Student?",
+                  id: control.id || "", name: control.name || "",
+                  role: control.getAttribute("role") || "", section: "education",
+                  autofillId, ...metadataFor(control),
+                  required: Boolean(control.required || control.getAttribute("aria-required") === "true"),
+                  options: [], value: control.checked ? control.value : "",
+                  dataFieldPath: ashbyEdu.dataFieldPath,
+                  ashbyEduEntryIndex: ashbyEdu.ashbyEduEntryIndex,
+                  ashbyEduSubfield: ashbyEdu.ashbyEduSubfield || "still_student",
+                });
+                return;
+              }
               const breezyLabel = breezyQuestionLabel(control);
               const breezyQuestion = control.closest("li.question");
               const breezyBoxes = breezyQuestion
@@ -6243,12 +7256,45 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
                 ) checkboxesByName[control.name].required = true;
                 return;
               }
+              // A single option-style checkbox often exposes only an inline
+              // label such as "Yes". Preserve the surrounding question as
+              // section context so planning can resolve the answer polarity
+              // from the authoritative profile instead of treating the field
+              // as an unexplained consent checkbox.
+              const singleCheckboxQuestion = cleanQuestionText(
+                genericGroupLabel || questionnaireLabel(control)
+              );
+              if (
+                genericOptionLabel &&
+                singleCheckboxQuestion &&
+                cleanQuestionText(genericOptionLabel) !== singleCheckboxQuestion
+              ) {
+                out.push({
+                  kind: "single", tag: "input", type: "checkbox",
+                  label: genericOptionLabel, section: singleCheckboxQuestion,
+                  id: control.id || "", name: control.name || "",
+                  role: control.getAttribute("role") || "", autofillId,
+                  required: Boolean(
+                    control.required ||
+                    control.getAttribute("aria-required") === "true" ||
+                    /\\*/.test(singleCheckboxQuestion)
+                  ),
+                  options: [], value: control.checked ? (control.value || genericOptionLabel) : "",
+                });
+                return;
+              }
             }
             const tag = control.tagName.toLowerCase();
             const options = tag === "select"
               ? Array.from(control.options).map((option) => option.textContent.trim()).filter(Boolean)
               : [];
-            const label = labelFor(control) || workdayFieldLabel(control);
+            const ashbyEdu = ashbyEduInfo(control);
+            let label = labelFor(control) || workdayFieldLabel(control);
+            const ashbySubfieldLabel = ashbyEdu.dataFieldPath ? ashbyEduSubfieldLabel(ashbyEdu.ashbyEduSubfield) : "";
+            const normLocal = (text) => String(text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+            if (ashbySubfieldLabel && !normLocal(label).includes(normLocal(ashbySubfieldLabel))) {
+              label = [label, ashbySubfieldLabel].filter(Boolean).join(" ");
+            }
             if (!label && !control.id && !control.name) return;
             out.push({
               kind: "single", tag, type: (control.getAttribute("type") || tag).toLowerCase(),
@@ -6256,6 +7302,11 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
               section: sectionFor(control), autofillId, ...metadataFor(control),
               required: Boolean(control.required || control.getAttribute("aria-required") === "true" || /\\*/.test(label)),
               options, value: control.value || workdaySelectedText(control),
+              ...(ashbyEdu.dataFieldPath ? {
+                dataFieldPath: ashbyEdu.dataFieldPath,
+                ashbyEduEntryIndex: ashbyEdu.ashbyEduEntryIndex,
+                ashbyEduSubfield: ashbyEdu.ashbyEduSubfield,
+              } : {}),
             });
           });
           // Many company sites use a button or div with ARIA combobox semantics
@@ -6363,11 +7414,13 @@ def _scrape_fields(page) -> list[dict[str, Any]]:
             const labelNode = entry.querySelector("label,.ashby-application-form-question-title");
             const label = labelNode && labelNode.textContent ? labelNode.textContent.trim() : "";
             if (!label) return;
+            const entryPath = String(entry.getAttribute("data-field-path") || "");
+            const structuralRepeatableSection = /_systemfield_(education|work|experience)/i.test(entryPath);
             const buttons = Array.from(entry.querySelectorAll("button"))
               .filter(hitVisible)
               .map((button) => ({ node: button, text: (button.textContent || button.value || "").trim() }))
-              .filter((button) => button.text && !/upload|submit application|apply/i.test(button.text));
-            if (buttons.length < 2) return;
+              .filter((button) => button.text && !/upload|submit application|apply|^(add|delete|remove)(\s|$)|add education|delete/i.test(button.text));
+            if (structuralRepeatableSection || buttons.length < 2) return;
             const options = [];
             buttons.forEach((button) => {
               const autofillId = String(autofillIndex++);
@@ -6621,8 +7674,14 @@ def _audit_required_fields(page) -> list[dict[str, str]]:
                 // editable combobox input empty after a choice is committed.
                 // Read the rendered selected chip/value instead of mistaking
                 // that implementation detail for a missing required answer.
-                const root = control.closest('[class*="select__control"], [class*="select__value-container"]');
+                const root = control.closest('[class*="select__control"], [class*="select__value-container"], [class*="select-shell"]');
                 if (root) {
+                  if (/select-shell/.test(String(root.className || ""))) {
+                    const shellText = String(root.innerText || root.textContent || "").replace(/\\s+/g, " ").trim();
+                    const shellMatch = shellText.match(/option\\s+(.+?)(?:\\s*,?\\s+selected\\.?)?$/i);
+                    if (shellMatch && shellMatch[1]) return shellMatch[1].trim();
+                    if (shellText && !isPlaceholder(shellText)) return shellText;
+                  }
                   const selected = Array.from(root.querySelectorAll(
                     '[class*="select__single-value"], [class*="select__multi-value__label"], [data-automation-id="selectedItem"], [aria-selected="true"]'
                   )).map((node) => String(node.textContent || "").trim()).filter(Boolean);
@@ -6659,6 +7718,7 @@ def _audit_required_fields(page) -> list[dict[str, str]]:
               const choiceSelected = (candidate) => Boolean(
                 candidate.checked ||
                 candidate.getAttribute("aria-checked") === "true" ||
+                candidate.getAttribute("aria-selected") === "true" ||
                 candidate.getAttribute("aria-pressed") === "true" ||
                 ["checked", "on", "selected"].includes(candidate.getAttribute("data-state"))
               );
@@ -6695,8 +7755,8 @@ def _audit_required_fields(page) -> list[dict[str, str]]:
                       : (candidate.name || candidate.getAttribute("aria-labelledby") || candidate.id) === group;
                     return candidate !== control && sameGroup &&
                       ((candidate.getAttribute("type") || "").toLowerCase() === "radio" || candidateRole === "radio") &&
-                      (candidate.checked || candidate.getAttribute("aria-checked") === "true");
-                  }) && !(control.checked || control.getAttribute("aria-checked") === "true");
+                      choiceSelected(candidate);
+                  }) && !choiceSelected(control);
                 } else if (type === "checkbox" || role === "checkbox" || role === "switch") {
                   const checkboxPeers = control.name
                     ? controls.filter((candidate) => {
@@ -6720,22 +7780,29 @@ def _audit_required_fields(page) -> list[dict[str, str]]:
                 } else if (control.tagName.toLowerCase() === "select") {
                   const selected = control.options && control.selectedIndex >= 0 ? control.options[control.selectedIndex] : null;
                   empty = !String(control.value || "").trim() || Boolean(selected && (selected.disabled || isPlaceholder(selected.textContent)));
+                  const shellSelected = selectedPresentation(control);
+                  if (shellSelected) {
+                    committedSelection = shellSelected;
+                    empty = false;
+                    invalid = false;
+                  }
                 } else {
                   const committed = selectedPresentation(control);
                   committedSelection = committed;
                   if (role === "combobox" || control.getAttribute("aria-haspopup") || committed) {
-                    empty = !committed && isPlaceholder(
+                    const presentedValue = committed ||
                       control.value ||
                       control.getAttribute("aria-valuetext") ||
                       control.getAttribute("data-value") ||
-                      control.textContent
-                    );
+                      control.getAttribute("data-selected-value") ||
+                      control.textContent;
+                    empty = !presentedValue || isPlaceholder(presentedValue);
                     // Some React Select wrappers retain aria-invalid until the
                     // next form-level validation even after an onChange has
                     // committed a visible selection. Submission remains the
                     // final validation authority, so do not gate it on stale
                     // wrapper state when the selected value is present.
-                    if (committed) invalid = false;
+                    if (!empty) invalid = false;
                   } else if (control.isContentEditable || role === "textbox" || role === "searchbox") {
                     empty = !String(control.getAttribute("aria-valuetext") || control.textContent || "").trim();
                   } else {
@@ -6777,6 +7844,49 @@ def _form_field_signature(fields: list[dict[str, Any]]) -> tuple[str, ...]:
             for field in fields
         )
     )
+
+
+def _normalized_page_url(raw: str) -> str:
+    """Normalize a URL so transient fragments/analytics params do not hide a repeat."""
+    try:
+        parsed = urlparse(str(raw or ""))
+        volatile = {
+            "gh_src",
+            "gh_jid",
+            "source",
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "utm_content",
+            "utm_term",
+        }
+        query = "&".join(
+            sorted(
+                f"{key}={value}"
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if key not in volatile
+            )
+        )
+        return urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.params, query, "")
+        )
+    except Exception:
+        return str(raw or "")
+
+
+def _normalized_field_signature(fields: list[dict[str, Any]]) -> tuple[str, ...]:
+    """Return a re-render-stable signature based on labels rather than ids."""
+    normalized: list[str] = []
+    for field in fields:
+        kind = str(field.get("kind") or "")
+        if kind in {"hidden", "button", "submit"}:
+            continue
+        label = " ".join(str(field.get("label") or "").lower().split())
+        required = "1" if bool(field.get("required")) else "0"
+        normalized.append(
+            f"{kind}|{str(field.get('tag') or '')}|{required}|{label}"
+        )
+    return tuple(sorted(normalized))
 
 
 def _repair_invalid_text_field_by_label(page, label: str, profile: dict[str, Any]) -> bool:
@@ -7199,6 +8309,11 @@ def _normalize_number_input_value(value: Any, field: dict[str, Any], *, input_ty
         match = re.search(r"\b(\d+(?:\.\d+)?)\b", raw)
         if match:
             return match.group(1)
+    if not re.search(r"\d", raw):
+        # A native number input cannot represent a non-numeric answer such as
+        # "I do not have a PPA." Returning an empty value makes the fill
+        # fail with the real missing-value error instead of writing NaN.
+        return ""
     return raw
 
 
@@ -7330,7 +8445,7 @@ def _option_matches(option: Any, answer: Any) -> bool:
             continue
         # "No" answer to employment history questions should match
         # "I have never worked at X" / "I have never worked for X" options.
-        if want == "no" and (
+        if _is_negative_answer(answer) and (
             "never worked" in option_text
             or "have not worked" in option_text
             or "have not been employed" in option_text
@@ -7339,6 +8454,28 @@ def _option_matches(option: Any, answer: Any) -> bool:
             or "not previously been employed" in option_text
             or "not been employed" in option_text
             or "do not currently work" in option_text
+            or "never been a contractor or an employee" in option_text
+            or "never been a contractor" in option_text
+            or "never been an employee" in option_text
+        ):
+            return True
+        if _is_negative_answer(answer) and (
+            "never held" in option_text and "clearance" in option_text
+        ):
+            return True
+        if _is_negative_answer(answer) and (
+            "not currently" in option_text and "u s person" in option_text
+        ):
+            return True
+        if _norm(answer) in {"n/a", "na", "n a", "not applicable"} and (
+            "not currently" in option_text and "u s person" in option_text
+        ):
+            return True
+        range_want = re.sub(r"\s+(?:to|through)\s+", " ", want)
+        range_option = re.sub(r"\s+(?:to|through)\s+", " ", option_text)
+        if (
+            (re.search(r"\d+\s+(?:to|through)\s+\d+", want) or re.search(r"\d+\s+(?:to|through)\s+\d+", option_text))
+            and range_want == range_option
         ):
             return True
         if option_text == want:
@@ -7365,6 +8502,336 @@ def _option_matches(option: Any, answer: Any) -> bool:
                 continue
             return True
     return False
+
+
+def _best_option_match(options: list[Any], answer: Any) -> str | None:
+    """Return the available option text that is the closest semantic match.
+
+    This is a fallback for ``_option_matches``: when no option is an exact,
+    substring, or token-subset match, score all visible options and pick the
+    best one.  It is intentionally conservative:
+
+    * Generic placeholders ("Other", "Select", "None", etc.) are never chosen.
+    * Negation polarity must agree between the saved answer and the option.
+    * Binary Yes/No answers are mapped to plain Yes/No options only when the
+      answer unambiguously starts with yes/no.
+    * A score threshold prevents low-confidence guesses.
+    """
+    raw_answer = str(answer or "").strip()
+    if not raw_answer:
+        return None
+    answer_norm = _norm(raw_answer)
+    answer_tokens = set(answer_norm.split())
+    if not answer_tokens:
+        return None
+    if answer_norm in {"n/a", "na", "n a", "not applicable", "does not apply"}:
+        for opt in options:
+            opt_norm = _norm(_option_text(opt))
+            if (
+                "did not take" in opt_norm
+                or "do not recall" in opt_norm
+                or "did not sit" in opt_norm
+            ):
+                return _option_text(opt)
+    if _is_negative_answer(raw_answer):
+        for opt in options:
+            opt_norm = _norm(_option_text(opt))
+            if (
+                "have not worked" in opt_norm
+                or "never worked" in opt_norm
+                or "have never worked" in opt_norm
+                or "have not been employed" in opt_norm
+            ):
+                return _option_text(opt)
+
+    generic_options = {
+        "other", "no answer", "select", "select one", "choose", "please select",
+        "none", "prefer not to say", "decline to self identify", "decline",
+        "prefer not", "i prefer not to say",
+    }
+    binary_options = {"yes", "no", "true", "false"}
+
+    # Approved source answers and other saved synonyms can have canonical
+    # ATS labels that are not lexically related (LinkedIn -> Social Media).
+    for alias in _answer_aliases(raw_answer):
+        alias_norm = _norm(alias)
+        if not alias_norm or alias_norm in generic_options:
+            continue
+        if alias_norm in {"yes", "no", "true", "false"}:
+            polarity = _binary_answer_polarity(raw_answer)
+            alias_polarity = alias_norm in {"yes", "true"}
+            if polarity is None or polarity != alias_polarity:
+                continue
+        for opt in options:
+            if _norm(_option_text(opt)) == alias_norm:
+                return _option_text(opt)
+
+    answer_neg = _contains_negation(raw_answer)
+    answer_lower = raw_answer.lower()
+
+    def _starts_word(prefix: str) -> bool:
+        return bool(re.match(rf"{re.escape(prefix)}(?:[ .,;!?]|$)", answer_lower))
+
+    answer_starts_yes = (
+        _starts_word("yes")
+        or answer_lower.startswith((
+            "i agree", "i acknowledge", "acknowledge", "agree", "true",
+            "confirmed", "confirm",
+        ))
+        or any(
+            answer_lower.startswith(prefix)
+            for prefix in (
+                "i have ", "i've ", "i am ", "i can ", "i do ",
+                "i use ", "i built ", "i deployed ", "i operated ",
+                "i worked with ", "i have experience ", "experience with ",
+                "i require ", "i require/", "i will require ", "i need ",
+            )
+        )
+    )
+    answer_starts_no = (
+        _starts_word("no")
+        or answer_lower.startswith((
+            "false", "i do not", "i don't", "i have not", "i haven't",
+            "i am not", "i cannot", "i can't", "no experience", "never",
+            "disagree",
+        ))
+    )
+
+    best_text: str | None = None
+    best_score = 0
+    best_tied = False
+    threshold = 65
+
+    for opt in options:
+        opt_text = _option_text(opt).strip()
+        opt_norm = _norm(opt_text)
+        if not opt_norm or opt_norm in generic_options:
+            continue
+        opt_tokens = set(opt_norm.split())
+        if not opt_tokens:
+            continue
+
+        opt_neg = _contains_negation(opt_text)
+        if answer_neg != opt_neg:
+            continue
+
+        score = 0
+        if opt_norm == answer_norm:
+            score = 100
+        else:
+            shorter, longer = (
+                (opt_norm, answer_norm)
+                if len(opt_norm) <= len(answer_norm)
+                else (answer_norm, opt_norm)
+            )
+            if (
+                len(shorter) >= 3
+                and len(longer) >= 3
+                and shorter in longer
+                and (len(shorter) >= 4 or shorter not in binary_options)
+                and (not shorter.startswith("no") or re.search(rf"\b{re.escape(shorter)}\b", longer))
+            ):
+                score = max(score, 80)
+
+        common = answer_tokens & opt_tokens
+        recall = len(common) / len(answer_tokens) if answer_tokens else 0
+        precision = len(common) / len(opt_tokens) if opt_tokens else 0
+        f1 = (
+            0
+            if (precision + recall) == 0
+            else 2 * precision * recall / (precision + recall)
+        )
+        score = max(score, int(f1 * 100), int(recall * 70))
+        numeric_range_score = _numeric_range_score(raw_answer, opt_text)
+        score = max(score, numeric_range_score)
+
+        expanded_answer = _expanded_location_text(raw_answer)
+        expanded_opt = _expanded_location_text(opt_text)
+        if (
+            expanded_answer
+            and expanded_opt
+            and expanded_answer != expanded_opt
+        ):
+            answer_tokens_expanded = set(expanded_answer.split())
+            opt_tokens_expanded = set(expanded_opt.split())
+            country_shared = answer_tokens_expanded & opt_tokens_expanded
+            if country_shared:
+                score = max(score, 40 + min(30, len(country_shared) * 10))
+        for country_phrase in (
+            "united states",
+            "canada",
+            "united kingdom",
+            "australia",
+            "india",
+        ):
+            if (
+                f" {country_phrase} " in f" {expanded_answer} "
+                and f" {country_phrase} " in f" {expanded_opt} "
+            ):
+                score = max(score, 75)
+        # A profile location may contain only a US city/state (for example,
+        # ``Hoboken, NJ``) while a regional ATS option is ``United
+        # States/Canada``.  The state expansion above is authoritative
+        # geography evidence; do not require the LLM to restate the country.
+        if (
+            "united states" in expanded_opt
+            and any(
+                f" {state_name} " in f" {expanded_answer} "
+                for state_name in _US_STATE_NAMES.values()
+            )
+        ):
+            score = max(score, 75)
+
+        opt_lower = opt_text.lower()
+        is_plain_yes = opt_lower in {"yes", "true"}
+        is_plain_no = opt_lower in {"no", "false"}
+        if is_plain_yes and answer_starts_yes and not answer_neg:
+            score = max(score, 90)
+        if is_plain_no and answer_starts_no and answer_neg:
+            score = max(score, 90)
+
+        if _usage_negation_match(raw_answer, opt_text):
+            score = max(score, 75)
+
+        if score > best_score and score >= threshold:
+            best_score = score
+            best_text = opt_text
+            best_tied = False
+        elif (
+            score == best_score
+            and score >= threshold
+            and opt_text != best_text
+            and numeric_range_score == 0
+        ):
+            best_tied = True
+
+    # If the answer contains semicolon-separated candidate values (e.g.
+    # "Jersey City, NJ, USA; United States"), try each candidate in order and
+    # return the first one that matches an available option.
+    if (best_text is None or best_tied) and isinstance(raw_answer, str) and ";" in raw_answer:
+        for candidate in [c.strip() for c in raw_answer.split(";") if c.strip()]:
+            candidate_match = _best_option_match(options, candidate)
+            if candidate_match is not None:
+                return candidate_match
+
+    return None if best_tied else best_text
+
+
+def _binary_answer_polarity(answer: Any) -> bool | None:
+    """Return an explicit Yes/No polarity without inferring a missing fact."""
+    raw = str(answer or "").strip().lower()
+    if not raw:
+        return None
+    normalized = _norm(raw)
+    if normalized in {"yes", "true", "1"}:
+        return True
+    if normalized in {"no", "false", "0"}:
+        return False
+    if re.match(r"^(?:no|false)(?:[\s,.;:!?-]|$)", raw):
+        return False
+    if raw.startswith((
+        "i do not ", "i don't ", "i have not ", "i haven't ",
+        "i am not ", "i'm not ", "i cannot ", "i can't ",
+        "never ", "no experience", "disagree",
+    )):
+        return False
+    if re.match(r"^(?:yes|true)(?:[\s,.;:!?-]|$)", raw):
+        return True
+    if raw.startswith((
+        "i agree", "i acknowledge", "acknowledge", "agree", "confirm",
+        "i have ", "i've ", "i am ", "i'm ", "i can ", "i do ",
+        "i require ", "i require/", "i will require ", "i need ",
+    )) and not _contains_negation(raw):
+        return True
+    return None
+
+
+def _numeric_range_bounds(text: str) -> tuple[float, float] | None:
+    raw = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    if not raw:
+        return None
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:-|–|—| to | thru | through )\s*(\d+(?:\.\d+)?)",
+        raw,
+    )
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        return (lo, hi) if lo <= hi else (hi, lo)
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*(?:\+| or more| plus| and above| and over)",
+        raw,
+    )
+    if m:
+        return float(m.group(1)), float("inf")
+    m = re.search(
+        r"(?:less than|under|up to|at most|no more than)\s*(\d+(?:\.\d+)?)",
+        raw,
+    )
+    if m:
+        return 0.0, float(m.group(1))
+    m = re.search(
+        r"(?:more than|over|greater than|above|at least)\s*(\d+(?:\.\d+)?)",
+        raw,
+    )
+    if m:
+        return float(m.group(1)), float("inf")
+    nums = re.findall(r"(?<!\d)(\d+(?:\.\d+)?)(?!\d)", raw)
+    if len(nums) == 1:
+        value = float(nums[0])
+        return value, value
+    return None
+
+
+def _numeric_range_score(answer: str, option: str) -> int:
+    combined = f"{answer} {option}".lower()
+    if not any(
+        marker in combined
+        for marker in ("year", "month", "experience", "salary", "$")
+    ):
+        return 0
+    answer_bounds = _numeric_range_bounds(answer)
+    option_bounds = _numeric_range_bounds(option)
+    if answer_bounds is None or option_bounds is None:
+        return 0
+    a_lo, a_hi = answer_bounds
+    o_lo, o_hi = option_bounds
+    overlap = min(a_hi, o_hi) - max(a_lo, o_lo)
+    if overlap >= -0.01:
+        return 90
+    distance = max(a_lo - o_hi, o_lo - a_hi)
+    return max(0, int(70 - distance * 10))
+
+
+def _contains_negation(text: str) -> bool:
+    """Return True when ``text`` contains an explicit negation word."""
+    if not text:
+        return False
+    tokens = set(_norm(text).split())
+    negation_tokens = {
+        "not", "no", "never", "none", "nothing", "nobody", "neither", "nor",
+        "dont", "doesnt", "didnt", "wont", "wouldnt", "cant", "cannot",
+        "couldnt", "shouldnt", "havent", "hasnt", "hadnt", "isnt", "arent",
+        "wasnt", "werent", "hasn", "haven", "hadn", "don", "doesn", "didn",
+        "wouldn", "couldn", "shouldn", "isn", "aren", "wasn", "weren",
+    }
+    return bool(tokens & negation_tokens)
+
+
+def _usage_negation_match(answer: str, opt: str) -> bool:
+    """Boost score when both answer and option express non-usage/experience."""
+    a = answer.lower()
+    o = opt.lower()
+    no_usage_phrases = (
+        "not used", "never used", "haven't used", "havent used", "no experience",
+        "do not have experience", "have not used", "did not use", "don't use",
+    )
+    answer_no_usage = any(p in a for p in no_usage_phrases)
+    if not answer_no_usage:
+        return False
+    option_no_usage = any(p in o for p in no_usage_phrases + (
+        "i haven't", "i have not", "new to", "excited to learn",
+    ))
+    return option_no_usage
 
 
 def _locator_is_ashby_yes_no_option(locator) -> bool:
@@ -7551,6 +9018,57 @@ def _looks_like_location_checkbox_option(label: str) -> bool:
     return any(state in normalized for state in _US_STATE_NAMES.values())
 
 
+def _location_checkbox_group_plan(field: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any] | None:
+    """Select candidate-approved office/relocation locations in checkbox groups."""
+    options = field.get("options") or []
+    if not options:
+        return None
+    context = _norm(
+        " ".join(
+            str(field.get(key) or "")
+            for key in ("label", "section", "ariaLabel", "ariaDescription", "name", "id")
+        )
+    )
+    option_texts = [_norm(_option_text(option)) for option in options]
+    if not (
+        any(
+            marker in context
+            for marker in ("location", "locations", "office", "relocate", "relocation", "placed")
+        )
+        and any(
+            _looks_like_location_checkbox_option(text) or text == "international"
+            for text in option_texts
+        )
+    ):
+        return None
+    desired = _desired_location_values(profile)
+    answers = profile.get("answers") or {}
+    for key in (
+        "Select all locations you would be open to being placed",
+        "Which locations are you open to working from?",
+        "Please indicate all of the locations that you would be interested in relocating to for this position.",
+    ):
+        raw = answers.get(key)
+        if isinstance(raw, str) and raw.strip():
+            desired.extend(
+                segment.split(",")[0].strip()
+                for segment in re.split(r"[;]", str(raw))
+                if segment.split(",")[0].strip()
+            )
+    desired = list(dict.fromkeys(part for part in desired if part))
+    if not desired:
+        return None
+    matched = [
+        option
+        for option in options
+        if _norm(_option_text(option)) != "international"
+        and any(_locations_compatible(_option_text(option), part) for part in desired)
+    ]
+    if not matched:
+        return None
+    return {"action": "checkmany", "options": matched}
+
+
 def _office_location_checkbox_plan(field: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any] | None:
     label = str(field.get("label") or "")
     combined = _norm(
@@ -7673,7 +9191,10 @@ def _office_location_combobox_fallback_choice(
     if not available:
         return None
     label = _norm(field.get("label") or "")
-    if "office location" not in label:
+    if not any(
+        phrase in label
+        for phrase in ("office location", "onsite location", "preferred location")
+    ):
         return None
     preferred_norm = _norm(answer)
     if not preferred_norm:
@@ -7685,6 +9206,24 @@ def _office_location_combobox_fallback_choice(
         return "New York"
     if "san francisco" in preferred_norm and any("san francisco" in _norm(item) for item in available):
         return "San Francisco"
+    return None
+
+
+def _department_combobox_fallback_choice(
+    field: dict[str, Any],
+    available: list[str],
+) -> str | None:
+    label = _norm(field.get("label") or "")
+    if "department" not in label:
+        return None
+    for item in available:
+        normalized = _norm(item)
+        if normalized == "engineering":
+            return item
+    for item in available:
+        normalized = _norm(item)
+        if "engineering" in normalized:
+            return item
     return None
 
 
@@ -7752,7 +9291,13 @@ def _select_intl_tel_input_country(page, locator, answer: str) -> str | None:
         return None
 
 
-def _select_greenhouse_react_combobox_option(page, locator, field: dict[str, Any], answer: str) -> str | None:
+def _select_greenhouse_react_combobox_option(
+    page,
+    locator,
+    field: dict[str, Any],
+    answer: str,
+    profile: dict[str, Any] | None = None,
+) -> str | None:
 
     if not answer:
         return None
@@ -7781,9 +9326,9 @@ def _select_greenhouse_react_combobox_option(page, locator, field: dict[str, Any
     if fallback and fallback not in option_names:
         option_names.append(fallback)
 
-    def committed_selection() -> str | None:
+    def committed_selection(expected: str = step) -> str | None:
         try:
-            selected = _verify_control_selection(page, field, step)
+            selected = _verify_control_selection(page, field, expected)
         except Exception:
             selected = None
         if selected:
@@ -7801,7 +9346,7 @@ def _select_greenhouse_react_combobox_option(page, locator, field: dict[str, Any
                     break
                 keyboard.press(key)
                 page.wait_for_timeout(250)
-                selected = _verify_control_selection(page, field, step)
+                selected = _verify_control_selection(page, field, expected)
                 if selected:
                     return selected
             except Exception:
@@ -7896,9 +9441,11 @@ def _select_greenhouse_react_combobox_option(page, locator, field: dict[str, Any
         )
         if visible_texts:
 
-            fallback_choice = next(
-                (text for text in visible_texts if _option_matches(text, step)),
-                None,
+            fallback_choice = _dynamic_combobox_fallback_choice(
+                field,
+                [str(text) for text in visible_texts],
+                step,
+                profile,
             )
 
             if fallback_choice:
@@ -7925,7 +9472,7 @@ def _select_greenhouse_react_combobox_option(page, locator, field: dict[str, Any
                 )
                 if clicked:
                     page.wait_for_timeout(500)
-                    selected = committed_selection()
+                    selected = committed_selection(fallback_choice)
                     if selected:
                         return selected
     except Exception:
@@ -8059,7 +9606,26 @@ def _is_negative_veteran_option(option_text: str) -> bool:
 
 
 def _is_negative_answer(answer: Any) -> bool:
-    return _norm(answer) in {"no", "false", "none", "n/a", "na", "do not consent", "i do not consent"}
+    normalized = _norm(answer)
+    if normalized in {
+        "no",
+        "false",
+        "none",
+        "n/a",
+        "na",
+        "do not consent",
+        "i do not consent",
+    }:
+        return True
+    return normalized.startswith("no ") and any(
+        marker in normalized
+        for marker in (
+            "never worked",
+            "have not worked",
+            "not been employed",
+            "not previously been employed",
+        )
+    )
 
 
 def _use_structured_auto_answer(label: str) -> bool:
@@ -8100,6 +9666,43 @@ def _use_structured_auto_answer(label: str) -> bool:
 
 def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
     normalized = _norm(label)
+    age_bucket = _age_bucket_answer(profile)
+    if age_bucket and any(
+        marker in normalized
+        for marker in ("current age", "your age", "age are you", "age bracket", "age group", "what is your age")
+    ):
+        return age_bucket
+    desired_locations = _desired_location_values(profile)
+    if desired_locations and (
+        ("will you be working from" in normalized and "where" in normalized)
+        or ("where in the united states" in normalized)
+        or ("where in the u s" in normalized)
+        or ("where in the us" in normalized)
+    ):
+        return desired_locations[0]
+    if _is_source_question(label):
+        source = _preferred_source_answer(label, profile, profile.get("answers") or {})
+        if source is not None:
+            return source
+    if any(
+        marker in normalized
+        for marker in (
+            "where do you currently live",
+            "where are you currently located",
+            "where do you live",
+            "where are you based",
+            "current city",
+            "current location",
+        )
+    ):
+        location = _norm(str(profile.get("location") or profile.get("city") or "").strip())
+        if location:
+            return str(profile.get("location") or profile.get("city")).strip()
+        country = _infer_country(profile)
+        if country:
+            return country
+    if _requires_explicit_candidate_fact(label):
+        return _explicit_candidate_fact_answer(label, profile)
     if _is_palantir_profile(profile):
         palantir_answer = _palantir_auto_answer(label, profile)
         if palantir_answer is not None:
@@ -8129,6 +9732,9 @@ def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
     listed_state_residency = _listed_state_residency_answer(label, profile)
     if listed_state_residency is not None:
         return listed_state_residency
+    based_in_metro = _based_in_metro_question_answer(label, profile)
+    if based_in_metro is not None:
+        return based_in_metro
     if "high school" in normalized:
         if "graduation" in normalized or "year" in normalized:
             return _high_school_value(profile, "end_year")
@@ -8151,6 +9757,14 @@ def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
         return "Consent" if _truthy_answer(consent) else None
     if "currently based in one of the following geographies" in normalized:
         return _auto_answer(label, profile, sensitive=False)
+    if (
+        ("currently based" in normalized or "currently living" in normalized)
+        and ("san francisco" in normalized or "bay area" in normalized)
+        and "ready to relocate" in normalized
+    ):
+        # A single Yes/No fact cannot choose between multiple relocation
+        # timelines exposed by the form. Leave it for explicit resolution.
+        return None
     if (
         ("based in san francisco" in normalized or "san francisco based" in normalized)
         and "open to relocating" in normalized
@@ -8197,13 +9811,10 @@ def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
         and "professional setting" in normalized
     ):
         return _auto_answer(label, profile, sensitive=False)
-    if "willing to work onsite" in normalized and "office" in normalized and ("5 days" in normalized or "five days" in normalized):
-        relocation = (
-            (profile.get("answers") or {}).get("Are you open to relocation?")
-            or _approved_sensitive_entry_answer(profile, "relocation")
-            or _match_sensitive("relocation", profile)
-        )
-        return "Yes" if _truthy_answer(relocation) else None
+    if _label_is_office_commitment(label):
+        office_answer = _approved_office_commitment_answer(profile)
+        if office_answer is not None:
+            return "Yes" if _truthy_answer(office_answer) else "No"
     if "bachelor" in normalized and "degree" in normalized and (
         "computer science" in normalized
         or "data science" in normalized
@@ -8266,6 +9877,26 @@ def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
         and ("3 days" in normalized or "three days" in normalized)
     ):
         return _auto_answer(label, profile, sensitive=False)
+    if (
+        ("travel" in normalized or "attend" in normalized)
+        and any(
+            marker in normalized
+            for marker in ("interview", "finalist", "in person", "office", "expenses covered")
+        )
+    ):
+        travel = (
+            match_screening_rule("willing to travel", profile.get("screening_answer_rules"))
+            or _find_answer("Are you willing to travel?", profile.get("answers") or {})
+        )
+        if travel is not None:
+            return "Yes" if _truthy_answer(travel) else "No"
+        onsite = (
+            match_screening_rule("onsite", profile.get("screening_answer_rules"))
+            or _approved_sensitive_entry_answer(profile, "office")
+            or _approved_sensitive_entry_answer(profile, "relocation")
+        )
+        if _truthy_answer(onsite):
+            return "Yes"
     developer_facing = _developer_facing_products_answer(label, profile)
     if developer_facing is not None:
         return developer_facing
@@ -8490,6 +10121,7 @@ def _answer_aliases(answer: Any) -> list[str]:
     raw = str(answer or "")
     aliases = [raw]
     aliases.extend(_graduation_date_aliases(raw))
+    aliases.extend(_source_answer_aliases(raw))
     if _norm(raw) in {
         "prefer not to say",
         "prefer not to answer",
@@ -8536,7 +10168,7 @@ def _answer_aliases(answer: Any) -> list[str]:
             ]
         )
     if _norm(raw) in {"master s degree", "masters degree", "master degree", "masters", "master"}:
-        aliases.extend(["Master's Degree", "Master Degree"])
+        aliases.extend(["Master's Degree", "Master Degree", "Masters"])
     if _norm(raw) in {"1 2", "1 2 years", "2", "2 years", "2 5", "2 5 years"}:
         aliases.extend(["2-5 years", "2 - 5 years"])
     if _norm(raw) in {"within a month", "in one month", "one month", "immediately", "as soon as possible", "asap"}:
@@ -8601,6 +10233,34 @@ def _answer_aliases(answer: Any) -> list[str]:
                 "No, I don't have a disability",
                 "No, I don't have a disability and have not had one in the past",
                 "No - I do not consent to receiving text messages",
+                "N/A - have never held U.S. security clearance",
+                "N/A - have never held US security clearance",
+                "Never held a clearance",
+                "Never held a security clearance",
+                "Never held U.S. security clearance",
+                "Never held US security clearance",
+                "None of the above",
+                "None",
+            ]
+        )
+    if _norm(raw) in {"not applicable", "n/a", "na", "none"}:
+        aliases.extend(
+            [
+                "None of the above",
+                "None",
+                "Not applicable",
+                "N/A",
+                "Did not take",
+            ]
+        )
+    raw_norm = _norm(raw)
+    if "never held" in raw_norm and "clearance" in raw_norm:
+        aliases.extend(
+            [
+                "None",
+                "None of the above",
+                "N/A",
+                "Not applicable",
             ]
         )
     if _norm(raw) in {
@@ -8637,6 +10297,18 @@ def _answer_aliases(answer: Any) -> list[str]:
         aliases.append("Yes")
     if _norm(raw).startswith("no") and len(_norm(raw)) > 2:
         aliases.append("No")
+    negation_markers = (" do not ", " have not ", " has not ", " does not ", " don t ", " haven t ", " cannot ")
+    decline_markers = (" do not wish to answer ", " don t wish to answer ", " prefer not to say ", " prefer not to answer ")
+    normalized = f" {_norm(raw)} "
+    if any(marker in normalized for marker in negation_markers) and not any(
+        marker in normalized for marker in decline_markers
+    ):
+        aliases.append("No")
+    if " yes " in normalized or (
+        " i do " in normalized
+        and not any(marker in normalized for marker in negation_markers)
+    ):
+        aliases.append("Yes")
     if "require will require" in _norm(raw) and "sponsorship" in _norm(raw):
         aliases.extend(
             [
@@ -8645,6 +10317,123 @@ def _answer_aliases(answer: Any) -> list[str]:
                 "I will require sponsorship",
             ]
         )
+    return aliases
+
+
+def _source_answer_aliases(answer: Any) -> list[str]:
+    """Return truthful source-channel synonyms for "how did you hear" fields."""
+    raw = str(answer or "").strip()
+    n = _norm(raw)
+    if not n:
+        return []
+    linkedin = n in {"linkedin", "linked in", "linkedin jobs", "linkedin url"}
+    job_board = any(
+        marker in n
+        for marker in (
+            "indeed",
+            "glassdoor",
+            "ziprecruiter",
+            "handshake",
+            "builtin",
+            "built in",
+            "dice",
+            "monster",
+            "angel",
+            "wellfound",
+            "job board",
+            "job boards",
+            "job site",
+            "third party",
+            "third-party",
+            "online job",
+        )
+    )
+    social = any(
+        marker in n
+        for marker in (
+            "facebook",
+            "twitter",
+            "instagram",
+            "youtube",
+            "tiktok",
+            "reddit",
+            "social media",
+            "social network",
+        )
+    )
+    google = n in {"google", "google jobs", "google search", "google search results"}
+    referral = any(
+        marker in n
+        for marker in (
+            "referral",
+            "referred",
+            "refer",
+            "employee referral",
+            "friend",
+            "family",
+            "current employee",
+        )
+    )
+    website = any(
+        marker in n
+        for marker in (
+            "website",
+            "web site",
+            "company site",
+            "company website",
+            "career site",
+            "careers site",
+            "careers page",
+            "career website",
+            "careers website",
+            "career page",
+        )
+    )
+    event = any(
+        marker in n
+        for marker in (
+            "event",
+            "career fair",
+            "hackathon",
+            "meetup",
+            "campus",
+            "job fair",
+            "hiring event",
+        )
+    )
+    recruiter = any(
+        marker in n
+        for marker in ("recruiter", "recruiting agency", "staffing", "headhunter", "agency")
+    )
+    press = any(
+        marker in n
+        for marker in ("press", "news", "article", "blog", "media")
+    )
+    email = any(
+        marker in n
+        for marker in ("email", "newsletter", "mailing list", "outreach")
+    )
+    aliases: list[str] = []
+    if linkedin:
+        aliases.extend(["Social Media", "LinkedIn Jobs", "Third Party Job Board", "Job Board"])
+    if job_board:
+        aliases.extend(["Third Party Job Board", "Job Board", "Online Job Board"])
+    if social:
+        aliases.extend(["Social Media", "Social Network"])
+    if google:
+        aliases.extend(["Google", "Search Engine", "Online Search", "Third Party Job Board"])
+    if referral:
+        aliases.extend(["Employee Referral", "Referral", "Current Employee", "Friend or Family"])
+    if website:
+        aliases.extend(["Company Website", "Company Career Site", "Company Careers", "Careers Site"])
+    if event:
+        aliases.extend(["Career Fair", "Event", "Campus Event", "Hiring Event"])
+    if recruiter:
+        aliases.extend(["Recruiting Agency", "Recruiter", "Staffing Agency", "Headhunter"])
+    if press:
+        aliases.extend(["Press", "News", "Online Article", "Article"])
+    if email:
+        aliases.extend(["Email", "Newsletter", "Email Outreach", "Email Notification"])
     return aliases
 
 
@@ -8660,6 +10449,15 @@ def _is_source_question(label: str) -> bool:
         "how did you hear" in normalized
         or "tell us how you heard" in normalized
         or "where did you hear" in normalized
+        or "job site" in normalized
+        or "job board" in normalized
+        or "see this posting" in normalized
+        or "saw this posting" in normalized
+        or "where did you see" in normalized
+        or "how did you find" in normalized
+        or "hear about this" in normalized
+        or "referral" in normalized
+        or "source" in normalized
         or bool(re.search(r"\bwhere\b.*\b(hear|heard)\b", normalized))
         or bool(re.search(r"\bhow\b.*\b(hear|heard)\b", normalized))
         or "where have you learned about" in normalized
@@ -8679,8 +10477,14 @@ def _is_company_website_answer(answer: Any) -> bool:
     }
 
 
-def _matching_options(field: dict[str, Any], answer: Any) -> list[Any]:
-    options = field.get("options") or []
+def _matching_options(
+    field: dict[str, Any],
+    answer: Any,
+    profile: Mapping[str, Any] | None = None,
+) -> list[Any]:
+    options = list(field.get("options") or [])
+    if profile is not None and _profile_requires_sponsorship(profile):
+        options = [option for option in options if not _option_denies_sponsorship(option)]
     aliases = [alias for alias in _answer_aliases(answer) if _norm(alias)]
     scored_matches: list[tuple[int, int, Any]] = []
     for index, option in enumerate(options):
@@ -8696,6 +10500,15 @@ def _matching_options(field: dict[str, Any], answer: Any) -> list[Any]:
             key=lambda item: (-item[0], item[1]),
         )
     ]
+    unique_matches: list[Any] = []
+    seen_texts: set[str] = set()
+    for option in matches:
+        option_text = _norm(_option_text(option))
+        if option_text and option_text in seen_texts:
+            continue
+        seen_texts.add(option_text)
+        unique_matches.append(option)
+    matches = unique_matches
     if not matches and _norm(answer) in {"yes", "no"} and len(options) == 2:
         negative_markers = (
             "no ",
@@ -8720,6 +10533,23 @@ def _matching_options(field: dict[str, Any], answer: Any) -> list[Any]:
         affirmative = [option for option in options if option not in negative]
         if len(negative) == 1 and len(affirmative) == 1:
             return affirmative if _norm(answer) == "yes" else negative
+    if not matches and _norm(answer) in {"n/a", "na", "n a", "not applicable", "does not apply"}:
+        did_not_take = [
+            option
+            for option in options
+            if "did not take" in _norm(_option_text(option))
+            or _norm(_option_text(option)) == "n a"
+        ]
+        if did_not_take:
+            return [did_not_take[0]]
+    if not matches:
+        best = _best_option_match(options, answer)
+        if best is not None:
+            for option in options:
+                option_value = option.get("value") if isinstance(option, dict) else None
+                if _option_text(option) == best or option_value == best:
+                    return [option]
+            return [{"label": best, "value": best}]
     if matches or not _is_source_question(str(field.get("label") or "")):
         return matches
     if not _is_company_website_answer(answer):
@@ -8727,6 +10557,879 @@ def _matching_options(field: dict[str, Any], answer: Any) -> list[Any]:
     # A company careers site is truthfully categorized as "Other" when a
     # source question does not expose a more specific company-site option.
     return [option for option in options if _norm(_option_text(option)) == "other"]
+
+
+
+_LOCAL_RESIDENCY_CLAIM_MARKERS = (
+    "live locally",
+    "currently live",
+    "currently based",
+    "currently in",
+    "currently located in",
+    "already live",
+    "already based",
+    "already in",
+    "currently reside",
+    "i am local",
+    "i m local",
+    "i live in",
+    "i m based in",
+    "i am based in",
+)
+
+
+def _option_claims_local_residency(option_text: str) -> bool:
+    normalized = _norm(option_text)
+    return any(marker in normalized for marker in _LOCAL_RESIDENCY_CLAIM_MARKERS)
+
+
+def _profile_location_matches_question(label: str, option_text: str, profile: Mapping[str, Any]) -> bool:
+    """Return whether the profile location plausibly matches a named metro."""
+    profile_location = _norm(str(profile.get("location") or profile.get("city") or ""))
+    text = f"{_norm(label)} {_norm(option_text)}"
+    metro_aliases = {
+        "san francisco": ["san francisco", "bay area"],
+        "mountain view": ["mountain view"],
+        "sunnyvale": ["sunnyvale"],
+        "palo alto": ["palo alto"],
+        "new york": ["new york", "nyc", "brooklyn", "manhattan", "queens"],
+        "seattle": ["seattle"],
+        "austin": ["austin"],
+        "los angeles": ["los angeles"],
+        "boston": ["boston"],
+        "chicago": ["chicago"],
+        "denver": ["denver"],
+    }
+    mentioned = [
+        alias
+        for aliases in metro_aliases.values()
+        for alias in aliases
+        if re.search(rf"\b{re.escape(alias)}\b", text)
+    ]
+    if not mentioned:
+        return True
+    profile_tokens = set(_norm(profile_location).split())
+    if any(alias in profile_location for alias in mentioned):
+        return True
+    if "bay area" in mentioned and any(
+        token in profile_location for token in ("san francisco", "sf", "oakland", "berkeley", "palo alto")
+    ):
+        return True
+    if "new york" in mentioned and any(
+        token in profile_location for token in ("new york", "nyc", "brooklyn", "queens", "manhattan")
+    ):
+        return True
+    if any(marker in text for marker in ("tri-state", "tri state", "tri state area")) and "jersey city" in profile_location:
+        return True
+    return False
+
+
+def _guard_local_residency_option(
+    field: dict[str, Any],
+    option: Any,
+    profile: dict[str, Any],
+    label: str,
+) -> Any | None:
+    """Never claim the candidate already lives locally when they do not.
+
+    A saved binary ``Yes`` can fuzzily match ``Yes, I live locally`` options.
+    When the question names a metro that is not the candidate's location, prefer
+    a relocation option; otherwise decline to select a false claim.
+    """
+    option_text = _option_text(option)
+    if not _option_claims_local_residency(option_text):
+        return option
+    if _profile_location_matches_question(label, option_text, profile):
+        return option
+    relocation_options: list[Any] = []
+    for candidate in field.get("options") or []:
+        candidate_text = _norm(_option_text(candidate))
+        if any(
+            marker in candidate_text
+            for marker in ("relocat", "willing to move", "open to moving", "can relocate")
+        ):
+            if any(
+                marker in candidate_text
+                for marker in ("not", "no ", "unable", "won t", "do not", "don t")
+            ):
+                continue
+            if any(
+                marker in candidate_text
+                for marker in ("does not want to relocate", "not willing to move", "can not relocate", "cannot relocate")
+            ):
+                continue
+            relocation_options.append(candidate)
+    if len(relocation_options) == 1:
+        return relocation_options[0]
+    if len(relocation_options) > 1 and not any(
+        marker in _norm(_option_text(candidate))
+        for candidate in relocation_options
+        for marker in ("within", "month", "months", "day", "days", "week", "weeks", "asap", "immediately")
+    ):
+        return relocation_options[0]
+    return None
+
+
+def _looks_like_source_option_group(field: dict[str, Any]) -> bool:
+    options = {_norm(_option_text(option)) for option in field.get("options") or []}
+    source_markers = {
+        "linkedin",
+        "friend",
+        "recruiter current employee",
+        "school job posting career fair",
+        "advertisement e g billboard",
+        "online article press",
+    }
+    return len(options & source_markers) >= 2
+
+
+_VISA_TYPE_PATTERN = re.compile(
+    r"(?:\bh\s*1\s*b\b|\bopt\b|\bcpt\b|\btn\b|\be\s*3\b|\bl\s*1\b|\bo\s*1\b|\bf\s*1\b"
+    r"|optional practical training|curricular practical training)"
+)
+_NON_OPT_VISA_TYPE_PATTERN = re.compile(
+    r"(?:\bh\s*1\s*b\b|\btn\b|\be\s*3\b|\bl\s*1\b|\bo\s*1\b)"
+)
+
+
+def _text_mentions_visa_type(text: Any) -> bool:
+    return bool(_VISA_TYPE_PATTERN.search(_norm(text)))
+
+
+def _text_mentions_non_opt_visa_type(text: Any) -> bool:
+    return bool(_NON_OPT_VISA_TYPE_PATTERN.search(_norm(text)))
+
+
+def _sponsorship_type_mapping_label(field: Mapping[str, Any]) -> str:
+    return _norm(
+        " ".join(
+            str(field.get(key) or "")
+            for key in (
+                "label",
+                "id",
+                "name",
+                "section",
+                "ariaLabel",
+                "ariaDescription",
+                "placeholder",
+                "autocomplete",
+            )
+        )
+    )
+
+
+def _field_may_be_sponsorship_type(field: Mapping[str, Any]) -> bool:
+    normalized = _sponsorship_type_mapping_label(field)
+    if any(
+        marker in normalized
+        for marker in (
+            "sponsor",
+            "visa",
+            "work authorization",
+            "authorization to work",
+            "authorized",
+            "immigration",
+            "right to work",
+            "work permit",
+            "if yes",
+            "select type",
+            "employment status",
+        )
+    ):
+        return True
+    return any(
+        _text_mentions_visa_type(_option_text(option))
+        for option in field.get("options") or []
+    )
+
+
+def _approved_sponsorship_type(profile: Mapping[str, Any]) -> str | None:
+    approved = _approved_sensitive_entry_answer(profile, "sponsorship_type")
+    if approved:
+        return approved
+    answers = profile.get("answers") or {}
+    matches: list[str] = []
+    for key, value in answers.items():
+        key_norm = _norm(key)
+        if not (
+            ("visa" in key_norm or "sponsor" in key_norm)
+            and any(marker in key_norm for marker in ("type", "status", "which"))
+        ):
+            continue
+        raw = str(value).strip()
+        if raw and _norm(raw) not in {"", "n/a", "na", "select", "none"}:
+            matches.append(raw)
+    if matches and len({_norm(value) for value in matches}) == 1:
+        return matches[0]
+    policy = profile.get("agent_policy") or {}
+    if isinstance(policy, dict):
+        questionnaire = policy.get("axon_legal_questionnaire") or {}
+        if isinstance(questionnaire, dict):
+            for key in ("f1_opt_cpt", "sponsorship_type"):
+                raw = questionnaire.get(key)
+                if raw:
+                    return str(raw)
+    legacy = profile.get("sponsorship_type")
+    if legacy:
+        return str(legacy)
+    return None
+
+
+def _option_matches_approved_sponsorship_type(
+    option_text: Any,
+    approved_type: Any,
+) -> bool:
+    option_norm = _norm(option_text)
+    approved_norm = _norm(approved_type)
+    if not option_norm or not approved_norm:
+        return False
+    if not _text_mentions_visa_type(approved_type):
+        return False
+    opt_like = bool(
+        "opt" in approved_norm
+        or "optional practical training" in approved_norm
+        or "f 1" in approved_norm
+        or "cpt" in approved_norm
+    )
+    if opt_like:
+        has_opt_family = bool(
+            re.search(r"\bopt\b", option_norm)
+            or "optional practical training" in option_norm
+            or "curricular practical training" in option_norm
+            or "f 1" in option_norm
+            or "cpt" in option_norm
+        )
+        return has_opt_family and not _text_mentions_non_opt_visa_type(option_norm)
+    if re.search(r"\bh\s*1\s*b\b", approved_norm):
+        return bool(re.search(r"\bh\s*1\s*b\b", option_norm))
+    return (
+        approved_norm in option_norm
+        or option_norm in approved_norm
+        or _option_matches(option_text, approved_type)
+    )
+
+
+def _sponsorship_type_field_plan(
+    field: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    required: bool,
+) -> dict[str, Any] | None:
+    options = field.get("options") or []
+    if not options or not any(
+        _text_mentions_visa_type(_option_text(option)) for option in options
+    ):
+        return None
+    approved_type = _approved_sponsorship_type(profile)
+    if approved_type:
+        for option in options:
+            if not _option_matches_approved_sponsorship_type(
+                _option_text(option),
+                approved_type,
+            ):
+                continue
+            kind = field.get("kind")
+            if kind in {"radiogroup", "buttongroup"}:
+                return {
+                    "action": "buttonclick" if kind == "buttongroup" else "check",
+                    "option": option,
+                    "sensitive": True,
+                }
+            if field.get("role") == "combobox":
+                return {"action": "combobox", "value": _option_text(option), "sensitive": True}
+            if field.get("tag") == "select":
+                return {"action": "select", "value": _option_text(option), "sensitive": True}
+            if field.get("tag") == "button":
+                return {"action": "customselect", "value": _option_text(option), "sensitive": True}
+            return {"action": "checkmany", "options": [option], "sensitive": True}
+    return {
+        "action": "skip",
+        "reason": "approved sponsorship type option not available",
+        "sensitive": True,
+        "blocking": bool(required),
+    }
+
+
+def _sponsorship_type_dynamic_choice(
+    field: Mapping[str, Any],
+    available: list[str],
+    profile: Mapping[str, Any],
+) -> str | None:
+    if not available or not _field_may_be_sponsorship_type(field):
+        return None
+    if not any(_text_mentions_visa_type(text) for text in available):
+        return None
+    approved_type = _approved_sponsorship_type(profile)
+    if not approved_type:
+        return None
+    for text in available:
+        if _option_matches_approved_sponsorship_type(text, approved_type):
+            return text
+    return None
+
+
+def _live_state_option_choice(
+    available: list[str],
+    profile: dict[str, Any],
+) -> str | None:
+    """Match the candidate's US state to a live state-code/name option list."""
+    code = _profile_us_state_code(profile)
+    if not code:
+        return None
+    name = _US_STATE_NAMES.get(code)
+    candidates = [code, code.upper(), name, name.title()] if name else [code, code.upper()]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        for option in available:
+            if _norm(option) == _norm(candidate):
+                return option
+    return None
+
+
+def _live_binary_option_choice(
+    field: Mapping[str, Any],
+    available: list[str],
+    profile: dict[str, Any],
+) -> str | None:
+    """Derive a grounded Yes/No option for binary screening dropdowns.
+
+    Only question families that have approved standing facts (commute/office,
+    relocation, travel, hybrid) are answered here.  The returned value is one
+    of the live page options, and no missing personal fact is invented.
+    """
+    normalized = _norm(field.get("label") or "")
+    if not normalized:
+        return None
+    binary_family: str | None = None
+    if (
+        any(marker in normalized for marker in ("commute", "commuting", "commutable"))
+        and any(marker in normalized for marker in ("able", "commit", "willing", "comfortable"))
+    ):
+        binary_family = "commute"
+    elif (
+        any(marker in normalized for marker in ("in office", "in-office", "onsite", "on site", "hybrid", "office days"))
+        and any(marker in normalized for marker in ("able", "commit", "willing", "comfortable", "open to"))
+    ):
+        binary_family = "office"
+    elif _label_is_office_commitment(field.get("label") or ""):
+        binary_family = "office"
+    elif any(marker in normalized for marker in ("relocat", "relocation")):
+        binary_family = "relocation"
+    elif "travel" in normalized and any(
+        marker in normalized for marker in ("willing", "able", "open")
+    ):
+        binary_family = "travel"
+    if binary_family is None:
+        return None
+    profile_polarity: bool | None = None
+    if binary_family == "travel":
+        value = _find_answer("Are you willing to travel?", profile.get("answers") or {})
+        if value is None:
+            value = match_screening_rule("willing to travel", profile.get("screening_answer_rules"))
+        profile_polarity = _binary_answer_polarity(value)
+    else:
+        relocation = (
+            _find_answer("Are you open to relocation?", profile.get("answers") or {})
+            or match_screening_rule("open to relocation", profile.get("screening_answer_rules"))
+            or _approved_sensitive_entry_answer(profile, "relocation")
+        )
+        office = (
+            _find_answer("Are you open to working in-person in one of our offices 25% of the time?", profile.get("answers") or {})
+            or match_screening_rule("in office", profile.get("screening_answer_rules"))
+            or _approved_sensitive_entry_answer(profile, "office")
+        )
+        if binary_family == "relocation":
+            profile_polarity = _binary_answer_polarity(relocation)
+        elif binary_family == "office":
+            approved_office = _approved_office_commitment_answer(profile)
+            profile_polarity = _binary_answer_polarity(approved_office) if approved_office is not None else None
+        else:
+            profile_polarity = _binary_answer_polarity(relocation)
+            if profile_polarity and office is not None and not _binary_answer_polarity(office):
+                profile_polarity = False
+    if profile_polarity is None:
+        return None
+    wanted = "Yes" if profile_polarity else "No"
+    for option in available:
+        if _norm(option) == _norm(wanted):
+            return option
+    return None
+
+
+def _option_denies_sponsorship(option: Any) -> bool:
+    text = _norm(_option_text(option))
+    return any(
+        marker in text
+        for marker in (
+            "do not require sponsorship",
+            "does not require sponsorship",
+            "will not require sponsorship",
+            "no sponsorship is required",
+            "no, i do not require",
+            "without sponsorship",
+        )
+    )
+
+
+def _profile_requires_sponsorship(profile: Mapping[str, Any]) -> bool | None:
+    raw = (
+        _approved_sensitive_entry_answer(profile, "sponsorship")
+        or str((profile.get("work_authorization_by_country") or {}).get("requires_sponsorship") or "")
+    )
+    if not raw:
+        return None
+    return _truthy_answer(raw)
+
+
+def _relocation_statement_option(
+    field: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> Any | None:
+    """Pick a truthful long relocation option for Ashby-style button groups."""
+    options = field.get("options") or []
+    if not options:
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    if not any(
+        marker in normalized
+        for marker in ("relocat", "relocation", "willing to move", "open to moving")
+    ):
+        return None
+    relocation = (
+        _find_answer("Are you open to relocation?", profile.get("answers") or {})
+        or match_screening_rule("open to relocation", profile.get("screening_answer_rules"))
+        or _approved_sensitive_entry_answer(profile, "relocation")
+    )
+    if relocation is None:
+        return None
+    if _truthy_answer(relocation):
+        relocation_options: list[Any] = []
+        for option in options:
+            text = _norm(_option_text(option))
+            if not any(
+                marker in text
+                for marker in ("relocat", "willing to move", "open to moving", "can relocate")
+            ):
+                continue
+            if any(
+                marker in text
+                for marker in ("not", "no ", "unable", "don t", "do not", "won t")
+            ):
+                continue
+            relocation_options.append(option)
+        if len(relocation_options) == 1:
+            return relocation_options[0]
+        return None
+    for option in options:
+        text = _norm(_option_text(option))
+        if any(
+            marker in text
+            for marker in (
+                "do not want to work in office",
+                "not willing to relocate",
+                "cannot relocate",
+                "do not want to relocate",
+            )
+        ):
+            return option
+    return None
+
+
+def _sponsorship_statement_option(
+    field: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> Any | None:
+    """Choose a truthful sponsorship option when the saved answer is binary."""
+    options = field.get("options") or []
+    if not options:
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    option_text = " ".join(_norm(_option_text(option)) for option in options)
+    if not (
+        any(marker in normalized for marker in ("sponsor", "sponsorship", "visa"))
+        or any(marker in option_text for marker in ("sponsor", "sponsorship"))
+    ):
+        return None
+    sponsorship = (
+        _approved_sensitive_entry_answer(profile, "sponsorship")
+        or str((profile.get("work_authorization_by_country") or {}).get("requires_sponsorship") or "")
+    )
+    if not sponsorship:
+        return None
+    if _truthy_answer(sponsorship):
+        candidates = []
+        for option in options:
+            text = _norm(_option_text(option))
+            if _option_denies_sponsorship(option):
+                continue
+            if any(
+                marker in text
+                for marker in (
+                    "require new sponsorship",
+                    "would require sponsorship",
+                    "will require sponsorship",
+                    "require immigration sponsorship",
+                    "require sponsorship",
+                )
+            ):
+                candidates.append(option)
+        if not candidates:
+            return None
+
+        def sponsorship_preference(option: Any) -> int:
+            text = _norm(_option_text(option))
+            if "new sponsorship" in text:
+                return 0
+            if "transfer" in text:
+                return 1
+            return 2
+
+        return min(candidates, key=sponsorship_preference)
+    for option in options:
+        text = _norm(_option_text(option))
+        if "do not require sponsorship" in text or "does not require sponsorship" in text:
+            return option
+    return None
+
+
+def _clearance_level_choice(field: Mapping[str, Any], profile: Mapping[str, Any]) -> str | None:
+    normalized = _norm(str(field.get("label") or ""))
+    if not any(
+        marker in normalized
+        for marker in (
+            "current security clearance level",
+            "level of security clearance",
+            "clearance level do you hold",
+            "which level of security clearance",
+            "security clearance level",
+            "clearance level hold",
+        )
+    ):
+        return None
+    active = _approved_sensitive_entry_answer(profile, "active_security_clearance")
+    if active is not None and not _truthy_answer(active):
+        for option in field.get("options") or []:
+            if _norm(_option_text(option)) == "none":
+                return _option_text(option)
+        return "None"
+    return None
+
+
+def _english_level_choice(field: Mapping[str, Any], profile: Mapping[str, Any]) -> str | None:
+    normalized = _norm(str(field.get("label") or ""))
+    if "english level" not in normalized and "english proficiency" not in normalized:
+        return None
+    saved = (
+        _find_answer(str(field.get("label") or ""), profile.get("answers") or {})
+        or _match_sensitive(str(field.get("label") or ""), profile)
+    )
+    if saved is None:
+        return None
+    saved_norm = _norm(saved)
+    if saved_norm not in {"fluent", "native", "native speaker", "c1", "c2"}:
+        return None
+    preferred = ("c1", "c2") if saved_norm == "fluent" else ("c2", "c1")
+    options = field.get("options") or []
+    for level in preferred:
+        if options:
+            for option in options:
+                if _norm(_option_text(option)) == level:
+                    return _option_text(option)
+        else:
+            return level.upper()
+    return None
+
+
+def _bachelor_graduation_year_choice(field: Mapping[str, Any], profile: Mapping[str, Any]) -> str | None:
+    normalized = _norm(str(field.get("label") or ""))
+    if "year did you graduate" not in normalized or "bachelor" not in normalized:
+        return None
+    for entry in profile.get("education") or []:
+        if not isinstance(entry, dict):
+            continue
+        degree = _norm(str(entry.get("degree") or ""))
+        if "bachelor" not in degree:
+            continue
+        year = str(entry.get("end_year") or "").strip()
+        if year:
+            return year
+    return None
+
+
+def _dynamic_combobox_fallback_choice(
+    field: dict[str, Any],
+    available: list[str],
+    requested: Any,
+    profile: dict[str, Any] | None = None,
+) -> str | None:
+    """Choose a visible dynamic option without changing the underlying fact.
+
+    Planning often runs before a React/Greenhouse popup has rendered its
+    options.  At commit time the saved answer can therefore be a grounded long
+    sentence (for example sponsorship) while the live popup exposes only
+    ``Yes``/``No``.  The returned value is always one of the page-provided
+    options and uses the same conservative closest-match rules as static
+    planning.  ``requested`` may be empty for a non-sensitive question whose
+    option list only becomes available after the popup opens; in that case the
+    bounded resolver chooses directly from the live page options.
+    """
+    requested_text = str(requested or "").strip()
+    if not available:
+        return None
+    normalized_label = _norm(field.get("label") or "")
+    if profile:
+        visa_type_choice = _sponsorship_type_dynamic_choice(
+            field,
+            available,
+            profile,
+        )
+        if visa_type_choice:
+            return visa_type_choice
+        if _field_may_be_sponsorship_type(field) and any(
+            _text_mentions_visa_type(text) for text in available
+        ):
+            return None
+    choice = None
+    if profile:
+        state_choice = _live_state_option_choice(available, profile)
+        if state_choice:
+            return state_choice
+        binary_choice = _live_binary_option_choice(field, available, profile)
+        if binary_choice:
+            return binary_choice
+        ethnicity_choice = _ethnicity_dynamic_choice(available, profile)
+        if ethnicity_choice:
+            return ethnicity_choice
+        based_in_metro = _based_in_metro_question_answer(
+            str(field.get("label") or ""),
+            profile,
+        )
+        if based_in_metro is not None:
+            if based_in_metro == "No" and _profile_relocation_willing(profile):
+                willing_choice = next(
+                    (
+                        text
+                        for text in available
+                        if "relocat" in _norm(text)
+                        and (
+                            "but" in _norm(text)
+                            or any(marker in _norm(text) for marker in ("willing", "wiling", "would", "open to", "plan to"))
+                        )
+                        and not any(marker in _norm(text) for marker in ("not willing", "unwilling", "not open"))
+                    ),
+                    None,
+                )
+                if willing_choice:
+                    return willing_choice
+            choice = next(
+                (
+                    text
+                    for text in available
+                    if _norm(text) == _norm(based_in_metro)
+                ),
+                None,
+            )
+            if choice:
+                return choice
+        age_bucket = _age_bucket_answer(profile)
+        if age_bucket and any(
+            marker in normalized_label
+            for marker in ("current age", "your age", "age are you", "age bracket", "age group", "what is your age")
+        ):
+            age_choice = next(
+                (text for text in available if _option_matches(text, age_bucket)),
+                None,
+            )
+            if not age_choice:
+                age_value = _age_in_years(profile)
+                age_choice = next(
+                    (text for text in available if _age_option_matches(age_value, text)),
+                    None,
+                )
+            if age_choice:
+                return age_choice
+        if not binary_choice and profile:
+            statement_field = dict(field)
+            statement_field["options"] = [
+                {"label": text, "value": text} for text in available
+            ]
+            relocation_choice = _relocation_statement_option(statement_field, profile)
+            if relocation_choice is not None:
+                return _option_text(relocation_choice)
+            sponsorship_choice = _sponsorship_statement_option(statement_field, profile)
+            if sponsorship_choice is not None:
+                return _option_text(sponsorship_choice)
+    if requested_text:
+        if profile:
+            english_level_field = dict(field)
+            english_level_field["options"] = [
+                {"label": text, "value": text} for text in available
+            ]
+            choice = _english_level_choice(english_level_field, profile)
+        if not choice and _norm(requested_text) in {
+            "n/a",
+            "na",
+            "n a",
+            "not applicable",
+            "does not apply",
+        }:
+            choice = next(
+                (
+                    text
+                    for text in available
+                    if "did not take" in _norm(text)
+                    or _norm(text) == "n a"
+                ),
+                None,
+            )
+        if not choice:
+            choice = _office_location_combobox_fallback_choice(
+                field,
+                available,
+                requested_text,
+            )
+        if not choice:
+            choice = _department_combobox_fallback_choice(field, available)
+        if not choice:
+            choice = next(
+                (
+                    text
+                    for text in available
+                    if len(text) <= 80 and _option_matches(text, requested_text)
+                ),
+                None,
+            )
+        if not choice:
+            choice = _best_option_match(available, requested_text)
+    if (
+        not choice
+        and profile
+        and _is_sensitive(normalized_label)
+    ):
+        # Build a field with live options for sensitive handlers that need them
+        live_field = dict(field)
+        live_field["options"] = [{"label": text, "value": text} for text in available]
+
+        citizenship_choice = _citizenship_status_option(live_field, profile)
+        if citizenship_choice is not None:
+            return _option_text(citizenship_choice)
+        rule_answer = match_screening_rule(
+            str(field.get("label") or ""),
+            profile.get("screening_answer_rules"),
+        )
+        if rule_answer is not None:
+            rule_choice = next(
+                (text for text in available if _option_matches(text, rule_answer)),
+                None,
+            )
+            if rule_choice:
+                return rule_choice
+        # Sensitive questions must stay grounded in the approved sensitive KB.
+        # ``_plan_field`` normally passes that answer through ``requested``,
+        # but when the live popup was not yet rendered it can be empty; the
+        # KB entry is the only allowed re-derivation.
+        sensitive_value = _match_sensitive(normalized_label, profile)
+        age_candidates = []
+        if any(
+            marker in normalized_label
+            for marker in ("current age", "your age", "age are you", "age bracket", "age group", "what is your age")
+        ):
+            age_candidates.append(_age_bucket_answer(profile))
+        for candidate in [sensitive_value, *age_candidates]:
+            if not candidate:
+                continue
+            choice = next(
+                (text for text in available if _option_matches(text, candidate)),
+                None,
+            )
+            if choice:
+                break
+        if sensitive_value and not choice:
+            choice = _best_option_match(available, sensitive_value)
+    if not choice and "ever worked for" in normalized_label:
+        choice = next(
+            (text for text in available if "never worked" in _norm(text)),
+            None,
+        )
+    if (
+        not choice
+        and "job code" in normalized_label
+        and "posting" in normalized_label
+    ):
+        code_available = [
+            text for text in available if _looks_like_job_code_option(text)
+        ]
+        if len(code_available) == 1:
+            choice = code_available[0]
+    if not choice and profile:
+        mapping_label = " ".join(
+            str(field.get(key) or "")
+            for key in (
+                "label",
+                "section",
+                "ariaLabel",
+                "ariaDescription",
+                "placeholder",
+            )
+        ).strip()
+        guarded_fact = _requires_explicit_candidate_fact(mapping_label)
+        sensitive = _is_sensitive(mapping_label)
+        if (
+            mapping_label
+            and not guarded_fact
+            and not sensitive
+            and not _requires_user_authored_answer(mapping_label, profile)
+        ):
+            option_field = dict(field)
+            option_field["kind"] = "combobox"
+            option_field["options"] = list(available)
+            generated = _generalized_screening_answer(
+                option_field,
+                profile,
+                mapping_label,
+                sensitive=False,
+            )
+            generated_text = (
+                _option_text(generated[0])
+                if isinstance(generated, list) and generated
+                else _option_text(generated)
+            )
+            if generated_text:
+                if _norm(generated_text) in {"n/a", "na", "n a", "not applicable", "does not apply"}:
+                    choice = next(
+                        (
+                            text
+                            for text in available
+                            if "did not take" in _norm(text)
+                            or "do not recall" in _norm(text)
+                            or "did not sit" in _norm(text)
+                        ),
+                        None,
+                    )
+                if not choice and _is_negative_answer(generated_text):
+                    choice = next(
+                        (
+                            text
+                            for text in available
+                            if "have not worked" in _norm(text)
+                            or "never worked" in _norm(text)
+                            or "have never worked" in _norm(text)
+                            or "have not been employed" in _norm(text)
+                        ),
+                        None,
+                    )
+                if not choice:
+                    choice = next(
+                        (
+                            text
+                            for text in available
+                            if _norm(text) == _norm(generated_text)
+                        ),
+                        None,
+                    )
+                if not choice:
+                    choice = _best_option_match(available, generated_text)
+    return choice
 
 
 def _single_job_code_option(field: dict[str, Any], label: str) -> str | None:
@@ -8924,6 +11627,69 @@ def _export_control_checkbox_options(field: dict[str, Any]) -> list[Any]:
     return []
 
 
+def _export_control_status_option(
+    field: dict[str, Any],
+    profile: dict[str, Any],
+) -> Any | None:
+    """Map an approved Not-applicable export-control status to Other when the
+    form only exposes citizenship/permanent-resident/protected options.
+
+    The candidate is not a U.S. citizen, permanent resident, or protected
+    individual, so the truthful option on such screens is the catch-all
+    "Other" category. This is a genuine page option, never a placeholder.
+    """
+    options = field.get("options") or []
+    if not options:
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    if not (
+        ("export control" in normalized or "export controls" in normalized or "u s person" in normalized or "us person" in normalized)
+        and any(
+            marker in normalized
+            for marker in ("are you any of the following", "which of the following", "what is your status")
+        )
+    ):
+        return None
+    option_text = " ".join(_norm(_option_text(option)) for option in options)
+    if not any(
+        marker in option_text
+        for marker in ("citizen", "permanent resident", "protected individual", "green card")
+    ):
+        return None
+    approved = _match_sensitive(str(field.get("label") or ""), profile)
+    if approved is None or _norm(approved) not in {"not applicable", "n a", "n/a", "na"}:
+        return None
+    return next(
+        (option for option in options if _norm(_option_text(option)) == "other"),
+        None,
+    )
+
+
+def _citizenship_status_option(
+    field: dict[str, Any],
+    profile: dict[str, Any],
+) -> Any | None:
+    """Map an approved non-citizen answer to the genuine Other citizenship option."""
+    options = field.get("options") or []
+    if not options:
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    if "citizenship" not in normalized or "status" not in normalized:
+        return None
+    approved = _match_sensitive(str(field.get("label") or ""), profile)
+    if approved is None or not _is_negative_answer(approved):
+        return None
+    return next(
+        (
+            option
+            for option in options
+            if "other" in _norm(_option_text(option))
+            and "please explain" in _norm(_option_text(option))
+        ),
+        None,
+    )
+
+
 def _palantir_checkbox_group_plan(
     field: dict[str, Any],
     profile: dict[str, Any],
@@ -9085,6 +11851,73 @@ def _privacy_preserving_pronoun_option(field: dict[str, Any]) -> Any | None:
     return None
 
 
+def _conditional_followup_skip_plan(
+    label: str,
+    profile: dict[str, Any],
+    required: bool,
+) -> dict[str, Any] | None:
+    """Skip conditional follow-ups that a negative gate answer makes moot.
+
+    ATS forms (notably clearance and work-authorization screens) render
+    "If Yes, ..." follow-ups as required comboboxes even when the parent gate
+    was answered "No".  When the approved sensitive KB stores a negative gate
+    answer, the follow-up is not applicable and must not block submission.
+    """
+    normalized = _norm(label)
+    export_control_explainer = (
+        "if you selected" in normalized
+        and "explain further" in normalized
+        and ("protected individual" in normalized or "other" in normalized)
+    )
+    if "if yes" not in normalized and not export_control_explainer:
+        return None
+    clearance_followup = (
+        "clearance" in normalized
+        or "security clearance" in normalized
+        or "polygraph" in normalized
+    )
+    authorization_followup = (
+        "work authorization" in normalized
+        or "authorized to work" in normalized
+        or "right to work" in normalized
+    )
+    if not (clearance_followup or authorization_followup or export_control_explainer):
+        return None
+    gate_entries: list[Any] = []
+    if clearance_followup:
+        gate_entries.append(
+            (profile.get("sensitive_answers") or {}).get("active_security_clearance")
+        )
+    if authorization_followup:
+        gate_entries.append(
+            (profile.get("sensitive_answers") or {}).get("work_authorization_us")
+        )
+    if export_control_explainer:
+        gate_entries.append(
+            (profile.get("sensitive_answers") or {}).get("us_export_control_status")
+        )
+    for entry in gate_entries:
+        if not isinstance(entry, dict) or not entry.get("approved"):
+            continue
+        gate_answer = str(entry.get("answer") or "")
+        if _is_negative_answer(gate_answer) or _norm(gate_answer) in {
+            "not applicable",
+            "n a",
+            "n/a",
+            "na",
+        }:
+            return {
+                "action": "skip",
+                "reason": (
+                    "conditional follow-up not applicable after negative "
+                    "approved gate answer"
+                ),
+                "sensitive": True,
+                "blocking": False,
+            }
+    return None
+
+
 def _yes_no_screening_answer(
     field: dict[str, Any],
     profile: dict[str, Any],
@@ -9152,21 +11985,293 @@ def _generalized_screening_answer(
     a list of validated option entries from the field itself; free-text kinds
     return a plain string. ``None`` keeps the original blocking-review path.
     """
-    if sensitive or _requires_user_authored_answer(label, profile):
+    if sensitive:
         return None
+    # A user-authored/no-AI prompt may still use text the candidate already
+    # approved in the authoritative profile.  The restriction is against
+    # generating a new answer, not against replaying an explicit saved rule.
     rule_answer = match_screening_rule(label, profile.get("screening_answer_rules"))
     if rule_answer is not None:
         return rule_answer
+    if _requires_user_authored_answer(label, profile):
+        return None
+    prior_engagement = _prior_employment_engagement_answer(label, profile)
+    if prior_engagement is not None:
+        return prior_engagement
+    location_answer = _structured_geography_answer(label, profile)
+    if location_answer is not None:
+        return location_answer
     # The sensitive KB also stores standing answers whose labels are not
     # sensitive (e.g. percentage of time coding). Reuse it as an approved
     # answer source before spending an LLM call on the same question.
     kb_answer = resolve_sensitive_answer(label, profile)
     if kb_answer is not None:
         return kb_answer
+    # A resolver injected by the controlled runtime or a test is already an
+    # explicit capability decision.  The environment gate controls automatic
+    # resolver construction; it must not disable an existing bounded resolver
+    # after the agent has selected the generation path.
     resolver = get_llm_answer_resolver()
     if resolver is None:
         return None
     return resolver.answer_for_field(field, profile, label=label)
+
+
+def _is_geography_question(label: str) -> bool:
+    normalized = _norm(label)
+    geography_markers = (
+        "where are you located",
+        "where do you live",
+        "where are you based",
+        "what is your current location",
+        "what city",
+        "which city",
+        "city do you live in",
+        "city do you reside in",
+        "city are you in",
+        "city are you currently in",
+        "current location",
+        "currently based",
+        "currently located",
+        "country of residence",
+        "country you are located",
+        "country are you in",
+        "state do you currently live in",
+        "state do you live in",
+        "what state",
+    )
+    return any(marker in normalized for marker in geography_markers)
+
+
+def _structured_geography_answer(label: str, profile: dict[str, Any]) -> str | None:
+    """Return a concise approved geography answer before any LLM fallback.
+
+    Geography dropdowns (e.g. "Where are you located?" with region options)
+    are best answered from the profile location/country instead of an LLM
+    sentence; the semicolon-separated value lets option matching try the
+    country candidate separately from the city.
+    """
+    if not _is_geography_question(label):
+        return None
+    normalized = _norm(label)
+    preference_markers = (
+        "prefer",
+        "would you prefer",
+        "open to",
+        "commutable",
+        "relocat",
+        "willing to",
+        "which office",
+        "preferred office",
+        "summer 2026",
+    )
+    if any(marker in normalized for marker in preference_markers):
+        return None
+    city_question = any(
+        marker in normalized
+        for marker in (
+            "what city",
+            "which city",
+            "city do you live in",
+            "city do you reside in",
+            "city are you in",
+            "city are you currently in",
+        )
+    )
+    if city_question:
+        city = profile.get("city") or ""
+        if not city:
+            location = str(profile.get("location") or "")
+            parts = [part.strip() for part in location.split(",")]
+            city = parts[0] if parts else ""
+        return city or None
+    if (
+        "state do you currently live in" in normalized
+        or "state do you live in" in normalized
+        or normalized == "what state"
+        or normalized.endswith("what state")
+    ):
+        state_code = _profile_us_state_code(profile)
+        if state_code:
+            return state_code.upper()
+        return _profile_us_state_name(profile)
+    location = profile.get("location") or profile.get("city") or ""
+    country = _infer_country(profile) or ""
+    location_text = str(location).strip()
+    country_text = str(country).strip()
+    if not location_text and not country_text:
+        return None
+    if (
+        location_text
+        and country_text
+        and _norm(country_text) not in _norm(location_text)
+    ):
+        return f"{location_text}; {country_text}"
+    return location_text or country_text
+
+
+def _consent_checkbox_group_plan(
+    field: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Check a single-option consent group from an approved affirmative answer.
+
+    Some ATS forms render an acknowledgment/consent statement as a
+    checkboxgroup whose only option repeats the full statement. The approved
+    sensitive KB already answers the statement (e.g. the age-identifying
+    information notice), so select that one option instead of trying to match
+    the full sentence against a binary answer.
+    """
+    options = field.get("options") or []
+    if len(options) != 1:
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    consent_markers = (
+        "age-identifying information",
+        "redact or remove",
+        "i acknowledge",
+        "acknowledge that",
+        "acknowledge and agree",
+        "i agree",
+        "consent",
+        "privacy notice",
+        "privacy policy",
+        "terms and conditions",
+        "personal data",
+        "personal information",
+    )
+    if not any(marker in normalized for marker in consent_markers):
+        return None
+    approved = _match_sensitive(str(field.get("label") or ""), profile)
+    if approved is None or not _truthy_answer(approved):
+        return None
+    return {"action": "checkmany", "options": [options[0]], "sensitive": True}
+
+
+def _based_in_metro_question_answer(
+    label: str,
+    profile: dict[str, Any],
+) -> str | None:
+    """Answer binary "Are you based in <metro>?" questions from the profile."""
+    normalized = _norm(label)
+    if not any(
+        marker in normalized
+        for marker in (
+            "are you based in",
+            "based in the",
+            "currently based in",
+            "currently located in",
+            "are you currently in",
+            "are you located in",
+            "do you currently live in",
+            "do you live in",
+            "are you a resident of",
+            "resident of",
+            "currently reside in",
+            "do you currently reside in",
+            "reside in",
+            "residing in",
+            "are you local to",
+            "are you local",
+            "local to the",
+            "located within",
+        )
+    ):
+        return None
+    if any(
+        marker in normalized
+        for marker in (
+            "willing to relocate",
+            "open to relocate",
+            "open to relocating",
+            "ready to relocate",
+            "willing to move",
+            "will be able to relocate",
+            "plan to relocate",
+            "commutable",
+            "commute to",
+        )
+    ):
+        return None
+    city_match = re.search(r"\b([a-z][a-z .-]*?)\s*,\s*([a-z]{2})\b", str(label).lower())
+    if city_match:
+        city_tokens = []
+        stop_tokens = {
+            "a", "am", "an", "are", "at", "based", "be", "can", "could",
+            "currently", "did", "do", "does", "for", "i", "if", "in", "is",
+            "live", "living", "local", "located", "me", "my", "of", "on",
+            "or", "our", "please", "role", "the", "this", "to", "we",
+            "will", "work", "working", "would", "you", "your",
+        }
+        for token in reversed(_norm(city_match.group(1)).split()):
+            if token in stop_tokens:
+                break
+            city_tokens.append(token)
+        city = " ".join(reversed(city_tokens))
+        profile_location = _norm(
+            str(profile.get("location") or profile.get("city") or "")
+        )
+        if city and city in profile_location:
+            return "Yes"
+        if city:
+            return "No"
+    resident_match = re.search(r"resident of\s+([a-z][a-z .-]*?)(?:\?|$)", str(label).lower())
+    if resident_match:
+        place = _norm(resident_match.group(1))
+        profile_location = _norm(
+            str(profile.get("location") or profile.get("city") or "")
+        )
+        expanded_place = _expanded_location_text(place)
+        expanded_profile = _expanded_location_text(profile_location)
+        if (
+            place
+            and (
+                place in profile_location
+                or (expanded_place and expanded_place in expanded_profile)
+            )
+        ):
+            return "Yes"
+        if place:
+            return "No"
+    mentioned = _mentioned_metros(normalized)
+    if not mentioned:
+        return None
+    profile_location = _norm(
+        str(profile.get("location") or profile.get("city") or "")
+    )
+    if any(alias in profile_location for alias in mentioned):
+        return "Yes"
+    return "No"
+
+
+def _mentioned_metros(text: str) -> list[str]:
+    aliases = {
+        "san francisco": ["san francisco", "bay area"],
+        "mountain view": ["mountain view"],
+        "sunnyvale": ["sunnyvale"],
+        "palo alto": ["palo alto"],
+        "new york": ["new york", "nyc", "brooklyn", "manhattan", "queens"],
+        "seattle": ["seattle"],
+        "austin": ["austin"],
+        "los angeles": ["los angeles"],
+        "boston": ["boston"],
+        "chicago": ["chicago"],
+        "denver": ["denver"],
+        "washington": ["washington", "washington dc", "dc"],
+        "raleigh": ["raleigh"],
+        "germantown": ["germantown"],
+        "baltimore": ["baltimore"],
+        "mclean": ["mclean"],
+        "fort worth": ["fort worth"],
+    }
+    mentioned: list[str] = []
+    for alias, candidates in aliases.items():
+        if any(
+            re.search(rf"\b{re.escape(candidate)}\b", text)
+            for candidate in candidates
+        ):
+            mentioned.append(alias)
+    return mentioned
 
 
 def _field_label_appears_required(label: str | None) -> bool:
@@ -9220,6 +12325,26 @@ def _plan_field(
         for option in field.get("options") or []
     )
     answer_label = label
+    ashby_edu_index = field.get("ashbyEduEntryIndex")
+    ashby_edu_subfield = str(field.get("ashbyEduSubfield") or "")
+    edu_entry = _profile_education_entry(profile, ashby_edu_index) if ashby_edu_index is not None else None
+
+    def entry_or_profile_map(field_or_label):
+        if ashby_edu_index is not None:
+            return _map_text_value_for_entry(field_or_label, profile, edu_entry)
+        return _map_text_value(field_or_label, profile)
+
+    if ashby_edu_subfield == "still_student":
+        if edu_entry is not None and not str(edu_entry.get("end_date") or edu_entry.get("end_year") or "").strip():
+            return {"action": "check"}
+        if edu_entry is not None:
+            return {"action": "uncheck"}
+        return {
+            "action": "skip",
+            "reason": "education still-student checkbox matches profile end date",
+            "blocking": False,
+        }
+
     if (
         "communicationconsent" in _norm(mapping_label).replace(" ", "")
         or "text messages" in _norm(option_labels)
@@ -9229,6 +12354,20 @@ def _plan_field(
         "demographic" in _norm(mapping_label) or "survey" in _norm(mapping_label)
     ):
         answer_label = f"{mapping_label} {label}"
+    conditional_skip = _conditional_followup_skip_plan(
+        label,
+        profile,
+        required,
+    )
+    if conditional_skip is not None:
+        return conditional_skip
+    sponsorship_type_plan = _sponsorship_type_field_plan(
+        field,
+        profile,
+        required,
+    )
+    if sponsorship_type_plan is not None:
+        return sponsorship_type_plan
     yes_no_plan = _yes_no_screening_answer(field, profile, answer_label)
     if yes_no_plan is not None:
         return yes_no_plan
@@ -9249,9 +12388,42 @@ def _plan_field(
     # "Start date" is sensitive when it means availability for the new role,
     # but not when it is a dated entry from the candidate's work/education
     # history.  The shared semantic layer distinguishes those forms.
-    sensitive = (not profile_date_semantic) and (_is_sensitive(label) or (
-        field.get("kind") in {"radiogroup", "buttongroup", "checkboxgroup"} or field.get("tag") == "button"
-    ) and _is_sensitive(mapping_label))
+    sensitive = (not profile_date_semantic) and (
+        _is_sensitive(label)
+        or (
+            field.get("kind") in {"radiogroup", "buttongroup", "checkboxgroup"}
+            or field.get("tag") == "button"
+            or field.get("type") in {"checkbox", "radio"}
+            or field.get("role") in {"checkbox", "radio", "switch"}
+        )
+        and _is_sensitive(mapping_label)
+    )
+    explicit_candidate_fact = _requires_explicit_candidate_fact(answer_label)
+    explicit_candidate_answer = (
+        _explicit_candidate_fact_answer(answer_label, profile)
+        if explicit_candidate_fact
+        else None
+    )
+    if explicit_candidate_answer is None and sensitive and explicit_candidate_fact:
+        explicit_candidate_answer = _match_sensitive(answer_label, profile)
+    # Candidate facts must never be invented. Unrelated open-ended fields can
+    # still reach the grounded generation fallback below.
+    if explicit_candidate_fact and explicit_candidate_answer is None:
+        if (
+            sensitive
+            or not _candidate_fact_inference_allowed(answer_label)
+            or _requires_user_authored_answer(answer_label, profile)
+        ):
+            return {
+                "action": "skip",
+                "reason": (
+                    "candidate fact needs explicit approved answer"
+                    if required
+                    else "non-required unmapped field"
+                ),
+                "sensitive": sensitive,
+                "blocking": bool(required),
+            }
     if not required and _is_demographic_label(label):
         demographic_answer = _match_sensitive(answer_label, profile)
         if demographic_answer is None or _is_decline_answer(demographic_answer):
@@ -9261,7 +12433,7 @@ def _plan_field(
                 "sensitive": True,
                 "blocking": False,
             }
-    priority_answer = _priority_auto_answer(answer_label, profile)
+    priority_answer = explicit_candidate_answer or _priority_auto_answer(answer_label, profile)
     if priority_answer is None:
         priority_answer = _work_authorization_dropdown_answer(answer_label, profile)
     controlled_option = _controlled_option_answer(field, answer_label, profile)
@@ -9280,6 +12452,12 @@ def _plan_field(
     signature_value = _legal_signature_value(mapping_label, profile)
     if signature_value is not None and field.get("tag") in {"input", "textarea"}:
         return {"action": "fill", "value": signature_value, "sensitive": True}
+    # Greenhouse can expose a page-provided job-code dropdown as a dynamic
+    # radiogroup. The code is not a candidate fact, so select the sole
+    # code-like option before generic sensitive-field matching.
+    single_job_code = _single_job_code_option(field, answer_label)
+    if single_job_code is not None:
+        return {"action": "combobox", "value": single_job_code}
     if field.get("kind") in {"radiogroup", "buttongroup"}:
         answer = priority_answer
         if answer is None:
@@ -9295,14 +12473,20 @@ def _plan_field(
         if answer is None:
             generalized = _generalized_screening_answer(field, profile, answer_label, sensitive=sensitive)
             if isinstance(generalized, dict):
+                guarded = _guard_local_residency_option(field, generalized, profile, answer_label)
+                if guarded is None:
+                    return {"action": "skip", "reason": "saved answer requires a false local-residency claim", "sensitive": sensitive, "blocking": bool(required)}
                 return {
                     "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
-                    "option": generalized,
+                    "option": guarded,
                 }
             if isinstance(generalized, list) and generalized:
+                guarded = _guard_local_residency_option(field, generalized[0], profile, answer_label)
+                if guarded is None:
+                    return {"action": "skip", "reason": "saved answer requires a false local-residency claim", "sensitive": sensitive, "blocking": bool(required)}
                 return {
                     "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
-                    "option": generalized[0],
+                    "option": guarded,
                 }
             if isinstance(generalized, str):
                 answer = generalized
@@ -9313,17 +12497,59 @@ def _plan_field(
                     "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
                     "option": privacy_option,
                 }
+        relocation_option = _relocation_statement_option(field, profile)
+        if relocation_option is not None:
+            guarded = _guard_local_residency_option(field, relocation_option, profile, label)
+            if guarded is not None:
+                return {
+                    "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                    "option": guarded,
+                }
+        sponsorship_option = _sponsorship_statement_option(field, profile)
+        if sponsorship_option is not None:
+            return {
+                "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                "option": sponsorship_option,
+            }
+        export_status_option = _export_control_status_option(field, profile)
+        if export_status_option is not None:
+            return {
+                "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                "option": export_status_option,
+                "sensitive": True,
+            }
+        citizenship_option = _citizenship_status_option(field, profile)
+        if citizenship_option is not None:
+            return {
+                "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                "option": citizenship_option,
+                "sensitive": True,
+            }
         if answer is None:
             if _requires_user_authored_answer(label, profile):
                 return {"action": "skip", "reason": "question requires user-authored answer / no AI assistance", "sensitive": sensitive, "blocking": True}
             if not required:
                 return {"action": "skip", "reason": "non-required unmapped field", "sensitive": sensitive, "blocking": False}
-            return {"action": "skip", "reason": "no approved answer for screening question", "sensitive": sensitive}
-        matches = _matching_options(field, answer)
+            return {"action": "skip", "reason": "no approved answer for screening question", "sensitive": sensitive, "blocking": bool(required)}
+        matches = _matching_options(field, answer, profile)
+        if len(matches) > 1 and _norm(answer) in {"yes", "no", "true", "false"}:
+            return {
+                "action": "skip",
+                "reason": "no option matches saved answer",
+                "sensitive": sensitive,
+            }
         if matches:
+            guarded = _guard_local_residency_option(field, matches[0], profile, label)
+            if guarded is None:
+                return {
+                    "action": "skip",
+                    "reason": "saved answer requires a false local-residency claim",
+                    "sensitive": sensitive,
+                    "blocking": bool(required),
+                }
             return {
                 "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
-                "option": matches[0],
+                "option": guarded,
             }
         numeric_year_option = _numeric_relevant_year_option(field, profile)
         if numeric_year_option is not None:
@@ -9346,18 +12572,40 @@ def _plan_field(
                 "sensitive": sensitive,
                 "blocking": False,
             }
+        if not field.get("options") and answer and required:
+            return {
+                "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                "value": str(answer),
+                "defer_live_options": True,
+                "sensitive": sensitive,
+            }
         return {"action": "skip", "reason": "no option matches saved answer", "sensitive": sensitive}
     if field.get("kind") == "checkboxgroup":
         palantir_plan = _palantir_checkbox_group_plan(field, profile)
         if palantir_plan is not None:
             return palantir_plan
+        consent_group_plan = _consent_checkbox_group_plan(field, profile)
+        if consent_group_plan is not None:
+            return consent_group_plan
         export_control_options = _export_control_checkbox_options(field)
         if export_control_options:
             return {"action": "checkmany", "options": export_control_options}
         technical_options = _technical_screening_checkbox_options(field, profile)
         if technical_options:
             return {"action": "checkmany", "options": technical_options}
+        location_group_plan = _location_checkbox_group_plan(field, profile)
+        if location_group_plan is not None:
+            return location_group_plan
         answer = priority_answer
+        if answer is None and (
+            _is_source_question(mapping_label)
+            or _looks_like_source_option_group(field)
+        ):
+            answer = _preferred_source_answer(
+                mapping_label,
+                profile,
+                profile.get("answers") or {},
+            )
         if answer is None:
             answer = _match_sensitive(mapping_label, profile) if sensitive else None
         if answer is None and not sensitive and not _use_structured_auto_answer(label):
@@ -9366,7 +12614,7 @@ def _plan_field(
             answer = _map_text_value(field, profile) or _map_text_value(mapping_label, profile)
         if answer is None:
             answer = _auto_answer(label, profile, sensitive=sensitive)
-        if answer is None:
+        if answer is None and field.get("options"):
             generalized = _generalized_screening_answer(field, profile, label, sensitive=sensitive)
             if isinstance(generalized, list) and generalized:
                 return {"action": "checkmany", "options": generalized}
@@ -9376,15 +12624,15 @@ def _plan_field(
                 answer = generalized
         if answer is None:
             return {"action": "skip", "reason": "checkbox group needs saved answer / manual selection", "sensitive": sensitive}
-        matches = _matching_options(field, answer)
+        matches = _matching_options(field, answer, profile)
         if matches:
             return {"action": "checkmany", "options": matches}
         if _is_negative_answer(answer):
-            none_options = _matching_options(field, "None")
+            none_options = _matching_options(field, "None", profile)
             if not none_options:
-                none_options = _matching_options(field, "Not applicable")
+                none_options = _matching_options(field, "Not applicable", profile)
             if not none_options:
-                none_options = _matching_options(field, "None of the above")
+                none_options = _matching_options(field, "None of the above", profile)
             if none_options:
                 return {"action": "checkmany", "options": none_options}
             if required:
@@ -9441,6 +12689,17 @@ def _plan_field(
         )
         preferred_office = _preferred_office_location_option(field, profile)
         answer = _infer_country(profile) if is_country_control else priority_answer
+        clearance_choice = _clearance_level_choice(field, profile)
+        if clearance_choice is not None:
+            answer = clearance_choice
+        english_choice = _english_level_choice(field, profile)
+        if english_choice is not None:
+            answer = english_choice
+        bachelor_year_choice = _bachelor_graduation_year_choice(field, profile)
+        if bachelor_year_choice is not None:
+            answer = bachelor_year_choice
+        if answer is None and ashby_edu_subfield == "school" and edu_entry is not None:
+            answer = str(edu_entry.get("school") or "").strip() or None
         if answer is None and preferred_office is not None:
             answer = _option_text(preferred_office)
         if answer is None:
@@ -9458,7 +12717,7 @@ def _plan_field(
         ):
             answer = profile["location"]
         if answer is None and not sensitive:
-            answer = _map_text_value(field, profile) or _map_text_value(mapping_label, profile)
+            answer = entry_or_profile_map(field) or entry_or_profile_map(mapping_label)
         if (
             answer is None
             and not sensitive
@@ -9468,7 +12727,7 @@ def _plan_field(
             answer = profile["location"]
         if answer is None:
             answer = _auto_answer(label, profile, sensitive=sensitive)
-        if answer is None:
+        if answer is None and field.get("options"):
             generalized = _generalized_screening_answer(field, profile, label, sensitive=sensitive)
             if isinstance(generalized, dict):
                 answer = _option_text(generalized)
@@ -9489,10 +12748,67 @@ def _plan_field(
             if last and last in current:
                 return {"action": "skip", "reason": "combobox already selected"}
         if answer is not None:
-            matches = _matching_options(field, answer)
+            citizenship_option = _citizenship_status_option(field, profile)
+            if citizenship_option is not None:
+                return {"action": "combobox", "value": _option_text(citizenship_option)}
+            matches = _matching_options(field, answer, profile)
             if matches:
-                return {"action": "combobox", "value": _option_text(matches[0])}
+                guarded = _guard_local_residency_option(field, matches[0], profile, label)
+                if guarded is None:
+                    return {"action": "skip", "reason": "combobox answer requires a false local-residency claim", "sensitive": sensitive}
+                return {"action": "combobox", "value": _option_text(guarded)}
+            # Do not ask the model to replace an already approved answer when
+            # the popup has not exposed any options yet. The commit phase will
+            # map that approved answer against the live option set. Re-running
+            # unconstrained generation here can produce a contradictory log
+            # entry even though the saved answer is ultimately selected.
+            if not sensitive and field.get("options"):
+                generalized = _generalized_screening_answer(
+                    field, profile, label, sensitive=False
+                )
+                if isinstance(generalized, dict):
+                    generalized_answer = _option_text(generalized)
+                elif isinstance(generalized, list) and generalized:
+                    generalized_answer = _option_text(generalized[0])
+                elif isinstance(generalized, str):
+                    generalized_answer = generalized
+                else:
+                    generalized_answer = None
+                if generalized_answer:
+                    generalized_matches = _matching_options(field, generalized_answer, profile)
+                    if generalized_matches:
+                        guarded = _guard_local_residency_option(field, generalized_matches[0], profile, label)
+                        if guarded is None:
+                            return {"action": "skip", "reason": "combobox answer requires a false local-residency claim", "sensitive": sensitive}
+                        return {
+                            "action": "combobox",
+                            "value": _option_text(guarded),
+                        }
+                    if answer is None:
+                        return {"action": "combobox", "value": generalized_answer}
+            best_option = _best_option_match(field.get("options") or [], answer)
+            if best_option:
+                guarded = _guard_local_residency_option(
+                    field,
+                    {"label": best_option, "value": best_option},
+                    profile,
+                    label,
+                )
+                if guarded is None:
+                    return {"action": "skip", "reason": "combobox answer requires a false local-residency claim", "sensitive": sensitive}
+                return {"action": "combobox", "value": _option_text(guarded)}
             return {"action": "combobox", "value": str(answer)}
+        if (
+            not sensitive
+            and not field.get("options")
+            and not _requires_user_authored_answer(answer_label, profile)
+            and get_llm_answer_resolver() is not None
+        ):
+            return {
+                "action": "combobox",
+                "value": "",
+                "defer_live_options": True,
+            }
         if not required:
             return {
                 "action": "skip",
@@ -9513,10 +12829,10 @@ def _plan_field(
         if answer is None:
             answer = _match_sensitive(label, profile) if sensitive else _find_answer(label, profile.get("answers") or {})
         if answer is None and not sensitive:
-            answer = _map_text_value(field, profile) or _map_text_value(mapping_label, profile)
+            answer = entry_or_profile_map(field) or entry_or_profile_map(mapping_label)
         if answer is None:
             answer = _auto_answer(label, profile, sensitive=sensitive)
-        if answer is None:
+        if answer is None and field.get("options"):
             generalized = _generalized_screening_answer(field, profile, label, sensitive=sensitive)
             if isinstance(generalized, dict):
                 answer = _option_text(generalized)
@@ -9526,6 +12842,17 @@ def _plan_field(
                 answer = generalized
         if answer is not None:
             return {"action": "customselect", "value": str(answer)}
+        if (
+            not sensitive
+            and not field.get("options")
+            and not _requires_user_authored_answer(answer_label, profile)
+            and get_llm_answer_resolver() is not None
+        ):
+            return {
+                "action": "customselect",
+                "value": "",
+                "defer_live_options": True,
+            }
         if not required:
             return {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
         return {"action": "skip", "reason": "button dropdown needs saved answer / manual selection", "sensitive": sensitive}
@@ -9540,10 +12867,19 @@ def _plan_field(
         return {"action": "skip", "reason": "combobox needs saved answer / manual selection", "sensitive": sensitive}
     if field.get("tag") == "select":
         answer = priority_answer
+        clearance_choice = _clearance_level_choice(field, profile)
+        if clearance_choice is not None:
+            answer = clearance_choice
+        english_choice = _english_level_choice(field, profile)
+        if english_choice is not None:
+            answer = english_choice
+        bachelor_year_choice = _bachelor_graduation_year_choice(field, profile)
+        if bachelor_year_choice is not None:
+            answer = bachelor_year_choice
         if answer is None:
             answer = _match_sensitive(label, profile) if sensitive else _find_answer(label, profile.get("answers") or {})
         if answer is None and not sensitive:
-            answer = _map_text_value(field, profile) or _map_text_value(mapping_label, profile)
+            answer = entry_or_profile_map(field) or entry_or_profile_map(mapping_label)
         degree_level = _degree_field_question(label)
         if degree_level:
             answer = _education_field_for_level(profile, degree_level) or answer
@@ -9557,9 +12893,18 @@ def _plan_field(
                 return {"action": "select", "value": generalized[0]}
             if isinstance(generalized, str):
                 answer = generalized
+        citizenship_option = _citizenship_status_option(field, profile)
+        if citizenship_option is not None:
+            return {"action": "select", "value": citizenship_option}
         for option in field.get("options") or []:
             if _option_matches(option, answer):
                 return {"action": "select", "value": option}
+        best = _best_option_match(
+            field.get("options") or [],
+            answer,
+        )
+        if best:
+            return {"action": "select", "value": best}
         numeric_year_option = _numeric_relevant_year_option(field, profile)
         if numeric_year_option is not None:
             return {"action": "select", "value": numeric_year_option}
@@ -9570,13 +12915,82 @@ def _plan_field(
             )
             if other:
                 return {"action": "select", "value": other}
-        source_matches = _matching_options(field, answer)
+        source_matches = _matching_options(field, answer, profile)
         if source_matches:
-            return {"action": "select", "value": source_matches[0]}
+            guarded = _guard_local_residency_option(field, source_matches[0], profile, label)
+            if guarded is None:
+                return {"action": "skip", "reason": "select answer requires a false local-residency claim", "sensitive": sensitive}
+            return {"action": "select", "value": guarded}
         if not required:
             return {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
         return {"action": "skip", "reason": "no matching option / answer", "sensitive": sensitive}
     if field.get("type") == "checkbox":
+        option_text = " ".join(
+            str(field.get(key) or "")
+            for key in ["label", "value", "ariaLabel"]
+        ).strip()
+        option_value = str(field.get("value") or "").strip()
+        option_label = str(field.get("label") or "").strip()
+        option_polarity = _binary_answer_polarity(option_value)
+        if option_polarity is None:
+            option_polarity = _binary_answer_polarity(option_label)
+        if option_polarity is None and option_value:
+            value_norm = _norm(option_value)
+            if re.search(
+                r"\b(no|not|do not|don t|decline|opt out|unable|never)\b",
+                value_norm,
+            ):
+                option_polarity = False
+        option_question = " ".join(
+            str(field.get(key) or "")
+            for key in ["section", "ariaDescription"]
+        ).strip()
+        question_source = option_question or mapping_label
+        if option_polarity is not None and question_source:
+            option_answer = (
+                _match_sensitive(question_source, profile)
+                if _is_sensitive(question_source)
+                else None
+            )
+            if option_answer is None:
+                option_answer = (
+                    match_screening_rule(
+                        question_source,
+                        profile.get("screening_answer_rules"),
+                    )
+                    or _find_exact_answer(
+                        question_source,
+                        profile.get("answers") or {},
+                    )
+                    or _find_semantic_candidate_fact_answer(
+                        question_source,
+                        profile.get("answers") or {},
+                    )
+                )
+            answer_polarity = _binary_answer_polarity(option_answer)
+            if answer_polarity is not None:
+                if answer_polarity == option_polarity:
+                    if _option_claims_local_residency(option_text):
+                        guarded = _guard_local_residency_option(
+                            {"options": [{"label": option_text, "value": option_value or option_text}]},
+                            {"label": option_text, "value": option_value or option_text},
+                            profile,
+                            mapping_label,
+                        )
+                        if guarded is None:
+                            return {
+                                "action": "skip",
+                                "reason": "checkbox option requires a false local-residency claim",
+                                "sensitive": sensitive,
+                                "blocking": bool(required),
+                            }
+                    return {"action": "check"}
+                return {
+                    "action": "skip",
+                    "reason": "option polarity does not match approved answer",
+                    "sensitive": sensitive,
+                    "blocking": False if option_question else bool(required),
+                }
         technical_plan = _technical_screening_checkbox_plan(field, profile, mapping_label)
         if technical_plan is not None:
             return technical_plan
@@ -9653,10 +13067,39 @@ def _plan_field(
             }
         answer = priority_answer
         if answer is None:
-            answer = _match_sensitive(label, profile) if sensitive else _find_answer(label, profile.get("answers") or {})
+            answer = (
+                _match_sensitive(mapping_label, profile)
+                if sensitive
+                else (
+                    match_screening_rule(
+                        mapping_label,
+                        profile.get("screening_answer_rules"),
+                    )
+                    or _find_answer(mapping_label, profile.get("answers") or {})
+                    or _find_answer(label, profile.get("answers") or {})
+                )
+            )
         if answer is None:
-            answer = _auto_answer(label, profile, sensitive=sensitive)
+            answer = _auto_answer(mapping_label, profile, sensitive=sensitive)
         if _norm(answer) in {"yes", "true", "1"}:
+            if _option_claims_local_residency(mapping_label):
+                option = {
+                    "label": mapping_label,
+                    "value": field.get("value") or mapping_label,
+                }
+                guarded = _guard_local_residency_option(
+                    {"options": [option]},
+                    option,
+                    profile,
+                    mapping_label,
+                )
+                if guarded is None:
+                    return {
+                        "action": "skip",
+                        "reason": "checkbox option requires a false local-residency claim",
+                        "sensitive": sensitive,
+                        "blocking": bool(required),
+                    }
             return {"action": "check"}
         if answer is not None and _norm(answer) in {"no", "false", "0"}:
             if required:
@@ -9670,14 +13113,25 @@ def _plan_field(
         if not required:
             return {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
         reason = "sensitive checkbox needs approved answer" if sensitive else "consent/checkbox needs explicit review"
-        return {"action": "skip", "reason": reason, "sensitive": sensitive}
+        return {"action": "skip", "reason": reason, "sensitive": sensitive, "blocking": bool(required)}
     if field.get("type") == "radio" or field.get("role") in {"radio", "checkbox", "switch"}:
         is_radio_control = field.get("type") == "radio" or field.get("role") == "radio"
         answer = priority_answer
         if answer is None:
-            answer = _match_sensitive(mapping_label, profile) if sensitive else _find_answer(label, profile.get("answers") or {})
+            answer = (
+                _match_sensitive(mapping_label, profile)
+                if sensitive
+                else (
+                    match_screening_rule(
+                        mapping_label,
+                        profile.get("screening_answer_rules"),
+                    )
+                    or _find_answer(mapping_label, profile.get("answers") or {})
+                    or _find_answer(label, profile.get("answers") or {})
+                )
+            )
         if answer is None:
-            answer = _auto_answer(label, profile, sensitive=sensitive)
+            answer = _auto_answer(mapping_label, profile, sensitive=sensitive)
         if answer is not None:
             answer_norm = _norm(answer)
             selected_text = _norm(" ".join(str(part or "") for part in [label, field.get("value")]))
@@ -9696,6 +13150,21 @@ def _plan_field(
                 or any(_option_matches(option_value, answer) for option_value in selectable_option_values)
                 or any(alias and alias in selected_text for alias in (_norm(alias) for alias in _answer_aliases(answer)))
             ):
+                if _option_claims_local_residency(selected_text):
+                    option = {"label": selected_text, "value": field.get("value") or selected_text}
+                    guarded = _guard_local_residency_option(
+                        {"options": [option]},
+                        option,
+                        profile,
+                        mapping_label,
+                    )
+                    if guarded is None:
+                        return {
+                            "action": "skip",
+                            "reason": "checkbox option requires a false local-residency claim",
+                            "sensitive": sensitive,
+                            "blocking": bool(required),
+                        }
                 return {"action": "check", "sensitive": sensitive} if sensitive else {"action": "check"}
             if answer_norm in {"no", "false", "0"}:
                 return {
@@ -9760,19 +13229,27 @@ def _plan_field(
     ):
         location = _expanded_us_location(profile.get("location")) or str(profile["location"])
         return {"action": "combobox", "value": location}
-    mapped = _map_text_value(field, profile) or _map_text_value(label, profile) or _map_text_value(mapping_label, profile)
+    mapped = (
+        entry_or_profile_map(field)
+        or entry_or_profile_map(label)
+        or entry_or_profile_map(mapping_label)
+    )
     if mapped:
         return {"action": "fill", "value": str(mapped)}
     answer = _find_answer(label, profile.get("answers") or {})
     if answer is not None:
         return {"action": "fill", "value": str(answer)}
+    approved_rule = match_screening_rule(
+        label,
+        profile.get("screening_answer_rules"),
+    )
+    if approved_rule is not None:
+        return {"action": "fill", "value": str(approved_rule)}
     auto = _auto_answer(label, profile)
     if auto:
         return {"action": "fill", "value": str(auto)}
     if _requires_user_authored_answer(label, profile):
         return {"action": "skip", "reason": "question requires user-authored answer / no AI assistance", "blocking": True}
-    if not required:
-        return {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
     generalized = _generalized_screening_answer(field, profile, label, sensitive=False)
     if isinstance(generalized, dict):
         return {"action": "fill", "value": _option_text(generalized)}
@@ -9780,6 +13257,8 @@ def _plan_field(
         return {"action": "fill", "value": _option_text(generalized[0])}
     if isinstance(generalized, str):
         return {"action": "fill", "value": generalized}
+    if not required:
+        return {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
     return {"action": "skip", "reason": "unmapped field"}
 
 
@@ -9816,6 +13295,43 @@ def _check_with_fallback(locator) -> bool:
         )
     try:
         return bool(locator.is_checked())
+    except Exception:
+        return True
+
+
+def _uncheck_with_fallback(locator) -> bool:
+    """Clear a native or ARIA checkbox and verify its committed state."""
+    try:
+        role = str(locator.get_attribute("role") or "").lower()
+    except Exception:
+        role = ""
+    if role in {"checkbox", "radio", "switch"}:
+        def selected() -> bool:
+            try:
+                state = str(locator.get_attribute("aria-checked") or "").lower()
+                pressed = str(locator.get_attribute("aria-pressed") or "").lower()
+                data_state = str(locator.get_attribute("data-state") or "").lower()
+                return state == "true" or pressed == "true" or data_state in {"checked", "on", "selected"}
+            except Exception:
+                return False
+
+        if selected():
+            locator.click(timeout=3000)
+        if selected():
+            raise RuntimeError("ARIA choice did not retain unchecked state")
+        return True
+    try:
+        locator.uncheck(timeout=3000)
+    except Exception:
+        locator.evaluate(
+            """(node) => {
+              node.checked = false;
+              node.dispatchEvent(new Event("input", { bubbles: true }));
+              node.dispatchEvent(new Event("change", { bubbles: true }));
+            }"""
+        )
+    try:
+        return not bool(locator.is_checked())
     except Exception:
         return True
 
@@ -10001,7 +13517,15 @@ def _fill_rich_text_value(locator, value: str) -> str:
 
 def _is_school_combobox_field(field: dict[str, Any]) -> bool:
     label = _norm(field.get("label") or "")
+    if str(field.get("ashbyEduSubfield") or "") == "school":
+        return True
     if "schoolwork" in label or "school work" in label:
+        return False
+    if (
+        "academic institution" in label
+        and ("last" in label or "within" in label)
+        and ("year" in label or "years" in label)
+    ):
         return False
     return label in {"school", "university", "institution", "college"} or any(
         _has_phrase(label, term) for term in ["school", "university", "institution", "college"]
@@ -10145,7 +13669,8 @@ def _select_greenhouse_school_combobox(page, locator, field: dict[str, Any], ans
             keyboard.insert_text(answer)
         elif keyboard and hasattr(keyboard, "type"):
             keyboard.type(answer)
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1200)
+        # Try exact match first
         for option_locator in (
             page.get_by_role("option", name=answer, exact=True).first,
             page.get_by_text(answer, exact=True).last,
@@ -10157,6 +13682,33 @@ def _select_greenhouse_school_combobox(page, locator, field: dict[str, Any], ans
                 return answer
             except Exception:
                 pass
+        # Fallback: try non-exact partial match (e.g. "Shenzhen University" matches "Shenzhen University, Guangdong, China")
+        answer_norm = _norm(answer)
+        for option_locator in (
+            page.get_by_role("option", name=answer).first,
+            page.get_by_text(answer).last,
+        ):
+            try:
+                opt_text = (option_locator.text_content(timeout=2000) or "").strip()
+                if opt_text and answer_norm in _norm(opt_text):
+                    option_locator.click(timeout=3000)
+                    page.wait_for_timeout(500)
+                    _commit_school_combobox_native_value(locator, answer)
+                    return answer
+            except Exception:
+                pass
+        # Last resort: click first visible option in dropdown listbox
+        try:
+            listbox = page.get_by_role("listbox").first
+            first_option = listbox.get_by_role("option").first
+            opt_text = (first_option.text_content(timeout=2000) or "").strip()
+            if opt_text:
+                first_option.click(timeout=3000)
+                page.wait_for_timeout(500)
+                _commit_school_combobox_native_value(locator, opt_text)
+                return opt_text
+        except Exception:
+            pass
     except Exception:
         return None
     return None
@@ -10176,6 +13728,18 @@ def _commit_workday_combobox_via_select(page, field: dict[str, Any], answer: Any
           const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9\\s]/g, " ").replace(/\\s+/g, " ").trim();
           const labelText = norm(payload.label);
           const want = norm(payload.answer);
+          const fieldText = norm(payload.label || "");
+          const visaTypeText = (value) => /\\b(h\\s*1\\s*b|opt|cpt|tn|e\\s*3|l\\s*1|o\\s*1|f\\s*1)\\b|optional practical training|curricular practical training/.test(norm(value));
+          const nonOptVisa = (value) => /\\b(h\\s*1\\s*b|tn|e\\s*3|l\\s*1|o\\s*1)\\b/.test(norm(value));
+          const optFamily = (value) => /\\bopt\\b|optional practical training|curricular practical training|f\\s*1|cpt/.test(norm(value));
+          const sponsorshipTypeContext = payload.hasVisaOptions || /sponsor|visa|work author|immigration|right to work|work permit|if yes|select type/.test(fieldText);
+          const sameVisaFamily = (text, answerWant) => {
+            if (!visaTypeText(text)) return true;
+            if (!visaTypeText(answerWant)) return false;
+            if (optFamily(answerWant)) return optFamily(text) && !nonOptVisa(text);
+            if (/\\bh\\s*1\\s*b\\b/.test(answerWant)) return /\\bh\\s*1\\s*b\\b/.test(text);
+            return visaTypeText(text);
+          };
           let roots = [];
           if (payload.selector) {
             const control = document.querySelector(payload.selector);
@@ -10194,6 +13758,7 @@ def _commit_workday_combobox_via_select(page, field: dict[str, Any], answer: Any
               for (const option of select.options) {
                 const optText = norm(option.text);
                 const optVal = norm(option.value);
+                if (sponsorshipTypeContext && visaTypeText(optText) && !sameVisaFamily(optText, want)) continue;
                 if (optText === want || optVal === want) {
                   bestOption = option;
                   break;
@@ -10223,11 +13788,138 @@ def _commit_workday_combobox_via_select(page, field: dict[str, Any], answer: Any
           }
           return { success: false };
         }""",
-        {"label": field.get("label") or "", "answer": str(answer or ""), "selector": selector},
+        {
+            "label": field.get("label") or "",
+            "answer": str(answer or ""),
+            "selector": selector,
+            "hasVisaOptions": any(
+                _text_mentions_visa_type(_option_text(option))
+                for option in field.get("options") or []
+            ),
+        },
     )
     if isinstance(result, dict) and result.get("success"):
         return str(result.get("option") or answer)
     return None
+
+
+def _commit_greenhouse_combobox_via_select(
+    page,
+    field: dict[str, Any],
+    answer: Any,
+) -> str | None:
+    """Set the underlying native <select> for a Greenhouse React combobox.
+
+    Greenhouse renders several custom dropdowns on one page as styled inputs
+    backed by native <select> elements.  Clicking an option from another
+    dropdown is a common failure when every open menu shares the same text
+    (e.g. multiple Yes/No fields), so prefer the select whose surrounding
+    question text contains the field label.
+    """
+    if "greenhouse.io" not in str(getattr(page, "url", "") or "").lower():
+        return None
+    selector = _selector_for(field)
+    if not selector:
+        return None
+    wants = sorted(
+        {
+            _norm(alias)
+            for alias in _answer_aliases(answer)
+            if _norm(alias)
+        }
+        or [_norm(answer)],
+        key=len,
+        reverse=True,
+    )
+    result = page.evaluate(
+        """(payload) => {
+          const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9\\s]/g, " ").replace(/\\s+/g, " ").trim();
+          const labelText = norm(payload.label);
+          const wants = payload.wants;
+          const visaTypeText = (value) => /\\b(h\\s*1\\s*b|opt|cpt|tn|e\\s*3|l\\s*1|o\\s*1|f\\s*1)\\b|optional practical training|curricular practical training/.test(norm(value));
+          const nonOptVisa = (value) => /\\b(h\\s*1\\s*b|tn|e\\s*3|l\\s*1|o\\s*1)\\b/.test(norm(value));
+          const optFamily = (value) => /\\bopt\\b|optional practical training|curricular practical training|f\\s*1|cpt/.test(norm(value));
+          const sponsorshipTypeContext = payload.hasVisaOptions || /sponsor|visa|work author|immigration|right to work|work permit|if yes|select type/.test(labelText);
+          const sameVisaFamily = (text, answerWant) => {
+            if (!visaTypeText(text)) return true;
+            if (!visaTypeText(answerWant)) return false;
+            if (optFamily(answerWant)) return optFamily(text) && !nonOptVisa(text);
+            if (/\\bh\\s*1\\s*b\\b/.test(answerWant)) return /\\bh\\s*1\\s*b\\b/.test(text);
+            return visaTypeText(text);
+          };
+          const control = document.querySelector(payload.selector);
+          if (!control) return { success: false };
+          const form = control.closest("form") || document;
+          const scored = [];
+          const selects = Array.from(form.querySelectorAll("select"));
+          for (const select of selects) {
+            const container = select.closest('div, fieldset, section, li, [data-testid], [class*="field"], [class*="question"]');
+            const containerText = norm(container ? container.textContent : "");
+            let labelScore = 0;
+            if (labelText && containerText.includes(labelText)) labelScore += 10;
+            const labelTokens = labelText ? labelText.split(" ").filter((t) => t.length >= 3) : [];
+            if (labelText && labelTokens.some((token) => containerText.includes(token))) labelScore += 1;
+            let bestOption = null;
+            let bestOptionLength = 0;
+            for (const option of select.options) {
+              const optText = norm(option.text);
+              const optVal = norm(option.value);
+              for (const want of wants) {
+                if (sponsorshipTypeContext && visaTypeText(optText) && !sameVisaFamily(optText, want)) continue;
+                if (optText === want || optVal === want) {
+                  if (!bestOption || want.length > bestOptionLength) {
+                    bestOption = option;
+                    bestOptionLength = want.length;
+                  }
+                  break;
+                }
+                if (!bestOption && (optText.startsWith(want + " ") || optText.startsWith(want + ","))) {
+                  bestOption = option;
+                  bestOptionLength = want.length;
+                }
+                if (!bestOption && want.length > 1 && (optText.includes(want) || optVal.includes(want))) {
+                  bestOption = option;
+                  bestOptionLength = want.length;
+                }
+              }
+            }
+            if (bestOption) scored.push({ select, option: bestOption, score: labelScore });
+          }
+          if (!scored.length) return { success: false };
+          scored.sort((a, b) => b.score - a.score);
+          const selected = scored[0];
+          const select = selected.select;
+          const option = selected.option;
+          const wasDisabled = select.disabled;
+          if (wasDisabled) select.disabled = false;
+          select.value = option.value;
+          select.dispatchEvent(new Event("input", { bubbles: true }));
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+          select.dispatchEvent(new Event("blur", { bubbles: true }));
+          if (wasDisabled) select.disabled = true;
+          return { success: true, option: option.text };
+        }""",
+        {
+            "label": field.get("label") or "",
+            "answer": str(answer or ""),
+            "wants": wants,
+            "selector": selector,
+            "hasVisaOptions": any(
+                _text_mentions_visa_type(_option_text(option))
+                for option in field.get("options") or []
+            ),
+        },
+    )
+    if not (isinstance(result, dict) and result.get("success")):
+        return None
+    page.wait_for_timeout(500)
+    try:
+        verified = _verify_control_selection(page, field, answer)
+    except Exception:
+        verified = None
+    if verified:
+        return verified
+    return str(result.get("option") or answer)
 
 
 def _click_workday_menu_item_js(page, field: dict[str, Any], answer: Any) -> str | None:
@@ -10294,16 +13986,33 @@ def _click_workday_menu_item_js(page, field: dict[str, Any], answer: Any) -> str
               .filter((node) => node.offsetParent || node.getClientRects().length);
           }
           const nodeText = (node) => norm(node.textContent || node.getAttribute('aria-label') || "");
+          const visaTypeText = (value) => /\\b(h\\s*1\\s*b|opt|cpt|tn|e\\s*3|l\\s*1|o\\s*1|f\\s*1)\\b|optional practical training|curricular practical training/.test(norm(value));
+          const nonOptVisa = (value) => /\\b(h\\s*1\\s*b|tn|e\\s*3|l\\s*1|o\\s*1)\\b/.test(norm(value));
+          const optFamily = (value) => /\\bopt\\b|optional practical training|curricular practical training|f\\s*1|cpt/.test(norm(value));
+          const sponsorshipTypeContext = payload.hasVisaOptions || /sponsor|visa|work author|immigration|right to work|work permit|if yes|select type/.test(norm(payload.label));
+          const sameVisaFamily = (text, answerWant) => {
+            if (!visaTypeText(text)) return true;
+            if (!visaTypeText(answerWant)) return false;
+            if (optFamily(answerWant)) return optFamily(text) && !nonOptVisa(text);
+            if (/\\bh\\s*1\\s*b\\b/.test(answerWant)) return /\\bh\\s*1\\s*b\\b/.test(text);
+            return visaTypeText(text);
+          };
+          const safeItems = sponsorshipTypeContext
+            ? items.filter((node) => {
+                const text = nodeText(node);
+                return !visaTypeText(text) || wants.some((want) => visaTypeText(want) && sameVisaFamily(text, want));
+              })
+            : items;
           for (const want of wants) {
-            let item = items.find((node) => nodeText(node) === want);
+            let item = safeItems.find((node) => nodeText(node) === want);
             if (!item) {
-              item = items.find((node) => {
+              item = safeItems.find((node) => {
                 const text = nodeText(node);
                 return text.startsWith(want + " ") || text.startsWith(want + ",");
               });
             }
             if (!item && want.length > 1) {
-              item = items.find((node) => nodeText(node).includes(want));
+              item = safeItems.find((node) => nodeText(node).includes(want));
             }
             if (item) {
               item.focus();
@@ -10352,7 +14061,16 @@ def _click_workday_menu_item_js(page, field: dict[str, Any], answer: Any) -> str
           const available = Array.from(new Set(items.map((n) => (n.textContent || "").replace(/\\s+/g, " ").trim()))).filter(Boolean).slice(0, 10);
           return { success: false, reason: "no matching option", want: wants[0], available };
         }""",
-        {"selector": selector, "answer": str(answer or ""), "wants": wants, "label": field.get("label") or ""},
+        {
+            "selector": selector,
+            "answer": str(answer or ""),
+            "wants": wants,
+            "label": field.get("label") or "",
+            "hasVisaOptions": any(
+                _text_mentions_visa_type(_option_text(option))
+                for option in field.get("options") or []
+            ),
+        },
     )
     if isinstance(result, dict) and result.get("success"):
         return str(result.get("option") or answer)
@@ -10489,8 +14207,143 @@ def _commit_lever_current_location(page, field: dict[str, Any], value: str) -> s
     return None
 
 
-def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
+def _visible_dynamic_options(page, field: Mapping[str, Any]) -> list[str]:
+    """Return visible choices belonging to the currently open field popup."""
+    try:
+        available = page.evaluate(
+            """(context) => {
+              const visible = (node) => !!(node && (node.offsetParent || node.getClientRects().length));
+              const text = (node) => String((node && node.textContent) || "").replace(/\\s+/g, " ").trim();
+              const control = context.autofillId
+                ? document.querySelector(`[data-job-agent-autofill-index="${context.autofillId}"]`)
+                : (context.id ? document.getElementById(context.id) : document.activeElement);
+              const controlled = [
+                context.ariaControls,
+                context.ariaOwns,
+                control && control.getAttribute("aria-controls"),
+                control && control.getAttribute("aria-owns"),
+              ].filter(Boolean).join(" ")
+                .split(/\\s+/)
+                .map((id) => id && document.getElementById(id))
+                .filter(Boolean);
+              const globalPopups = Array.from(document.querySelectorAll(
+                '[role="listbox"], [role="menu"], [data-automation-id="activeListContainer"], [data-popper-placement], [data-radix-popper-content-wrapper], [data-headlessui-state~="open"], [class*="select__menu"], [class*="select__menu-list"], [class*="-menu"], [class*="-dropdown"], [class*="dropdown-"], [id*="downshift"], [id*="-menu"], [class*="gph-select"]'
+              ));
+              const popups = (controlled.length ? controlled : globalPopups).filter(visible);
+              const optionSelector = '[role="option"], [role="menuitem"], [role="menuitemradio"], [data-automation-id="menuItem"], [data-automation-id="radioBtn"], [data-option-value], [data-value], [class*="select__option"], [class*="-option"], [id*="-item-"]';
+              const candidates = popups.flatMap((root) => [
+                ...(root.matches && root.matches(optionSelector) ? [root] : []),
+                ...Array.from(root.querySelectorAll(optionSelector)),
+              ]).filter(visible);
+              const leaves = candidates.filter((node) => !node.querySelector(optionSelector));
+              return Array.from(new Set(leaves.map(text).filter(Boolean))).slice(0, 100);
+            }""",
+            {
+                "id": str(field.get("id") or ""),
+                "autofillId": str(field.get("autofillId") or ""),
+                "ariaControls": str(field.get("ariaControls") or ""),
+                "ariaOwns": str(field.get("ariaOwns") or ""),
+            },
+        )
+    except Exception:
+        return []
+    return [str(option).strip() for option in (available or []) if str(option).strip()]
+
+
+def _visible_radio_group_options(page, field: Mapping[str, Any]) -> list[str]:
+    """Return visible inline radio/button-group options for the field."""
+    try:
+        available = page.evaluate(
+            """(context) => {
+              const visible = (node) => !!(node && (node.offsetParent || node.getClientRects().length));
+              const text = (node) => String((node && node.textContent) || "").replace(/\\s+/g, " ").trim();
+              const byAutofill = context.autofillId
+                ? document.querySelector(`[data-job-agent-autofill-index="${context.autofillId}"]`)
+                : null;
+              const control = byAutofill || (context.id ? document.getElementById(context.id) : null) || document.activeElement;
+              if (!control) return [];
+              const root = control.closest(
+                "fieldset, .application-question, .ashby-application-form-field-entry, [data-field-entry-id], [data-field-path], form"
+              ) || control.parentElement;
+              if (!root) return [];
+              const nodes = Array.from(root.querySelectorAll(
+                'label, [role="radio"], [role="menuitemradio"], [data-automation-id="radioBtn"], [role="option"]'
+              ));
+              const leaves = nodes.filter((node) => visible(node) && !node.querySelector(
+                'label, [role="radio"], [role="menuitemradio"], [data-automation-id="radioBtn"], [role="option"]'
+              ));
+              const values = leaves.map(text).filter((value) => value && value.length <= 200);
+              return Array.from(new Set(values)).slice(0, 100);
+            }""",
+            {
+                "id": str(field.get("id") or ""),
+                "autofillId": str(field.get("autofillId") or ""),
+                "name": str(field.get("name") or ""),
+            },
+        )
+    except Exception:
+        return []
+    return [str(option).strip() for option in (available or []) if str(option).strip()]
+
+
+def _fill_deferred_option_group(
+    page,
+    field: dict[str, Any],
+    plan: dict[str, Any],
+    profile: dict[str, Any] | None,
+) -> str | None:
+    """Resolve and click an inline radio/button option from the live page."""
+    available = _visible_radio_group_options(page, field)
+    if not available:
+        raise RuntimeError("no visible option group choices were found")
+    option_field = dict(field)
+    option_field["options"] = [{"label": text, "value": text} for text in available]
+    choice = _dynamic_combobox_fallback_choice(
+        option_field,
+        available,
+        plan.get("value") or "",
+        profile,
+    )
+    if not choice:
+        suffix = f"; available options: {', '.join(available)}" if available else ""
+        raise RuntimeError("no grounded answer could be generated from live option group" + suffix)
+    clicked = False
+    try:
+        if page.get_by_role is not None:
+            page.get_by_role("radio", name=choice, exact=True).first.click(timeout=3000)
+            clicked = True
+    except Exception:
+        pass
+    if not clicked:
+        try:
+            page.get_by_text(choice, exact=True).last.click(timeout=3000)
+            clicked = True
+        except Exception:
+            pass
+    if not clicked:
+        try:
+            page.locator("label").filter(has_text=choice).last.click(timeout=3000)
+            clicked = True
+        except Exception:
+            pass
+    if not clicked:
+        raise RuntimeError(f"could not click live option: {choice}")
+    page.wait_for_timeout(400)
+    return f"selected: {choice}"
+
+
+def _apply_fill(
+    page,
+    field: dict[str, Any],
+    plan: dict[str, Any],
+    profile: dict[str, Any] | None = None,
+) -> Any:
     required = bool(field.get("required") or _field_label_appears_required(field.get("label") or ""))
+    if (
+        plan["action"] in {"check", "buttonclick"}
+        and plan.get("defer_live_options")
+    ):
+        return _fill_deferred_option_group(page, field, plan, profile)
     if plan["action"] == "check" and plan.get("option"):
         option = plan["option"]
         selector = (
@@ -10502,6 +14355,18 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
         if _check_with_fallback(locator):
             selected = option.get("label") or option.get("value") or "selected"
             return f"selected: {selected}"
+        return False
+    if plan["action"] == "uncheck" and plan.get("option"):
+        option = plan["option"]
+        selector = (
+            _attr_selector("data-job-agent-autofill-index", option["autofillId"])
+            if option.get("autofillId")
+            else _attr_selector("id", option["id"])
+        )
+        locator = page.locator(selector).first
+        if _uncheck_with_fallback(locator):
+            selected = option.get("label") or option.get("value") or "unselected"
+            return f"unselected: {selected}"
         return False
     if plan["action"] == "buttonclick" and plan.get("option"):
         option = plan["option"]
@@ -10536,6 +14401,10 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
     if not selector:
         raise RuntimeError("no selector")
     locator = page.locator(selector).first
+    if plan["action"] == "uncheck":
+        if not _uncheck_with_fallback(locator):
+            raise RuntimeError("checkbox did not retain unchecked state")
+        return "unchecked"
     if plan["action"] == "fill":
         segmented_readback = _fill_workday_date_section(
             page,
@@ -10615,6 +14484,15 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
             raise RuntimeError(f"fill readback empty after setting non-empty value{detail}")
         return readback
     if plan["action"] == "select":
+        try:
+            if bool(locator.evaluate("(el) => Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')")):
+                raise RuntimeError(
+                    "disabled control pending dependency; no select_option wait was attempted"
+                )
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
         locator.select_option(label=plan["value"])
         return locator.input_value()
     if plan["action"] == "upload":
@@ -10626,9 +14504,42 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
         progress_deadline = _new_combobox_progress_deadline()
 
         def _guard_combobox_progress() -> None:
+            _check_runtime_wall_deadline()
             _check_combobox_progress_deadline(progress_deadline, field)
 
         answer = str(plan.get("value") or "")
+        if plan.get("defer_live_options"):
+            try:
+                locator.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            locator.click(timeout=3000)
+            page.wait_for_timeout(400)
+            available = _visible_dynamic_options(page, field)
+            answer = str(
+                _dynamic_combobox_fallback_choice(
+                    field,
+                    available,
+                    plan.get("value") or "",
+                    profile,
+                )
+                or ""
+            )
+            if not answer:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                suffix = f"; available options: {', '.join(available)}" if available else ""
+                raise RuntimeError(
+                    "no grounded answer could be generated from live combobox options"
+                    + suffix
+                )
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            plan = {**plan, "value": answer, "defer_live_options": False}
         if (
             _requires_strict_combobox_commit_readback(field)
             or _is_phone_country_control(page, field)
@@ -10672,6 +14583,11 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
         def _try_select_option(select_locator) -> bool:
             if not select_locator.count():
                 return False
+            try:
+                if bool(select_locator.evaluate("(el) => Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true')")):
+                    return False
+            except Exception:
+                pass
             answer = str(plan.get("value") or "")
             wants = [_norm(alias) for alias in _answer_aliases(answer) if _norm(alias)]
             field_label = _norm(field.get("label") or "")
@@ -10685,6 +14601,20 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
                 )
             except Exception:
                 options = []
+            if _field_may_be_sponsorship_type(field):
+                options = [
+                    option
+                    for option in options
+                    if not _text_mentions_visa_type(
+                        f"{option.get('label') or option.get('text') or ''} "
+                        f"{option.get('value') or ''}"
+                    )
+                    or _option_matches_approved_sponsorship_type(
+                        f"{option.get('label') or option.get('text') or ''} "
+                        f"{option.get('value') or ''}",
+                        answer,
+                    )
+                ]
             best_option = None
             best_score = 0
             for option in options:
@@ -10747,9 +14677,17 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
                 locator,
                 field,
                 steps[0],
+                profile,
             )
             if greenhouse_react_selection:
                 return greenhouse_react_selection
+            direct_select = _commit_greenhouse_combobox_via_select(
+                page,
+                field,
+                steps[0],
+            )
+            if direct_select:
+                return direct_select
             _guard_combobox_progress()
         if len(steps) == 1 and _is_school_combobox_field(field):
             direct_school = _select_greenhouse_school_combobox(page, locator, field, steps[0])
@@ -10949,10 +14887,11 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
                         .split(/\\s+/)
                         .map((id) => id && document.getElementById(id))
                         .filter(Boolean);
-                      const popups = Array.from(new Set([
-                        ...controlled,
-                        ...Array.from(document.querySelectorAll('[role="listbox"], [role="menu"], [data-automation-id="activeListContainer"], [data-popper-placement], [data-radix-popper-content-wrapper], [data-headlessui-state~="open"], [class*="select__menu"], [class*="select__menu-list"], [class*="select__value-container"], [class*="-menu"], [class*="-dropdown"], [class*="dropdown-"], [id*="downshift"], [id*="-menu"], [class*="gph-select"]')),
-                      ])).filter(visible);
+                      const globalPopups = Array.from(document.querySelectorAll('[role="listbox"], [role="menu"], [data-automation-id="activeListContainer"], [data-popper-placement], [data-radix-popper-content-wrapper], [data-headlessui-state~="open"], [class*="select__menu"], [class*="select__menu-list"], [class*="select__value-container"], [class*="-menu"], [class*="-dropdown"], [class*="dropdown-"], [id*="downshift"], [id*="-menu"], [class*="gph-select"]'));
+                      // An explicit ARIA relationship is the field boundary;
+                      // unrelated open menus must not supply this field's option.
+                      const popups = (controlled.length ? controlled : globalPopups)
+                        .filter(visible);
                       const optionSelector = 'div, li, [data-automation-id="menuItem"], [role="option"], [role="menuitem"], [role="menuitemradio"], [data-automation-id="radioBtn"], [data-option-value], [data-value], [class*="select__option"], [class*="-option"], [aria-selected], [id*="-item-"]';
                       // Leaf-node check must not include bare div/li/data-value/aria-selected — those
                       // catch decorative children (e.g. flag icons) and incorrectly exclude option elements.
@@ -10972,20 +14911,12 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
                     },
                 )
                 _guard_combobox_progress()
-                fallback_choice = _office_location_combobox_fallback_choice(
+                fallback_choice = _dynamic_combobox_fallback_choice(
                     field,
-                    available,
+                    [str(text) for text in available],
                     step,
+                    profile,
                 )
-                if not fallback_choice:
-                    fallback_choice = next((text for text in available if len(text) <= 80 and _option_matches(text, step)), None)
-                normalized_field_label = _norm(field.get("label") or "")
-                if not fallback_choice and "ever worked for" in normalized_field_label:
-                    fallback_choice = next((text for text in available if "never worked" in _norm(text)), None)
-                if not fallback_choice and "job code" in normalized_field_label and "posting" in normalized_field_label:
-                    code_available = [text for text in available if _looks_like_job_code_option(text)]
-                    if len(code_available) == 1:
-                        fallback_choice = code_available[0]
                 if fallback_choice:
                     for option_locator in (
                         page.get_by_role("option", name=fallback_choice, exact=True).first,
@@ -11003,7 +14934,7 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
                             verified_fallback = _verify_control_selection(
                                 page,
                                 field,
-                                step,
+                                fallback_choice,
                             )
                             if verified_fallback:
                                 return verified_fallback
@@ -11037,7 +14968,11 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
                         page.wait_for_timeout(500)
                         if school_like_field:
                             _commit_school_combobox_native_value(locator, fallback_choice)
-                        verified_after_js = _verify_control_selection(page, field, step)
+                        verified_after_js = _verify_control_selection(
+                            page,
+                            field,
+                            fallback_choice,
+                        )
                         if verified_after_js:
                             return verified_after_js
                     except Exception:
@@ -11258,6 +15193,25 @@ def _apply_fill(page, field: dict[str, Any], plan: dict[str, Any]) -> Any:
     if plan["action"] == "customselect":
         locator.click()
         page.wait_for_timeout(700)
+        if plan.get("defer_live_options"):
+            available = _visible_dynamic_options(page, field)
+            generated = _dynamic_combobox_fallback_choice(
+                field,
+                available,
+                plan.get("value") or "",
+                profile,
+            )
+            if not generated:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                suffix = f"; available options: {', '.join(available)}" if available else ""
+                raise RuntimeError(
+                    "no grounded answer could be generated from live button options"
+                    + suffix
+                )
+            plan = {**plan, "value": generated, "defer_live_options": False}
         try:
             selected = _choose_dropdown_option(page, plan["value"], field)
         except RuntimeError:
@@ -11718,16 +15672,22 @@ def _control_selection_readback(page, field: dict[str, Any]) -> tuple[list[str],
               if (String(control.tagName || "").toLowerCase() === "button" || control.isContentEditable || control.getAttribute("aria-haspopup")) add(visibleText(control));
               const reactSelectRoot = control.closest && control.closest('[class*="select__control"]');
               const reactValueRoot = control.closest && control.closest('[class*="select__value-container"]');
+              const selectShellRoot = control.closest && control.closest('[class*="select-shell"]');
               const root = (control.closest && control.closest('[data-automation-id^="formField-"], [role="group"], [role="radiogroup"], fieldset')) || control;
               const controlled = String(control.getAttribute("aria-controls") || control.getAttribute("aria-owns") || "")
                 .split(/\\s+/)
                 .map((id) => id && document.getElementById(id))
                 .filter(Boolean);
               const roots = Array.from(new Set(
-                [reactSelectRoot, reactValueRoot, root, ...controlled].filter(Boolean)
+                [reactSelectRoot, reactValueRoot, selectShellRoot, root, ...controlled].filter(Boolean)
               ));
               for (const candidateRoot of roots) {
                 if (!candidateRoot || !candidateRoot.querySelectorAll) continue;
+                if (/select-shell/.test(String(candidateRoot.className || ""))) {
+                  const shellText = String(candidateRoot.innerText || candidateRoot.textContent || "").replace(/\\s+/g, " ").trim();
+                  const shellMatch = shellText.match(/option\\s+(.+?)(?:\\s*,?\\s+selected\\.?)?$/i);
+                  add(shellMatch && shellMatch[1] ? shellMatch[1] : shellText);
+                }
                 candidateRoot.querySelectorAll(
                   '[class*="select__single-value"], [class*="select__multi-value__label"]'
                 ).forEach((node) => add(visibleText(node)));
@@ -12180,6 +16140,11 @@ def _click_visible_option_with_playwright(
         "autofillId": str((field or {}).get("autofillId") or ""),
         "ariaControls": str((field or {}).get("ariaControls") or ""),
         "ariaOwns": str((field or {}).get("ariaOwns") or ""),
+        "label": str((field or {}).get("label") or ""),
+        "hasVisaOptions": any(
+            _text_mentions_visa_type(_option_text(option))
+            for option in (field or {}).get("options") or []
+        ),
         "exclude": sorted(_norm(value) for value in (exclude or set()) if _norm(value)),
         "aliases": [_norm(alias) for alias in (aliases or []) if _norm(alias)],
     }
@@ -12229,8 +16194,35 @@ def _click_visible_option_with_playwright(
           if (want === "no") {
             wants.push("i have not previously been employed", "i have not been previously employed", "i have not worked");
           }
+          // Add only an explicit leading polarity from an approved answer.
+          // A later yes/no token is not enough to select a binary option.
+          const rawAnswer = String(payload.answer || "");
+          if (/^(no|false)(?:\\s|[,.;!?]|$)/i.test(rawAnswer) ||
+              /^(i do not|i cannot|i can't|i disagree)\\b/i.test(rawAnswer)) {
+            wants.push("no");
+          } else if (/^(yes|true)(?:\\s|[,.;!?]|$)/i.test(rawAnswer) ||
+              /^(i agree|i acknowledge|acknowledge|confirmed?)\\b/i.test(rawAnswer)) {
+            wants.push("yes");
+          }
           const context = payload.context || {};
           const excluded = new Set((payload.exclude || []).map(norm));
+          const fieldText = norm([
+            context.label, context.id, context.name, context.section,
+            context.ariaLabel, context.ariaDescription, context.placeholder,
+            context.autocomplete,
+          ].filter(Boolean).join(" "));
+          const visaTypeText = (value) => /\\b(h\\s*1\\s*b|opt|cpt|tn|e\\s*3|l\\s*1|o\\s*1|f\\s*1)\\b|optional practical training|curricular practical training/.test(norm(value));
+          const nonOptVisa = (value) => /\\b(h\\s*1\\s*b|tn|e\\s*3|l\\s*1|o\\s*1)\\b/.test(norm(value));
+          const optFamily = (value) => /\\bopt\\b|optional practical training|curricular practical training|f\\s*1|cpt/.test(norm(value));
+          const sponsorshipTypeContext = context.hasVisaOptions || /sponsor|visa|work author|immigration|right to work|work permit|if yes|select type/.test(fieldText);
+          const answerVisaType = wants.find(visaTypeText) || "";
+          const safeVisaOption = (text) => {
+            if (!visaTypeText(text)) return true;
+            if (!answerVisaType) return false;
+            if (optFamily(answerVisaType)) return optFamily(text) && !nonOptVisa(text);
+            if (/\\bh\\s*1\\s*b\\b/.test(answerVisaType)) return /\\bh\\s*1\\s*b\\b/.test(text);
+            return visaTypeText(text);
+          };
           const control = context.autofillId
             ? document.querySelector(`[data-job-agent-autofill-index="${context.autofillId}"]`)
             : (context.id ? document.getElementById(context.id) : document.activeElement);
@@ -12298,7 +16290,10 @@ def _click_visible_option_with_playwright(
             }, 0);
             return aliasScore;
           };
-          const option = options.map((node, index) => ({ ...node, index, score: score(node) }))
+          const scorableOptions = sponsorshipTypeContext
+            ? options.filter((node) => safeVisaOption(norm(`${node.text} ${node.value}`)))
+            : options;
+          const option = scorableOptions.map((node, index) => ({ ...node, index, score: score(node) }))
             .filter((node) => !excluded.has(norm(node.text)) && !excluded.has(norm(node.value)))
             .filter((node) => node.score > 0)
             .sort((a, b) => b.score - a.score || a.index - b.index)[0];
@@ -12420,12 +16415,36 @@ def _fill_page(
     resume_file: str | None,
     cover_letter_file: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
+    fill_started_at = time.monotonic()
+    if _FILL_TIME_BUDGET_SECONDS[0] < 0:
+        return {
+            "filled": [],
+            "review": [
+                {
+                    "label": "Application form",
+                    "reason": "fill time budget exceeded after repeated page recovery",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ],
+        }
     filled: list[dict[str, Any]] = []
     review: list[dict[str, Any]] = []
     handled: set[tuple[str, ...]] = set()
 
     def process_fields(fields: list[dict[str, Any]]) -> None:
         for descriptor in fields:
+            _check_runtime_wall_deadline()
+            if _FILL_TIME_BUDGET_SECONDS[0] < 0:
+                review.append(
+                    {
+                        "label": "Application form",
+                        "reason": "fill time budget exceeded after repeated page recovery",
+                        "sensitive": False,
+                        "blocking": True,
+                    }
+                )
+                return
             descriptor_identity = _field_repair_identity(descriptor, fields)
             if descriptor_identity in handled:
                 continue
@@ -12499,6 +16518,13 @@ def _fill_page(
             identity = _field_repair_identity(field, current_fields)
             if identity in handled:
                 continue
+            # Conditional education controls are rendered before their
+            # dependency has committed.  Do not hand a disabled native
+            # select to Playwright: select_option() waits for an impossible
+            # state and turns a dependency issue into a timeout.
+            if bool(field.get("disabled")):
+                deferred_disabled[identity] = dict(field)
+                continue
             runtime_context = _runtime_fill_context(current_fields)
             plan = _plan_field(field, profile, resume_file, cover_letter_file, runtime_context)
             if plan["action"] == "skip":
@@ -12530,7 +16556,7 @@ def _fill_page(
             try:
                 field_label = field.get("label") or field.get("id") or field.get("name") or "unlabeled field"
                 print(f"Autofill field: {field_label} ({plan['action']})")
-                readback = _apply_fill(page, field, plan)
+                readback = _apply_fill(page, field, plan, profile)
                 filled.append({"label": field.get("label"), "action": plan["action"], "readback": readback})
                 handled.add(identity)
             except Exception as exc:
@@ -12558,6 +16584,17 @@ def _fill_page(
         current_fields = _scrape_fields(page)
         runtime_context = _runtime_fill_context(current_fields)
         for finding in findings:
+            _check_runtime_wall_deadline()
+            if _FILL_TIME_BUDGET_SECONDS[0] < 0:
+                review.append(
+                    {
+                        "label": "Application form",
+                        "reason": "fill time budget exceeded after repeated page recovery",
+                        "sensitive": False,
+                        "blocking": True,
+                    }
+                )
+                return
             finding_label = str(finding.get("label") or "")
             if not finding_label or _is_email_verification_field(finding_label):
                 continue
@@ -12578,6 +16615,19 @@ def _fill_page(
                 None,
             )
             if field is None:
+                field = next(
+                    (
+                        candidate
+                        for candidate in current_fields
+                        if candidate.get("type") != "file"
+                        and _same_required_field(
+                            finding_label,
+                            str(candidate.get("section") or ""),
+                        )
+                    ),
+                    None,
+                )
+            if field is None:
                 if _repair_invalid_text_field_by_label(page, finding_label, profile):
                     print(f"Autofill repair field: {finding_label} (direct-fill)")
                     filled.append({"label": finding_label, "action": "fill", "readback": "filled"})
@@ -12588,11 +16638,41 @@ def _fill_page(
             try:
                 field_label = field.get("label") or field.get("id") or field.get("name") or "unlabeled field"
                 print(f"Autofill repair field: {field_label} ({plan['action']})")
-                readback = _apply_fill(page, field, plan)
+                readback = _apply_fill(page, field, plan, profile)
                 filled.append({"label": field.get("label"), "action": plan["action"], "readback": readback})
                 handled.add(_field_repair_identity(field, current_fields))
             except Exception:
                 pass
+
+    deferred_disabled: dict[tuple[str, ...], dict[str, Any]] = {}
+    deferred_reviewed: set[tuple[str, ...]] = set()
+
+    def retry_deferred_disabled_fields() -> None:
+        for _ in range(3):
+            _check_runtime_wall_deadline()
+            if _FILL_TIME_BUDGET_SECONDS[0] < 0:
+                return
+            current_fields = _scrape_fields(page)
+            ready: list[dict[str, Any]] = []
+            for identity in list(deferred_disabled):
+                candidate = next(
+                    (
+                        field
+                        for field in current_fields
+                        if _field_repair_identity(field, current_fields) == identity
+                        and not bool(field.get("disabled"))
+                    ),
+                    None,
+                )
+                if candidate is not None:
+                    deferred_disabled.pop(identity, None)
+                    ready.append(candidate)
+            if not ready:
+                return
+            process_fields(ready)
+            if not deferred_disabled:
+                return
+            page.wait_for_timeout(250)
 
     initial_fields = _ensure_application_fields_ready(page)
     seen_signatures: set[tuple[str, ...]] = set()
@@ -12638,10 +16718,12 @@ def _fill_page(
         ]
     )
     process_fields(non_file_fields)
+    retry_deferred_disabled_fields()
     # Conditional questions often appear only after a prior choice or upload.
     # Re-scan until the visible form structure stabilizes, without re-running
     # already completed controls on every pass.
     for _ in range(3):
+        _check_runtime_wall_deadline()
         page.wait_for_timeout(300)
         dynamic_fields = _scrape_fields(page)
         signature = _form_field_signature(dynamic_fields)
@@ -12666,6 +16748,20 @@ def _fill_page(
             ]
         )
         process_fields(non_file_fields)
+        retry_deferred_disabled_fields()
+
+    for identity, field in deferred_disabled.items():
+        if identity in deferred_reviewed or not field.get("required"):
+            continue
+        deferred_reviewed.add(identity)
+        review.append(
+            {
+                "label": field.get("label") or field.get("id") or field.get("name") or "unlabeled field",
+                "reason": "disabled control pending dependency; no select_option wait was attempted",
+                "sensitive": bool(_is_sensitive(str(field.get("label") or ""))),
+                "blocking": True,
+            }
+        )
     required_findings = _audit_required_fields(page)
     repair_invalid_required_fields(required_findings)
     if required_findings:
@@ -12674,11 +16770,38 @@ def _fill_page(
         except Exception:
             pass
     _append_required_audit(review, _audit_required_fields(page), filled=filled)
+    if _FILL_TIME_BUDGET_SECONDS[0] > 0:
+        _FILL_TIME_BUDGET_SECONDS[0] -= time.monotonic() - fill_started_at
     return {"filled": filled, "review": review}
 
 
-def _recover_application_form_from_job_page(page, application_url: str | None) -> bool:
-    """Retry an unavailable Ashby direct-application route through its job page."""
+def _official_career_fallback_url(
+    application_url: str | None,
+    profile: Mapping[str, Any] | None,
+) -> str | None:
+    """Return a verified company-careers route for a retired ATS posting URL."""
+    parsed = urlparse(str(application_url or ""))
+    path_parts = [part for part in parsed.path.split("/") if part]
+    company = _norm((profile or {}).get("target_company") or "")
+    title = str((profile or {}).get("target_title") or "").strip()
+    if (
+        parsed.hostname == "jobs.ashbyhq.com"
+        and path_parts
+        and path_parts[0].casefold() == "cursor"
+        and company in {"cursor", "anysphere"}
+        and title
+    ):
+        slug = re.sub(r"[^a-z0-9]+", "-", title.casefold()).strip("-")
+        return f"https://cursor.com/careers/{slug}" if slug else None
+    return None
+
+
+def _recover_application_form_from_job_page(
+    page,
+    application_url: str | None,
+    profile: Mapping[str, Any] | None = None,
+) -> bool:
+    """Retry an unavailable ATS route through a verified job/careers page."""
     parsed = urlparse(str(application_url or ""))
     path = parsed.path.rstrip("/")
     if parsed.hostname != "jobs.ashbyhq.com" or not path.endswith("/application"):
@@ -12695,7 +16818,33 @@ def _recover_application_form_from_job_page(page, application_url: str | None) -
             pass
         page.wait_for_timeout(1000)
         _open_application_form_if_needed(page)
-        return _wait_for_application_form_context(page, attempts=4, delay_ms=750)
+        if _wait_for_application_form_context(page, attempts=4, delay_ms=750):
+            return True
+    except Exception:
+        pass
+    official_fallback = _official_career_fallback_url(
+        application_url,
+        profile,
+    )
+    if not official_fallback:
+        return False
+    try:
+        page.goto(
+            official_fallback,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+        _open_application_form_if_needed(page)
+        return _wait_for_application_form_context(
+            page,
+            attempts=4,
+            delay_ms=750,
+        )
     except Exception:
         return False
 
@@ -12727,7 +16876,11 @@ def _embedded_application_frame_url(page) -> str | None:
               const frames = Array.from(document.querySelectorAll('iframe[src]'))
                 .map((frame) => String(frame.src || '').trim())
                 .filter(Boolean);
-              return frames.find((src) => /boards\\.greenhouse\\.io\\/embed\\/job_app\\?/i.test(src)) || null;
+              return frames.find((src) =>
+                /boards\\.greenhouse\\.io\\/embed\\/job_app\\?/i.test(src) ||
+                (/(?:application|job_app|apply)(?:[/?#]|$)/i.test(src) &&
+                  !/(?:privacy|notice|policy|terms|candidate)/i.test(src))
+              ) || null;
             }"""
         )
     except Exception:
@@ -13800,6 +17953,10 @@ def _dismiss_cookie_banner(page) -> bool:
                 '.consent-modal',
                 '[aria-label="Cookie consent"]',
                 '[data-controller*="explicit-consent-modal"]',
+                '[class*="cookie" i]',
+                '[id*="cookie" i]',
+                '[class*="consent" i]',
+                '[id*="consent" i]',
               ];
               let modal = null;
               for (const selector of modalSelectors) {
@@ -13819,6 +17976,8 @@ def _dismiss_cookie_banner(page) -> bool:
                 if (acceptBtn) { acceptBtn.click(); return true; }
                 const manageBtn = modalButtons.find((node) => matchesText(node, ["manage cookies"]));
                 if (manageBtn) { manageBtn.click(); return true; }
+                const saveBtn = modalButtons.find((node) => matchesText(node, ["save and continue", "save preferences"]));
+                if (saveBtn) { saveBtn.click(); return true; }
               }
 
               // 2. Generic cookie-banner buttons.
@@ -13949,7 +18108,7 @@ def _recover_from_validation_errors(
     recovered_filled: list[dict[str, Any]] = []
     recovered_review: list[dict[str, Any]] = []
     errors = _visible_form_validation_errors(page)
-    for _ in range(max(1, _self_heal_passes() - 1)):
+    for _ in range(1):
         if not errors:
             break
         result = _runtime_agent_action(
@@ -14706,14 +18865,16 @@ def _solve_captcha_if_configured(page) -> dict[str, str]:
     challenge = _discover_captcha(page)
     if not isinstance(challenge, dict) or not challenge.get("kind"):
         return {"status": "none", "detail": "no supported CAPTCHA detected"}
-    if challenge.get("kind") == "hcaptcha":
-        if _captcha_vision_enabled():
-            return _solve_hcaptcha_with_vision(page)
-        return {
-            "status": "unsupported",
-            "detail": "hcaptcha is not supported by CapMonster token tasks; vision fallback disabled or missing API key",
-        }
     if not config.enabled or not config.api_key:
+        if challenge.get("kind") == "hcaptcha" and _captcha_vision_enabled():
+            return _solve_hcaptcha_with_vision(page)
+        if challenge.get("kind") == "hcaptcha":
+            return {
+                "status": "unsupported",
+                "detail": (
+                    "hcaptcha token and vision solvers are disabled or missing credentials"
+                ),
+            }
         return {"status": "skipped", "detail": "disabled"}
     try:
         tasks = _capmonster_tasks_for(challenge)

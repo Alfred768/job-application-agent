@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from hello_agents.agents.job_application_agent import JobApplicationAgent
 from hello_agents.career.policies import JobApplicationPolicyGate
@@ -32,6 +36,7 @@ from hello_agents.tools.registry import ToolRegistry
 from job_agent.db import connect, init_db, update_application_execution_status
 from job_agent.gmail_verification import (
     GmailVerificationError,
+    find_application_confirmation,
     find_verification_code,
     find_verification_link,
 )
@@ -304,6 +309,9 @@ class JobApplicationRecoveryExecutor:
             in {"failed", "policy_denied", "pending", "waiting_for_user"}
             for result in action_results
         )
+        retry_ready = verified and plan.retry_allowed
+        if plan.strategy == "processing_evidence_reconciliation":
+            retry_ready = retry_ready and "no_existing_submission" in evidence
         if any(
             result.status in {"failed", "policy_denied"}
             for result in action_results
@@ -323,7 +331,7 @@ class JobApplicationRecoveryExecutor:
             status=status,
             actions=tuple(action_results),
             evidence=tuple(evidence),
-            retry_ready=verified and plan.retry_allowed,
+            retry_ready=retry_ready,
             retry_scope=plan.retry_scope,
             reason=(
                 "All required recovery evidence is verified."
@@ -370,15 +378,144 @@ class JobApplicationRecoveryExecutor:
         )
         return self._inspect_evidence(context, evidence_name=name)
 
-    def _action_inspect_processing_evidence(
+    def _action_preserve_network_failure_evidence(
+        self,
+        _action: RecoveryAction,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        structured_network_failure = str(context.get("error") or "") in {
+            "browser_navigation_network_error",
+            "browser_startup_network_error",
+            "page_navigation_network_error",
+        }
+        if not context.get("network_failure") and not structured_network_failure:
+            return self._pending("Network failure evidence is unavailable.")
+        return {
+            "status": "completed",
+            "evidence": ["network_failure"],
+            "message": (
+                "The structured terminal network failure code was preserved."
+                if structured_network_failure
+                else "The redacted network failure code and batch health snapshot were preserved."
+            ),
+        }
+
+    def _action_wait_for_network_health(
+        self,
+        action: RecoveryAction,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return self._cooldown(action, context)
+
+    def _action_recheck_network_health(
+        self,
+        _action: RecoveryAction,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if bool(context.get("network_health_rechecked")):
+            return {
+                "status": "completed",
+                "evidence": ["network_health_rechecked"],
+                "message": "The batch network health check passed.",
+            }
+        apply_url = str(context.get("apply_url") or "").strip()
+        parsed = urlsplit(apply_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return self._pending(
+                "A valid application URL is required for the read-only health check."
+            )
+        request = Request(
+            apply_url,
+            method="HEAD",
+            headers={"User-Agent": "job-agent-network-health/1.0"},
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                status = int(response.getcode() or 0)
+        except HTTPError as exc:
+            status = int(exc.code or 0)
+        except (URLError, TimeoutError, OSError) as exc:
+            return {
+                "status": "pending",
+                "evidence": [],
+                "message": "The read-only network health check did not complete.",
+                "details": {
+                    "host": parsed.netloc,
+                    "failure_code": type(exc).__name__,
+                },
+            }
+        if status >= 500 or status <= 0:
+            return {
+                "status": "pending",
+                "evidence": [],
+                "message": "The application host is reachable but remains unhealthy.",
+                "details": {"host": parsed.netloc, "http_status": status},
+            }
+        return {
+            "status": "completed",
+            "evidence": ["network_health_rechecked"],
+            "message": "The application host passed a read-only network health check.",
+            "details": {"host": parsed.netloc, "http_status": status},
+        }
+
+    def _action_preserve_application_form_navigation_evidence(
         self,
         _action: RecoveryAction,
         context: Mapping[str, Any],
     ) -> Mapping[str, Any]:
         return self._inspect_evidence(
             context,
+            evidence_name="application_form_navigation",
+            required_markers=("application", "form"),
+        )
+
+    def _action_recheck_application_form_entry(
+        self,
+        _action: RecoveryAction,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if bool(context.get("application_form_rechecked")):
+            return {
+                "status": "completed",
+                "evidence": ["application_form_rechecked"],
+                "message": "The application form entry was rechecked in read-only mode.",
+            }
+        return self._pending(
+            "A read-only application-form adapter must recheck the entry before retry."
+        )
+
+    def _action_request_application_form_review(
+        self,
+        _action: RecoveryAction,
+        _context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        return {
+            "status": "waiting_for_user",
+            "message": "Application form review is required before a scoped retry.",
+        }
+
+    def _action_inspect_processing_evidence(
+        self,
+        _action: RecoveryAction,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        inspected = self._inspect_evidence(
+            context,
             evidence_name="processing_error",
         )
+        if inspected.get("status") == "completed":
+            return inspected
+        if (
+            str(context.get("terminal_status") or context.get("status") or "")
+            == "submission_processing_error"
+            and str(context.get("error") or "") == "submission_processing_error"
+        ):
+            return {
+                "status": "completed",
+                "evidence": ["processing_error"],
+                "message": "The structured terminal processing-error audit was preserved.",
+            }
+        return inspected
 
     def _action_validate_captcha_challenge(
         self,
@@ -399,6 +536,17 @@ class JobApplicationRecoveryExecutor:
     ) -> Mapping[str, Any]:
         path = self._evidence_path(context.get("evidence"))
         if path is None:
+            if (
+                str(context.get("terminal_status") or context.get("status") or "")
+                == "submit_clicked_unconfirmed"
+                and str(context.get("error") or "")
+                == "submission_confirmation_not_detected"
+            ):
+                return {
+                    "status": "completed",
+                    "evidence": ["submission_click_evidence"],
+                    "message": "The structured click-without-confirmation audit was preserved.",
+                }
             return self._pending("Saved click evidence is unavailable.")
         text = self._read_text(path)
         confirmed = "submission confirmed:" in text.casefold()
@@ -425,8 +573,30 @@ class JobApplicationRecoveryExecutor:
                 "confirmation_evidence_verified": True,
                 "message": "The tracked application already has confirmed submission.",
             }
+        confirmation = self._gmail_application_confirmation(context)
+        if confirmation is not None:
+            return confirmation
         return self._pending(
             "No confirmed portal, email, or tracking evidence was found."
+        )
+
+    def _action_check_portal_and_email_status(
+        self,
+        _action: RecoveryAction,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if self._tracked_submission(context.get("application_id")):
+            return {
+                "status": "completed",
+                "evidence": ["outcome_reconciled", "portal_or_email_reconciliation"],
+                "confirmation_evidence_verified": True,
+                "message": "The tracked application already has confirmed submission.",
+            }
+        confirmation = self._gmail_application_confirmation(context)
+        if confirmation is not None:
+            return confirmation
+        return self._pending(
+            "No exact confirmation was found; absence of email is not proof that no application exists."
         )
 
     def _action_persist_confirmed_outcome(
@@ -434,6 +604,15 @@ class JobApplicationRecoveryExecutor:
         _action: RecoveryAction,
         context: Mapping[str, Any],
     ) -> Mapping[str, Any]:
+        if (
+            "no_existing_submission"
+            in set(context.get("accumulated_evidence") or [])
+        ):
+            return {
+                "status": "completed",
+                "evidence": [],
+                "message": "Verified absence was preserved; no tracked outcome was changed.",
+            }
         if not bool(context.get("confirmation_evidence_verified")):
             return self._pending(
                 "Confirmed outcome evidence is required before tracking changes."
@@ -451,14 +630,68 @@ class JobApplicationRecoveryExecutor:
             )
         finally:
             connection.close()
+        confirmed = bool(updated or self._tracked_submission(application_id))
         return {
-            "status": "completed" if updated else "failed",
-            "evidence": ["portal_or_email_reconciliation"] if updated else [],
+            "status": "completed" if confirmed else "failed",
+            "evidence": (
+                ["portal_or_email_reconciliation", "confirmed_outcome_persisted"]
+                if confirmed
+                else []
+            ),
             "message": (
                 "Confirmed outcome was persisted without another submit click."
-                if updated
+                if confirmed
                 else "Confirmed outcome could not be persisted."
             ),
+            "details": {"outcome": "submitted"} if confirmed else {},
+        }
+
+    def _gmail_application_confirmation(
+        self,
+        context: Mapping[str, Any],
+    ) -> Mapping[str, Any] | None:
+        token = self._gmail_token()
+        company = str(context.get("company") or "").strip()
+        title = str(context.get("title") or "").strip()
+        if token is None or not company or not title:
+            return None
+        safe_title = title.replace('"', " ").strip()
+        query = str(
+            context.get("gmail_application_confirmation_query")
+            or f'in:anywhere newer_than:365d "{safe_title}"'
+        )
+        try:
+            match = find_application_confirmation(
+                str(token),
+                query=query,
+                company=company,
+                title=title,
+            )
+        except GmailVerificationError:
+            return None
+        if not match:
+            return None
+        raw_id = str(match.get("message_id") or "")
+        received_at_ms = int(match.get("received_at_ms") or 0)
+        received_at = (
+            datetime.fromtimestamp(received_at_ms / 1000, tz=timezone.utc).isoformat()
+            if received_at_ms > 0
+            else None
+        )
+        return {
+            "status": "completed",
+            "evidence": ["outcome_reconciled", "portal_or_email_reconciliation"],
+            "confirmation_evidence_verified": True,
+            "message": "An exact company-and-title application confirmation email was verified.",
+            "details": {
+                "source": "gmail_readonly",
+                "received_at": received_at,
+                "message_fingerprint": (
+                    hashlib.sha256(raw_id.encode()).hexdigest()[:16]
+                    if raw_id
+                    else None
+                ),
+            },
         }
 
     def _action_poll_verification_message(
@@ -762,6 +995,11 @@ def execute_audit_recovery(
         )
         serialized = recovery_execution_result_to_dict(result)
         record["recovery_execution"] = serialized
+        if "confirmed_outcome_persisted" in set(serialized.get("evidence") or []):
+            record["reconciled_from_status"] = str(record.get("status") or "")
+            record["status"] = "submitted"
+            record["submit_gate"] = "submitted"
+            record["error"] = None
         _append_recovery_trajectory(
             record,
             serialized,

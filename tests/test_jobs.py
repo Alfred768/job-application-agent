@@ -69,6 +69,25 @@ def test_parse_rss_jobs_normalizes_public_feed_items():
     assert jobs[1].company == "DataForge"
 
 
+def test_parse_rss_jobs_extracts_yc_is_hiring_titles():
+    rss = """<?xml version="1.0"?>
+    <rss version="2.0">
+      <channel>
+        <item>
+          <title>Spice Data (YC S19) is hiring a software engineer – back end</title>
+          <link>https://www.ycombinator.com/companies/spice-data/jobs/1</link>
+          <description>Build backend services.</description>
+        </item>
+      </channel>
+    </rss>
+    """
+
+    jobs = parse_rss_jobs(rss, source="example-rss")
+
+    assert jobs[0].company == "Spice Data (YC S19)"
+    assert jobs[0].title == "software engineer – back end"
+
+
 def test_format_job_as_jd_text_preserves_provenance_for_agent_review():
     job = parse_rss_jobs(
         """<rss><channel><item>

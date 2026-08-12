@@ -3,7 +3,23 @@ from urllib.error import URLError
 
 import pytest
 
-from job_agent.source_config import load_jobs_from_source_config, _read_url
+from job_agent.source_config import (
+    _read_url,
+    _source_timeout_seconds,
+    load_jobs_from_source_config,
+)
+from job_agent.source_config import _filter_jobs_for_source
+from job_agent.models import Job
+
+
+def test_source_timeout_seconds_uses_env_override(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_SOURCE_TIMEOUT_SECONDS", "45")
+    assert _source_timeout_seconds() == 45
+
+
+def test_source_timeout_seconds_clamps_below_five(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_SOURCE_TIMEOUT_SECONDS", "1")
+    assert _source_timeout_seconds() == 5
 
 
 def test_load_jobs_from_source_config_combines_public_sources(tmp_path):
@@ -145,6 +161,36 @@ def test_source_filters_apply_before_limit(tmp_path):
     jobs = load_jobs_from_source_config(config_path)
 
     assert [job.title for job in jobs] == ["2026 Early Career Software Engineer"]
+
+
+def test_source_filter_drops_non_direct_application_urls():
+    jobs = [
+        Job(
+            title="Machine Learning Engineer",
+            company="Example",
+            raw_jd="",
+            location="Remote",
+            apply_url="https://job-boards.greenhouse.io/coinbase/jobs/123",
+        ),
+        Job(
+            title="Software Engineer",
+            company="Example",
+            raw_jd="",
+            location="Remote",
+            apply_url="https://boards.greenhouse.io/coinbase/jobs/456",
+        ),
+        Job(
+            title="ML Engineer",
+            company="Example",
+            raw_jd="",
+            location="Remote",
+            apply_url="https://boards.greenhouse.io/acme/jobs/789",
+        ),
+    ]
+
+    assert [job.title for job in _filter_jobs_for_source(jobs, {})] == [
+        "ML Engineer",
+    ]
 
 
 def test_source_config_defaults_are_merged_into_sources(tmp_path):
@@ -291,6 +337,113 @@ def test_us_only_source_filter_works_without_keyword_filters(tmp_path):
     assert [job.apply_url for job in jobs] == ["https://jobs.example.com/us"]
 
 
+def test_us_only_keeps_generic_us_locations_without_source_location_include(tmp_path):
+    greenhouse_path = tmp_path / "greenhouse.json"
+    greenhouse_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/hybrid",
+                        "location": {"name": "Hybrid"},
+                        "content": "Build distributed Python services.",
+                    },
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/in-office",
+                        "location": {"name": "In-Office"},
+                        "content": "Build distributed Python services.",
+                    },
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/india",
+                        "location": {"name": "Remote - India"},
+                        "content": "Build distributed Python services.",
+                    },
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {
+                    "title_include": ["software engineer"],
+                    "location_include": ["new york", "remote"],
+                    "us_only": True,
+                },
+                "sources": [
+                    {
+                        "type": "greenhouse",
+                        "board_token": "acme",
+                        "payload_file": str(greenhouse_path),
+                    }
+                ],
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.apply_url for job in jobs] == [
+        "https://jobs.example.com/hybrid",
+        "https://jobs.example.com/in-office",
+    ]
+
+
+def test_us_only_source_location_include_does_not_drop_other_us_roles(tmp_path):
+    greenhouse_path = tmp_path / "greenhouse.json"
+    greenhouse_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/austin",
+                        "location": {"name": "Austin, TX"},
+                        "content": "Build distributed Python services.",
+                    },
+                    {
+                        "title": "Software Engineer",
+                        "absolute_url": "https://jobs.example.com/nyc",
+                        "location": {"name": "New York, NY"},
+                        "content": "Build distributed Python services.",
+                    },
+                ]
+            }
+        )
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {
+                    "title_include": ["software engineer"],
+                    "location_include": ["new york", "remote"],
+                    "us_only": True,
+                },
+                "sources": [
+                    {
+                        "type": "greenhouse",
+                        "board_token": "acme",
+                        "payload_file": str(greenhouse_path),
+                        "location_include": ["new york"],
+                    }
+                ],
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.apply_url for job in jobs] == [
+        "https://jobs.example.com/austin",
+        "https://jobs.example.com/nyc",
+    ]
+
+
 def test_read_url_sends_browser_user_agent_not_python_urllib(monkeypatch):
     """Public job APIs (e.g. Remotive) 403 the default Python-urllib UA.
 
@@ -361,3 +514,32 @@ def test_source_failure_is_isolated_and_other_sources_still_import(
         jobs = load_jobs_from_source_config(config_path)
 
     assert [job.title for job in jobs] == ["Software Engineer I"]
+
+
+def test_aggregator_links_without_direct_application_forms_are_excluded(tmp_path):
+    rss_path = tmp_path / "jobs.xml"
+    rss_path.write_text(
+        """<rss><channel><item>
+        <title>Acme (YC S20) is hiring a software engineer</title>
+        <link>https://www.ycombinator.com/companies/acme/jobs/1</link>
+        <description>Build agents.</description>
+        </item><item>
+        <title>Acme at OpenBoard</title>
+        <link>https://boards.example.com/acme/jobs/2</link>
+        <description>Build agents.</description>
+        </item></channel></rss>"""
+    )
+    config_path = tmp_path / "sources.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {"type": "rss", "source": "example-rss", "rss_file": str(rss_path)}
+                ]
+            }
+        )
+    )
+
+    jobs = load_jobs_from_source_config(config_path)
+
+    assert [job.apply_url for job in jobs] == ["https://boards.example.com/acme/jobs/2"]

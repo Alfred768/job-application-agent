@@ -58,9 +58,18 @@ def test_runtime_autofill_script_includes_office_location_combobox_rule():
     assert "function preferredOfficeLocationOption" in script
     assert "preferredOfficeLocationOption(field, profile)" in script
     assert "function preferredOfficeLocationAnswer" in script
+
+
+def test_runtime_autofill_script_includes_sponsorship_type_guard():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "function sponsorshipTypeFieldPlan" in script
+    assert "function sameVisaFamily" in script
+    assert "approved sponsorship type option not available" in script
     assert "preferredOfficeLocationAnswer(field, profile)" in script
     assert 'const APPLICATION_FORM_UNAVAILABLE_LINE_PREFIX = "Application form unavailable:"' in script
     assert "hasApplicationFormContext" in script
+    assert "(?:boards|job-boards)\\.greenhouse\\.io\\/embed\\/job_app\\?" in script
     assert "installApplicationNavigationGuard" in script
     assert "restoreApplicationContextIfExternal" in script
     assert "privacy|notice|policy|terms|arbitration|personnel|candidate|pdf" in script
@@ -69,6 +78,23 @@ def test_runtime_autofill_script_includes_office_location_combobox_rule():
     assert "generateCandidateAccountPassword" in script
     assert "workdaySignInFailureReason" in script
     assert "options = {}" in script
+
+
+def test_runtime_autofill_script_includes_truthful_option_guards():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    for name in [
+        "optionDeniesSponsorship",
+        "sponsorshipStatementOption",
+        "relocationStatementOption",
+        "guardLocalResidencyOption",
+        "clearanceLevelChoice",
+        "englishLevelChoice",
+        "bachelorGraduationYearChoice",
+        "locationCheckboxGroupPlan",
+    ]:
+        assert f"function {name}" in script
+    assert "function matchingOptions(field, answer, profile)" in script
     assert "options.allowGeneric !== false" in script
     assert "repeatedWorkdaySignInPages > 1" in script
     assert "function workdaySignInFillSignature" in script
@@ -157,6 +183,7 @@ def test_runtime_autofill_script_clears_stale_autofill_markers_before_rescrape()
     assert 'if (n === "male") aliases.push("Man");' in script
     assert '[data-automation-id^="formField-"] button' in script
     assert '"I Acknowledge"' in script
+    assert '"Master Degree", "Masters"' in script
     assert 'return "I Acknowledge";' in script
     assert 'return "I Agree";' in script
     assert 'n.includes("sexual orientation")' in script
@@ -164,6 +191,8 @@ def test_runtime_autofill_script_clears_stale_autofill_markers_before_rescrape()
     assert "function requiresExternalApplicationPortal(label)" in script
     assert "external application portal required" in script
     assert "function invalidFindingCanUseSuccessfulReadback(label)" in script
+    assert "function normalizeBinaryComboboxAnswer(label, answer)" in script
+    assert 'readback === "selected-unverified"' in script
     assert "when will you graduate" in script
     assert "function captchaResultBlocksSubmission(captchaResult)" in script
     assert "captcha blocked automatic submission" in script
@@ -174,6 +203,11 @@ def test_runtime_autofill_script_clears_stale_autofill_markers_before_rescrape()
     assert "I do not have direct Community Support domain experience" in script
     assert "function requiresExplicitCandidateFact" in script
     assert "candidate fact needs explicit approved answer" in script
+    assert "function approvedCandidateFactAnswer" in script
+    assert "function semanticCandidateFactAnswer" in script
+    assert "experienceThreshold" in script
+    assert "matchScreeningRule(answerLabel, profile.screening_answer_rules)" in script
+    assert "const approvedRule = matchScreeningRule(label, profile.screening_answer_rules);" in script
     assert '"native language"' in script
     assert '"native script"' in script
     assert '"anticipated"' in script
@@ -198,6 +232,7 @@ def test_runtime_autofill_script_clears_stale_autofill_markers_before_rescrape()
     assert "advertising systems" in script
     assert 'if (n === "language")' in script
     assert 'if (n === "date")' in script
+    assert 'if (n.includes("date of application")' in script
     assert "single selectable needs saved answer / manual selection" in script
     assert "recoverTextFillLocator" in script
     assert "data-job-agent-fill-target" in script
@@ -539,6 +574,14 @@ def test_runtime_autofill_script_uses_group_label_for_required_radio_audit():
 
     assert "const groupLabelFor = (control) =>" in script
     assert '? groupLabelFor(control) : labelFor(control);' in script
+
+
+def test_runtime_autofill_script_preserves_single_checkbox_question_context():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "const singleCheckboxQuestion = cleanQuestionText(" in script
+    assert "label: genericOptionLabel, section: singleCheckboxQuestion" in script
+    assert "sameNameBoxes.length > 1" in script
 
 
 def test_runtime_autofill_script_carries_work_history_and_education():

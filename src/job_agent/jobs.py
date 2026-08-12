@@ -81,6 +81,16 @@ def _split_title_and_company(raw_title: str) -> tuple[str, str]:
     if " - " in title:
         role, company = title.rsplit(" - ", 1)
         return role.strip() or "Unknown Role", company.strip() or "Unknown Company"
+    hiring_match = re.search(
+        r"^(?P<company>.*?)\s+is\s+hiring\s+(?:an?\s+|a\s+)?(?P<role>.*)$",
+        title,
+        flags=re.IGNORECASE,
+    )
+    if hiring_match:
+        return (
+            hiring_match.group("role").strip() or "Unknown Role",
+            hiring_match.group("company").strip() or "Unknown Company",
+        )
     return title or "Unknown Role", "Unknown Company"
 
 

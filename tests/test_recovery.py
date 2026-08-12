@@ -44,6 +44,21 @@ def test_recovery_planner_uses_supported_captcha_solver_when_configured():
     assert "configured-secret" not in str(recovery_plan_to_dict(plan))
 
 
+def test_processing_recovery_reconciles_outcome_before_any_scoped_retry():
+    plan = JobApplicationRecoveryPlanner({})(
+        "submission_processing_error",
+        {},
+    )
+
+    assert plan is not None
+    assert [action.action for action in plan.actions] == [
+        "inspect_processing_evidence",
+        "check_portal_and_email_status",
+        "persist_confirmed_outcome",
+    ]
+    assert plan.evidence_required == ("processing_error", "outcome_reconciled")
+
+
 def test_recovery_planner_routes_unsupported_captcha_to_candidate():
     plan = JobApplicationRecoveryPlanner({})(
         "submission_processing_error",
@@ -146,6 +161,52 @@ def test_recovery_planner_routes_saved_answer_option_mismatch_to_candidate_fact(
     assert plan.actions[0].parameters == {"field_labels": [label]}
 
 
+def test_recovery_planner_routes_real_combobox_error_text_to_candidate_fact():
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": "Country",
+                    "reason": "fill error: no combobox option matches saved answer",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "candidate_fact_resolution"
+    assert plan.actions[0].parameters == {"field_labels": ["Country"]}
+
+
+def test_recovery_planner_routes_generic_dynamic_controls_to_code_recovery():
+    labels = ["Please check all that apply:", "Job code"]
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": labels[0],
+                    "reason": "checkbox group needs saved answer / manual selection",
+                    "sensitive": False,
+                    "blocking": True,
+                },
+                {
+                    "label": labels[1],
+                    "reason": "fill error: no combobox option matches saved answer",
+                    "sensitive": False,
+                    "blocking": True,
+                },
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "bounded_field_recovery"
+
+
 def test_recovery_planner_routes_user_authored_reading_answer_to_candidate():
     label = (
         "What's the most interesting paper, blog post, or documentation "
@@ -167,6 +228,30 @@ def test_recovery_planner_routes_user_authored_reading_answer_to_candidate():
 
     assert plan is not None
     assert plan.strategy == "candidate_fact_resolution"
+
+
+def test_recovery_planner_routes_exceptional_ability_examples_to_candidate():
+    label = (
+        "Please provide us with 3-4 examples highlighting your exceptional "
+        "ability. This is your moment to WOW us! First example:*"
+    )
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_completed_blocked",
+        {
+            "review_items": [
+                {
+                    "label": label,
+                    "reason": "unmapped field",
+                    "sensitive": False,
+                    "blocking": True,
+                }
+            ]
+        },
+    )
+
+    assert plan is not None
+    assert plan.strategy == "candidate_fact_resolution"
+    assert plan.actions[0].parameters == {"field_labels": [label]}
     assert plan.actions[0].requires_user is True
     assert plan.actions[0].parameters == {"field_labels": [label]}
     assert "not code or an LLM" in plan.reason
@@ -244,6 +329,22 @@ def test_attach_recovery_plan_handles_interrupted_unknown_outcome():
         == "confirmation_reconciliation"
     )
     assert record["recovery_plan"]["retry_allowed"] is False
+
+
+def test_recovery_planner_routes_unavailable_form_to_scoped_reconciliation():
+    plan = JobApplicationRecoveryPlanner({})(
+        "autofill_failed",
+        {"error": "application_form_unavailable"},
+    )
+
+    assert plan is not None
+    assert plan.strategy == "application_form_reconciliation"
+    assert plan.retry_scope == "single_application"
+    assert [action.action for action in plan.actions] == [
+        "preserve_application_form_navigation_evidence",
+        "recheck_application_form_entry",
+        "request_application_form_review",
+    ]
 
 
 def test_processing_failure_classifier_is_privacy_safe():

@@ -109,6 +109,14 @@ PRE_ACTION_BROWSER_RETRYABLE_ERRORS = frozenset(
         "playwright_runtime_error",
     }
 )
+NETWORK_FAILURE_ERRORS = frozenset(
+    {
+        "browser_navigation_network_error",
+        "browser_launch_error",
+        "browser_session_closed",
+        "network_circuit_breaker_active",
+    }
+)
 
 TIMEOUT_EVIDENCE_PREFIXES = (
     "Autofill progress:",
@@ -167,10 +175,11 @@ def _record(
         "terminal_status",
         "retry_scope",
         "recovery_attempt",
+        "repair_cycle",
     ):
         if item.get(key) is not None:
             record[key] = item.get(key)
-    for key in ("retry", "recovery_verified"):
+    for key in ("retry", "recovery_verified", "repair_verified"):
         if bool(item.get(key)):
             record[key] = True
     if cleanup_deleted_files is not None:
@@ -182,6 +191,15 @@ def _record(
     if evidence is not None:
         record["evidence"] = evidence
     return attach_recovery_plan(record, recovery_context)
+
+
+def _network_recovery_context(error: str | None) -> dict[str, Any] | None:
+    if str(error or "") not in NETWORK_FAILURE_ERRORS:
+        return None
+    return {
+        "network_failure": True,
+        "network_health_rechecked": False,
+    }
 
 
 def _gmail_verification_configured() -> bool:
@@ -253,6 +271,7 @@ def build_browser_execution_tool_call(
             "retry": bool(item.get("retry")),
             "terminal_status": item.get("terminal_status"),
             "recovery_verified": bool(item.get("recovery_verified")),
+            "repair_verified": bool(item.get("repair_verified")),
             "retry_scope": item.get("retry_scope"),
         },
     )
@@ -435,13 +454,15 @@ def _execute_application_batch_direct(
             publish_terminal(records[-1], position)
             continue
         except OSError as exc:
+            error_code = _runtime_exception_code(exc)
             records.append(
                 _record(
                     item,
                     script_path,
                     "autofill_failed",
                     None,
-                    _runtime_exception_code(exc),
+                    error_code,
+                    recovery_context=_network_recovery_context(error_code),
                 )
             )
             publish_terminal(records[-1], position)
@@ -475,13 +496,15 @@ def _execute_application_batch_direct(
                 )
                 publish_terminal(records[-1], position)
                 continue
+            error_code = _runtime_exception_code(exc)
             records.append(
                 _record(
                     item,
                     script_path,
                     "autofill_failed",
                     None,
-                    _runtime_exception_code(exc),
+                    error_code,
+                    recovery_context=_network_recovery_context(error_code),
                 )
             )
             publish_terminal(records[-1], position)
@@ -1332,6 +1355,10 @@ def execute_application_batch(
     failure_company_sequences, failure_adapter_sequences = (
         _active_failure_circuit_sequences(database_path)
     )
+    network_consecutive_failures = 0
+    network_circuit_open = False
+    network_last_error = ""
+    network_threshold = _network_health_circuit_threshold()
     runtime_env = None
     if browser_headless is not None:
         runtime_env = os.environ.copy()
@@ -1378,7 +1405,17 @@ def execute_application_batch(
         adapter_failure_status = _open_failure_circuit_status(
             failure_adapter_sequences.get(failure_adapter_scope)
         )
-        if company_failure_status or adapter_failure_status:
+        verified_scoped_retry = (
+            bool(item.get("retry"))
+            and item.get("retry_scope") == "single_application"
+            and bool(
+                item.get("repair_verified")
+                or item.get("recovery_verified")
+            )
+        )
+        if (
+            company_failure_status or adapter_failure_status
+        ) and not verified_scoped_retry:
             call = replace(
                 call,
                 context={
@@ -1392,6 +1429,33 @@ def execute_application_batch(
                     "failure_circuit_status": (
                         adapter_failure_status or company_failure_status
                     ),
+                },
+            )
+        elif (company_failure_status or adapter_failure_status) and verified_scoped_retry:
+            call = replace(
+                call,
+                context={
+                    **dict(call.context),
+                    "failure_circuit_bypass": "verified_scoped_retry",
+                    "failure_circuit_scope": (
+                        failure_adapter_scope
+                        if adapter_failure_status
+                        else company_scope
+                    ),
+                    "failure_circuit_status": (
+                        adapter_failure_status or company_failure_status
+                    ),
+                },
+            )
+        if network_circuit_open:
+            call = replace(
+                call,
+                context={
+                    **dict(call.context),
+                    "network_health_circuit_active": True,
+                    "network_health_scope": "global_batch",
+                    "network_health_consecutive_failures": network_consecutive_failures,
+                    "network_health_threshold": network_threshold,
                 },
             )
         registry = ToolRegistry()
@@ -1573,14 +1637,28 @@ def execute_application_batch(
             and not tool_result.policy_decision.allowed
         ):
             decision = tool_result.policy_decision
-            record = _record(
-                item,
-                str(raw_script_path) or None,
-                "skipped_policy_denied",
-                None,
-                decision.code,
-                submit_gate=f"policy_denied:{decision.code}",
-            )
+            if decision.code == "network_health_circuit_active":
+                record = _record(
+                    item,
+                    str(raw_script_path) or None,
+                    "autofill_failed",
+                    None,
+                    "network_circuit_breaker_active",
+                    submit_gate="network_health_circuit_active",
+                    recovery_context={
+                        "network_failure": True,
+                        "network_health_rechecked": False,
+                    },
+                )
+            else:
+                record = _record(
+                    item,
+                    str(raw_script_path) or None,
+                    "skipped_policy_denied",
+                    None,
+                    decision.code,
+                    submit_gate=f"policy_denied:{decision.code}",
+                )
         else:
             record = _record(
                 item,
@@ -1596,6 +1674,24 @@ def execute_application_batch(
             if tenant_scope:
                 blocked_tenants.add(tenant_scope)
         terminal_status = str(record.get("status") or "")
+        terminal_error = str(record.get("error") or "")
+        network_failure = terminal_error in NETWORK_FAILURE_ERRORS
+        if network_failure:
+            network_consecutive_failures += 1
+            network_last_error = terminal_error
+            network_circuit_open = network_consecutive_failures >= network_threshold
+        elif terminal_status not in {"skipped_policy_denied", "skipped_network_circuit"}:
+            network_consecutive_failures = 0
+            network_circuit_open = False
+        if network_failure or network_consecutive_failures or network_circuit_open:
+            record["network_health_observation"] = {
+                "kind": "batch_network_health",
+                "scope": "global_batch",
+                "status": "open" if network_circuit_open else "healthy",
+                "consecutive_failures": network_consecutive_failures,
+                "threshold": network_threshold,
+                "last_error": network_last_error or None,
+            }
         _advance_failure_circuit_sequence(
             failure_company_sequences,
             company_scope,
@@ -1700,6 +1796,16 @@ def _failure_circuit_breaker_threshold() -> int:
         )
     except ValueError:
         value = 2
+    return max(2, value)
+
+
+def _network_health_circuit_threshold() -> int:
+    try:
+        value = int(
+            os.getenv("JOB_AGENT_NETWORK_HEALTH_CIRCUIT_THRESHOLD") or "3"
+        )
+    except ValueError:
+        value = 3
     return max(2, value)
 
 
@@ -2196,6 +2302,11 @@ def _run_python_runtime_in_process(
 ) -> subprocess.CompletedProcess:
     """Run Playwright in-process so the original Agent Core owns live actions."""
     payload = load_runtime_payload(script_path)
+    # ``run_runtime_script`` normally injects this non-serialized runtime
+    # value.  The Agent Core in-process path bypasses that wrapper, so it must
+    # provide the package directory itself; otherwise terminal screenshots and
+    # confirmation/processing evidence silently have nowhere to be written.
+    payload["_runtimeScriptDir"] = str(Path(script_path).resolve().parent)
     stdout = _TeeText(sys.stdout)
     stderr = _TeeText(sys.stderr)
     prior_headless = os.environ.get("BROWSER_HEADLESS")
@@ -2315,18 +2426,30 @@ def _run_script_streaming(
     )
     stdout_thread.start()
     stderr_thread.start()
+    def _drain_streams() -> None:
+        for _ in range(3):
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
+            if not (stdout_thread.is_alive() or stderr_thread.is_alive()):
+                return
+            # A descendant can inherit the pipe after the runtime exits; kill
+            # the whole session so the forwarding threads can finish.
+            _terminate_process_tree(process)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
     try:
         return_code = process.wait(timeout=timeout_seconds)
+        _drain_streams()
     except subprocess.TimeoutExpired as exc:
         _terminate_process_tree(process)
         process.wait()
-        stdout_thread.join(timeout=1)
-        stderr_thread.join(timeout=1)
+        _drain_streams()
         exc.stdout = "".join(stdout_chunks)
         exc.stderr = "".join(stderr_chunks)
         raise exc
-    stdout_thread.join(timeout=1)
-    stderr_thread.join(timeout=1)
     return subprocess.CompletedProcess(
         command,
         return_code,

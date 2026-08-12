@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -64,7 +65,6 @@ REPORT_FILE_NAME = "RUN_SUMMARY.md"
 LATEST_FILE_NAME = "latest.json"
 APPLICATION_LEDGER_FILE_NAME = "APPLICATION_LEDGER.csv"
 HEARTBEAT_STATE_FILE_NAME = "heartbeat-state.json"
-HEARTBEAT_MAX_EMPTY_BACKOFF_MINUTES = 180
 HEARTBEAT_MAX_NO_PROGRESS_BATCHES = 3
 HEARTBEAT_NO_PROGRESS_PAUSE_MINUTES = 60
 EVALUATION_METRICS_FILE_NAME = "evaluation-metrics.json"
@@ -1133,17 +1133,56 @@ def execute_daily_run(
 ) -> Path:
     resolved_run_dir = resolve_run_dir(config, run_dir)
     state = _read_json_object(resolved_run_dir / STATE_FILE_NAME, "run state")
-    validate_run_inputs(config, state)
     phase = str(state.get("phase", ""))
+    completed_audit_reconciliation = False
+    if resume_incomplete and phase in {"executing", "execution_failed"}:
+        existing_audit_path = resolved_run_dir / "execution-audit.json"
+        existing_audit = _read_optional_json(existing_audit_path)
+        existing_progress = (
+            existing_audit.get("progress")
+            if isinstance(existing_audit, Mapping)
+            else None
+        )
+        completed_audit_reconciliation = bool(
+            isinstance(existing_progress, Mapping)
+            and existing_progress.get("complete")
+        )
+    # A complete audit is immutable execution evidence. Reconciliation does
+    # not reopen a browser or consume current profile/config inputs, so input
+    # drift after the browser process exited must not make the run impossible
+    # to finalize.
+    if not completed_audit_reconciliation:
+        validate_run_inputs(config, state)
     allowed_phases = {"prepared", "prepared_empty", "waiting_for_candidates"}
     if resume_incomplete and retry:
         raise SopError("--resume-incomplete cannot be combined with --retry")
     if resume_incomplete:
-        if phase != "executing":
+        if phase not in {"executing", "execution_failed"}:
             raise SopError(
-                f"Run phase is '{phase}', not executing; "
+                f"Run phase is '{phase}', not an interrupted execution; "
                 "--resume-incomplete only resumes an interrupted execution"
             )
+        if phase == "execution_failed":
+            attempts = state.get("execution_attempts")
+            last_attempt = attempts[-1] if isinstance(attempts, list) and attempts else {}
+            last_exit_code = (
+                last_attempt.get("exit_code")
+                if isinstance(last_attempt, dict)
+                else None
+            )
+            interrupted_codes = {
+                -int(signal.SIGINT),
+                -int(signal.SIGTERM),
+                -int(signal.SIGKILL),
+                128 + int(signal.SIGINT),
+                128 + int(signal.SIGTERM),
+                128 + int(signal.SIGKILL),
+            }
+            if last_exit_code not in interrupted_codes:
+                raise SopError(
+                    "--resume-incomplete requires the last execution to have "
+                    "ended by interruption signal"
+                )
     elif phase not in allowed_phases and not retry:
         raise SopError(
             f"Run phase is '{phase}', not prepared. "
@@ -1170,10 +1209,11 @@ def execute_daily_run(
         print(f"No prepared applications to execute: {resolved_run_dir}")
         return resolved_run_dir
 
-    report = run_preflight(config)
-    print_preflight(report)
-    if not report.ok:
-        raise SopError("Preflight failed; no browser execution was started")
+    if not completed_audit_reconciliation:
+        report = run_preflight(config)
+        print_preflight(report)
+        if not report.ok:
+            raise SopError("Preflight failed; no browser execution was started")
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict) or not artifacts.get("batch_summary"):
@@ -1200,11 +1240,10 @@ def execute_daily_run(
             raise SopError(
                 "--resume-incomplete requires an audit with incremental progress"
             )
-        if bool(progress.get("complete")):
-            raise SopError(
-                "--resume-incomplete cannot resume an already complete audit"
-            )
-        if int(progress.get("planned", -1)) != prepared_count:
+        if (
+            not bool(progress.get("complete"))
+            and int(progress.get("planned", -1)) != prepared_count
+        ):
             raise SopError(
                 "Incomplete audit planned count does not match the prepared batch"
             )
@@ -1212,13 +1251,17 @@ def execute_daily_run(
         suffix = "" if attempt_number == 1 else f"-retry-{attempt_number - 1:02d}"
         audit_path = resolved_run_dir / f"execution-audit{suffix}.json"
         preflight_path = resolved_run_dir / f"resume-preflight{suffix}.json"
-    command = build_execute_command(
-        config,
-        summary_path=summary_path,
-        audit_path=audit_path,
-        preflight_path=preflight_path,
-        retry=retry,
-        resume_existing_audit=resume_incomplete,
+    command = (
+        ["reconcile-complete-execution-audit", str(audit_path)]
+        if completed_audit_reconciliation
+        else build_execute_command(
+            config,
+            summary_path=summary_path,
+            audit_path=audit_path,
+            preflight_path=preflight_path,
+            retry=retry,
+            resume_existing_audit=resume_incomplete,
+        )
     )
 
     waited_seconds = _waiting_seconds_since_ready(state)
@@ -1234,16 +1277,23 @@ def execute_daily_run(
     )
     execution_started_at = _now()
     execution_started = time.monotonic()
-    initial_repair_cycle = _repair_cycle_count(state, resolved_run_dir) + 1
-    initial_repair_attempt = _next_repair_attempt(state)
-    exit_code, incremental_repair = _run_execution_command(
-        command,
-        config,
-        audit_path=audit_path,
-        run_dir=resolved_run_dir,
-        repair_cycle=initial_repair_cycle,
-        repair_attempt=initial_repair_attempt,
+    initial_repair_cycle = _next_repair_cycle(state, resolved_run_dir)
+    initial_repair_budget_cycle = (
+        _repair_cycle_count(state, resolved_run_dir) + 1
     )
+    initial_repair_attempt = _next_repair_attempt(state)
+    if completed_audit_reconciliation:
+        exit_code, incremental_repair = 0, None
+    else:
+        exit_code, incremental_repair = _run_execution_command(
+            command,
+            config,
+            audit_path=audit_path,
+            run_dir=resolved_run_dir,
+            repair_cycle=initial_repair_cycle,
+            repair_budget_cycle=initial_repair_budget_cycle,
+            repair_attempt=initial_repair_attempt,
+        )
     execution_duration_seconds = round(time.monotonic() - execution_started, 3)
 
     attempt = {
@@ -1255,6 +1305,7 @@ def execute_daily_run(
         "audit": str(audit_path),
         "resume_preflight": str(preflight_path),
         "batch_summary": str(summary_path),
+        "reconciled_complete_audit": completed_audit_reconciliation,
     }
     state.setdefault("execution_attempts", []).append(attempt)
     state.setdefault("artifacts", {})["execution_audit"] = str(audit_path)
@@ -1374,7 +1425,8 @@ def execute_daily_run(
             state.setdefault("repair_cycles", []).append(incremental_attempt)
         _write_state(resolved_run_dir, state, config.output_root)
 
-    repair_cycle = _repair_cycle_count(state, resolved_run_dir) + 1
+    repair_cycle = _next_repair_cycle(state, resolved_run_dir)
+    repair_budget_cycle = _repair_cycle_count(state, resolved_run_dir) + 1
     repair_attempt = _next_repair_attempt(state)
     repair_request = build_repair_request(
         audit,
@@ -1388,6 +1440,7 @@ def execute_daily_run(
         )
     if repair_request is not None:
         repair_request["attempt"] = repair_attempt
+        repair_request["budget_cycle"] = repair_budget_cycle
     effective_repair_request = (
         repair_request
         or _merge_repair_requests(completed_repair_requests)
@@ -1475,7 +1528,7 @@ def execute_daily_run(
             )
         if (
             repair_request is not None
-            and repair_cycle > config.auto_repair.max_cycles
+            and repair_budget_cycle > config.auto_repair.max_cycles
         ):
             _transition(
                 resolved_run_dir,
@@ -1504,7 +1557,7 @@ def execute_daily_run(
         repair_duration_seconds = 0.0
         while (
             repair_request is not None
-            and repair_cycle <= config.auto_repair.max_cycles
+            and repair_budget_cycle <= config.auto_repair.max_cycles
         ):
             repair_attempt_number = int(
                 active_request.get("attempt")
@@ -1513,6 +1566,7 @@ def execute_daily_run(
             active_request = {
                 **dict(active_request),
                 "cycle": repair_cycle,
+                "budget_cycle": repair_budget_cycle,
                 "attempt": repair_attempt_number,
             }
             request_path = _repair_request_path(
@@ -1631,7 +1685,8 @@ def execute_daily_run(
                 stage="repair",
                 duration_seconds=repair_duration_seconds,
             )
-            repair_cycle = consumed_repair_cycles + 1
+            repair_cycle = _next_repair_cycle(state, resolved_run_dir)
+            repair_budget_cycle = consumed_repair_cycles + 1
             next_request = build_repair_request(
                 audit,
                 run_dir=resolved_run_dir,
@@ -1654,6 +1709,7 @@ def execute_daily_run(
                 write_run_report(resolved_run_dir)
                 raise SopError("Automatic repair request could not be rebuilt")
             next_request["attempt"] = _next_repair_attempt(state)
+            next_request["budget_cycle"] = repair_budget_cycle
             active_request = next_request
 
         if repair_result is None or not repair_result_is_verified(repair_result):
@@ -1885,27 +1941,20 @@ def _candidate_fact_recovery_handlers(
                     "unresolved_field_count": len(unresolved) or len(labels),
                 },
             }
-        if unchanged or nonfact:
-            return {
-                "status": "pending",
-                "evidence": [],
-                "message": (
-                    "Candidate-fact recovery is not verified because the prior "
-                    "package already contained the same answer or other blocker "
-                    "types remain."
-                ),
-                "details": {
-                    "required_field_count": len(labels),
-                    "unchanged_field_count": len(unchanged),
-                    "nonfact_blocker_count": len(nonfact),
-                },
-            }
+        # An existing approved answer is sufficient to rebuild and retry when the
+        # runtime's closest-match logic has since been corrected; the fact does
+        # not need to be newly added to the profile.
         return {
             "status": "completed",
             "evidence": ["approved_candidate_facts"],
-            "message": "Candidate-supplied answers are present in the approved fact source.",
+            "message": (
+                "Approved candidate answers are present in the fact source and "
+                "the scoped application can be rebuilt."
+            ),
             "details": {
                 "approved_field_count": len(labels),
+                "unchanged_field_count": len(unchanged),
+                "nonfact_blocker_count": len(nonfact),
                 "profile_sha256": profile_sha256,
                 "sensitive_kb_sha256": sensitive_kb_sha256,
             },
@@ -1917,13 +1966,13 @@ def _candidate_fact_recovery_handlers(
         _private_state: dict[str, Any],
     ) -> Mapping[str, Any]:
         labels, unresolved, unchanged, nonfact = fact_readiness(context)
-        if not labels or unresolved or unchanged or nonfact:
+        if not labels or unresolved:
             return {
                 "status": "pending",
                 "evidence": [],
                 "message": (
-                    "The scoped package cannot be rebuilt until every blocker "
-                    "is a newly approved candidate fact."
+                    "The scoped package cannot be rebuilt until every "
+                    "candidate-fact blocker has an approved answer."
                 ),
                 "details": {
                     "required_field_count": len(labels),
@@ -2229,6 +2278,9 @@ def recover_daily_run(
     if retry_summary is not None:
         state["artifacts"]["recovery_retry_batch"] = str(retry_summary)
         manifest["artifacts"]["recovery_retry_batch"] = str(retry_summary)
+    else:
+        state["artifacts"].pop("recovery_retry_batch", None)
+        manifest["artifacts"].pop("recovery_retry_batch", None)
     state.setdefault("recovery_attempts", []).append(
         {
             "attempt": attempt_number,
@@ -2270,12 +2322,95 @@ def recover_daily_run(
     return resolved_run_dir
 
 
+def _refresh_verified_scoped_retry_batch(
+    config: DailyConfig,
+    *,
+    run_dir: Path,
+    state: dict[str, Any],
+) -> Path:
+    """Recompose a verified Repair batch from current, non-stale pointers."""
+    manifest_path = run_dir / "pipeline-manifest.json"
+    manifest = _read_json_object(manifest_path, "pipeline manifest")
+    state_artifacts = state.setdefault("artifacts", {})
+    manifest_artifacts = manifest.setdefault("artifacts", {})
+    repair_value = state_artifacts.get("repair_retry_batch")
+    if not repair_value:
+        raise SopError("Verified repair has no saved repair retry batch")
+    repair_summary = Path(str(repair_value))
+    if not repair_summary.is_absolute():
+        repair_summary = run_dir / repair_summary
+    if not _is_within(repair_summary, run_dir) or not repair_summary.is_file():
+        raise SopError("Saved repair retry batch is missing or outside the run")
+
+    try:
+        repair_items = json.loads(repair_summary.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SopError("Saved repair retry batch cannot be read") from exc
+    if not isinstance(repair_items, list) or not repair_items:
+        raise SopError("Saved repair retry batch has no scoped targets")
+    repair_cycle = max(
+        (
+            int(item.get("repair_cycle") or 1)
+            for item in repair_items
+            if isinstance(item, Mapping)
+        ),
+        default=1,
+    )
+    if any(
+        isinstance(item, Mapping)
+        and bool(item.get("repair_verified"))
+        and not item.get("original_package_dir")
+        for item in repair_items
+    ):
+        repair_summary = _rebuild_verified_repair_retry_packages(
+            config,
+            run_dir=run_dir,
+            manifest=manifest,
+            retry_summary=repair_summary,
+            cycle=repair_cycle,
+        )
+
+    recovery_summary = None
+    recovery_value = state_artifacts.get("recovery_retry_batch")
+    if recovery_value:
+        candidate = Path(str(recovery_value))
+        if not candidate.is_absolute():
+            candidate = run_dir / candidate
+        if not _is_within(candidate, run_dir) or not candidate.is_file():
+            raise SopError(
+                "Saved recovery retry batch is missing or outside the run"
+            )
+        recovery_summary = candidate
+
+    if recovery_summary is None:
+        scoped_retry = repair_summary
+    else:
+        scoped_retry = _merge_retry_batches(
+            [repair_summary, recovery_summary],
+            output_path=(
+                run_dir
+                / "repair"
+                / f"combined-retry-batch-resume-cycle-{repair_cycle:02d}.json"
+            ),
+        )
+        if scoped_retry is None:
+            raise SopError("Verified repair has no current scoped retry targets")
+    state_artifacts["repair_retry_batch"] = str(repair_summary)
+    state_artifacts["scoped_retry_batch"] = str(scoped_retry)
+    manifest_artifacts["repair_retry_batch"] = str(repair_summary)
+    manifest_artifacts["scoped_retry_batch"] = str(scoped_retry)
+    _write_json(manifest_path, manifest)
+    _write_state(run_dir, state, config.output_root)
+    return scoped_retry
+
+
 def repair_daily_run(
     config: DailyConfig,
     *,
     run_dir: Path | None = None,
     retry_verified: bool = False,
     refresh_request_only: bool = False,
+    recover_interrupted: bool = False,
 ) -> Path:
     """Resume a retained scoped coding repair without replaying the original batch."""
     if retry_verified and refresh_request_only:
@@ -2290,14 +2425,123 @@ def repair_daily_run(
     validate_run_inputs(config, state)
     phase = str(state.get("phase") or "")
 
+    if phase == "repairing":
+        if not recover_interrupted:
+            raise SopError(
+                "Run phase is 'repairing'; verify the prior repair process is no "
+                "longer active, then use --recover-interrupted"
+            )
+        active_event = next(
+            (
+                event
+                for event in reversed(state.get("history", []))
+                if str(event.get("phase") or "") == "repairing"
+            ),
+            {},
+        )
+        repair_attempt = int(active_event.get("repair_attempt") or 0)
+        repair_cycle = int(active_event.get("repair_cycle") or 0)
+        already_recorded = any(
+            int(item.get("attempt") or 0) == repair_attempt
+            and int(item.get("cycle") or 0) == repair_cycle
+            for item in state.get("repair_attempts", [])
+        )
+        if repair_attempt and not already_recorded:
+            state.setdefault("repair_attempts", []).append(
+                {
+                    "attempt": repair_attempt,
+                    "cycle": repair_cycle,
+                    "status": "agent_unavailable",
+                    "reason": "repair_agent_process_interrupted",
+                    "result_path": None,
+                    "changed_files": [],
+                    "resumed": True,
+                    "interrupted": True,
+                }
+            )
+        consumed_cycles = _repair_cycle_count(state, resolved_run_dir)
+        state["consumed_repair_cycles"] = consumed_cycles
+        _transition(
+            resolved_run_dir,
+            state,
+            config.output_root,
+            "repair_unavailable",
+            repair_cycle=repair_cycle,
+            repair_attempt=repair_attempt,
+            consumed_repair_cycles=consumed_cycles,
+            repair_status="agent_unavailable",
+            repair_reason="repair_agent_process_interrupted",
+            repair_retryable=True,
+            recovered_interrupted=True,
+            stage="repair_interruption_recovery",
+        )
+        phase = "repair_unavailable"
+    elif recover_interrupted:
+        raise SopError(
+            "--recover-interrupted is valid only when the run phase is 'repairing'"
+        )
+
     if phase == "repair_verified":
+        if refresh_request_only:
+            manifest_path = resolved_run_dir / "pipeline-manifest.json"
+            manifest = _read_json_object(manifest_path, "pipeline manifest")
+            repair_cycle = _next_repair_cycle(state, resolved_run_dir) - 1
+            repair_cycle = max(1, repair_cycle)
+            source_request, source_request_path = _load_scoped_repair_request(
+                state,
+                manifest,
+                resolved_run_dir,
+                cycle=repair_cycle,
+            )
+            source_request, source_request_path = _persist_rebuilt_repair_request(
+                state=state,
+                manifest=manifest,
+                run_dir=resolved_run_dir,
+                output_root=config.output_root,
+                request=source_request,
+                source_path=source_request_path,
+                cycle=repair_cycle,
+            )
+            if source_request.get("no_repairable_scope"):
+                raise SopError(
+                    "The current audit no longer contains a verified repair scope"
+                )
+            retry_summary = _write_verified_repair_retry_batch(
+                config,
+                state=state,
+                manifest=manifest,
+                run_dir=resolved_run_dir,
+                request=source_request,
+                cycle=repair_cycle,
+            )
+            _transition(
+                resolved_run_dir,
+                state,
+                config.output_root,
+                "repair_verified",
+                repair_cycle=repair_cycle,
+                scoped_retry_batch=str(retry_summary),
+                repair_request_refreshed=True,
+                stage="repair_scope_refresh",
+            )
+            _write_json(manifest_path, manifest)
+            write_run_report(resolved_run_dir)
+            print(
+                "Refreshed verified repair request and safe scoped retry: "
+                f"{retry_summary}"
+            )
+            return resolved_run_dir
+        retry_summary = _refresh_verified_scoped_retry_batch(
+            config,
+            run_dir=resolved_run_dir,
+            state=state,
+        )
         if not retry_verified:
             print(
                 "Repair is already verified; the scoped retry remains pending "
                 "explicit --retry-verified authorization."
             )
             return resolved_run_dir
-        retry_summary = _saved_scoped_retry_batch(state, resolved_run_dir)
         return execute_daily_run(
             config,
             run_dir=resolved_run_dir,
@@ -2319,7 +2563,67 @@ def repair_daily_run(
         raise SopError("Automatic repair is disabled in the daily configuration")
 
     consumed_cycles = _repair_cycle_count(state, resolved_run_dir)
-    repair_cycle = consumed_cycles + 1
+    repair_cycle = _next_repair_cycle(state, resolved_run_dir)
+    manifest_path = resolved_run_dir / "pipeline-manifest.json"
+    manifest = _read_json_object(manifest_path, "pipeline manifest")
+    prior_verified = _latest_verified_repair_attempt(
+        state,
+        run_dir=resolved_run_dir,
+    )
+    if (
+        prior_verified is not None
+        and _verified_repair_is_newer_than_execution(
+            state,
+            prior_verified[1],
+        )
+    ):
+        verified_attempt, verified_result, verified_request = prior_verified
+        verified_cycle = int(verified_attempt.get("cycle") or 1)
+        retry_summary = _write_verified_repair_retry_batch(
+            config,
+            state=state,
+            manifest=manifest,
+            run_dir=resolved_run_dir,
+            request=verified_request,
+            cycle=verified_cycle,
+        )
+        state["consumed_repair_cycles"] = consumed_cycles
+        state.setdefault("repair_reconciliations", []).append(
+            {
+                "attempt": int(verified_attempt.get("attempt") or 0),
+                "cycle": verified_cycle,
+                "status": verified_result.get("status"),
+                "result_path": verified_attempt.get("result_path"),
+                "reconciled_at": _now(),
+            }
+        )
+        _transition(
+            resolved_run_dir,
+            state,
+            config.output_root,
+            "repair_verified",
+            repair_cycle=verified_cycle,
+            repair_attempt=int(verified_attempt.get("attempt") or 0),
+            consumed_repair_cycles=state["consumed_repair_cycles"],
+            changed_files=[],
+            scoped_retry_batch=str(retry_summary),
+            repair_reconciled=True,
+            stage="repair_result_reconciliation",
+        )
+        _write_json(manifest_path, manifest)
+        write_run_report(resolved_run_dir)
+        if retry_verified:
+            return execute_daily_run(
+                config,
+                run_dir=resolved_run_dir,
+                retry=True,
+                _retry_summary_path=retry_summary,
+            )
+        print(
+            "Recovered a previously verified no-diff repair result; "
+            "the scoped retry remains pending explicit --retry-verified authorization."
+        )
+        return resolved_run_dir
     if consumed_cycles >= config.auto_repair.max_cycles:
         _transition(
             resolved_run_dir,
@@ -2336,8 +2640,6 @@ def repair_daily_run(
             "Automatic repair has no remaining code-repair cycles"
         )
 
-    manifest_path = resolved_run_dir / "pipeline-manifest.json"
-    manifest = _read_json_object(manifest_path, "pipeline manifest")
     source_request, source_request_path = _load_scoped_repair_request(
         state,
         manifest,
@@ -2384,6 +2686,14 @@ def repair_daily_run(
         return resolved_run_dir
 
     readiness = check_repair_agent_readiness(config.auto_repair)
+    if (
+        not readiness.ready
+        and readiness.code == "repair_agent_authentication_failed"
+    ):
+        # A ChatGPT-backed Codex session can refresh its short-lived token
+        # during the first remote probe while that probe still returns 401.
+        # One immediate recheck is bounded and does not consume a repair cycle.
+        readiness = check_repair_agent_readiness(config.auto_repair)
     if not readiness.ready:
         state["consumed_repair_cycles"] = consumed_cycles
         _transition(
@@ -2410,11 +2720,13 @@ def repair_daily_run(
     repair_duration_seconds = 0.0
 
     while consumed_cycles < config.auto_repair.max_cycles:
-        repair_cycle = consumed_cycles + 1
+        repair_cycle = _next_repair_cycle(state, resolved_run_dir)
+        budget_cycle = consumed_cycles + 1
         repair_attempt = _next_repair_attempt(state)
         active_request = {
             **dict(last_request),
             "cycle": repair_cycle,
+            "budget_cycle": budget_cycle,
             "attempt": repair_attempt,
             "resumed_from": str(last_request_path),
         }
@@ -2445,6 +2757,7 @@ def repair_daily_run(
             root=config.root,
             run_dir=resolved_run_dir,
             request=active_request,
+            auth_mode=readiness.auth_mode,
         )
         repair_duration_seconds = round(
             time.monotonic() - repair_started,
@@ -2584,10 +2897,69 @@ def _repair_attempt_result(
     return result or attempt
 
 
+def _latest_verified_repair_attempt(
+    state: Mapping[str, Any],
+    *,
+    run_dir: Path,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]] | None:
+    attempts = state.get("repair_attempts")
+    if not isinstance(attempts, list):
+        return None
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, Mapping):
+            continue
+        result = _repair_attempt_result(attempt, run_dir=run_dir)
+        if (
+            not repair_result_is_verified(result)
+            or list(result.get("changed_files") or [])
+        ):
+            continue
+        verification = result.get("verification")
+        if not isinstance(verification, list) or not verification:
+            continue
+        if any(
+            not isinstance(item, Mapping) or item.get("status") != "passed"
+            for item in verification
+        ):
+            continue
+        attempt_number = int(attempt.get("attempt") or 0)
+        cycle = int(attempt.get("cycle") or 0)
+        if attempt_number <= 0 or cycle <= 0:
+            continue
+        request_path = _repair_request_path(
+            run_dir,
+            cycle=cycle,
+            attempt=attempt_number,
+        )
+        request = _read_optional_json(request_path)
+        if not isinstance(request, Mapping):
+            continue
+        return attempt, result, request
+    return None
+
+
 def _repair_cycle_count(
     state: Mapping[str, Any],
     run_dir: Path,
 ) -> int:
+    latest_verified_attempt = 0
+    attempts = state.get("repair_attempts")
+    if isinstance(attempts, list):
+        for item in attempts:
+            if not isinstance(item, Mapping):
+                continue
+            result = _repair_attempt_result(item, run_dir=run_dir)
+            if (
+                repair_result_is_verified(result)
+                and not _verified_repair_is_newer_than_execution(
+                    state,
+                    result,
+                )
+            ):
+                latest_verified_attempt = max(
+                    latest_verified_attempt,
+                    int(item.get("attempt") or item.get("cycle") or 0),
+                )
     cycles = state.get("repair_cycles")
     if not isinstance(cycles, list):
         return 0
@@ -2597,7 +2969,43 @@ def _repair_cycle_count(
         )
         for item in cycles
         if isinstance(item, Mapping)
+        and int(item.get("attempt") or item.get("cycle") or 0)
+        > latest_verified_attempt
     )
+
+
+def _next_repair_cycle(
+    state: Mapping[str, Any],
+    run_dir: Path,
+) -> int:
+    """Return a monotonic artifact cycle independent of the current budget epoch."""
+    recorded: list[Mapping[str, Any]] = []
+    for key in ("repair_attempts", "repair_cycles"):
+        values = state.get(key)
+        if isinstance(values, list):
+            recorded.extend(item for item in values if isinstance(item, Mapping))
+    return max(
+        (
+            int(item.get("cycle") or 0)
+            for item in recorded
+            if repair_result_consumes_cycle(
+                _repair_attempt_result(item, run_dir=run_dir)
+            )
+        ),
+        default=0,
+    ) + 1
+
+
+def _verified_repair_is_newer_than_execution(
+    state: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> bool:
+    """Only reconcile a verified result that has not already been browser-tested."""
+    verified_at = _parse_datetime(result.get("finished_at"))
+    execution_at = _last_execution_finished_at(state)
+    if verified_at is None:
+        return True
+    return execution_at is None or verified_at > execution_at
 
 
 def _next_repair_attempt(state: Mapping[str, Any]) -> int:
@@ -2795,6 +3203,147 @@ def _saved_scoped_retry_batch(
     return path
 
 
+def _rebuild_verified_repair_retry_packages(
+    config: DailyConfig,
+    *,
+    run_dir: Path,
+    manifest: Mapping[str, Any],
+    retry_summary: Path,
+    cycle: int,
+) -> Path:
+    """Rebuild verified repair targets with current code and approved facts.
+
+    Repair verification proves the source change, but prepared runtime packages
+    embed both the runtime implementation and a snapshot of the approved
+    profile.  Reusing the original package would therefore retry stale code or
+    stale facts.  Rebuild only the already-scoped targets in the main process;
+    the isolated Repair Agent still never receives private profile data.
+    """
+    from job_agent.cli import _job_from_dict, _prepare_application_package
+
+    try:
+        selected = json.loads(retry_summary.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SopError("Verified repair retry batch cannot be read") from exc
+    if not isinstance(selected, list) or not selected:
+        raise SopError("Verified repair retry batch has no scoped targets")
+
+    artifacts = manifest.get("artifacts")
+    jobs_value = artifacts.get("jobs") if isinstance(artifacts, Mapping) else None
+    if not jobs_value:
+        raise SopError("Pipeline manifest does not contain normalized jobs")
+    jobs_path = _artifact_path(jobs_value, config.root)
+    if not _is_within(jobs_path, run_dir) or not jobs_path.is_file():
+        raise SopError("Normalized jobs are missing or belong to another run")
+    try:
+        raw_jobs_payload = json.loads(jobs_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SopError("Normalized jobs cannot be read for scoped rebuilding") from exc
+    if not isinstance(raw_jobs_payload, list):
+        raise SopError("Normalized jobs must be a list for scoped rebuilding")
+    raw_jobs = [
+        item for item in raw_jobs_payload if isinstance(item, Mapping)
+    ]
+
+    rebuilt: list[dict[str, Any]] = []
+    for item in selected:
+        if not isinstance(item, Mapping):
+            raise SopError("Verified repair retry target is not an object")
+        apply_url = str(item.get("apply_url") or "").strip()
+        company = str(item.get("company") or "").strip().casefold()
+        title = str(item.get("title") or "").strip().casefold()
+        raw_job = next(
+            (
+                candidate
+                for candidate in raw_jobs
+                if apply_url
+                and str(
+                    candidate.get("apply_url")
+                    or candidate.get("source_url")
+                    or ""
+                ).strip()
+                == apply_url
+            ),
+            None,
+        )
+        if raw_job is None:
+            matches = [
+                candidate
+                for candidate in raw_jobs
+                if str(candidate.get("company") or "").strip().casefold()
+                == company
+                and str(candidate.get("title") or "").strip().casefold()
+                == title
+            ]
+            raw_job = matches[0] if len(matches) == 1 else None
+        if raw_job is None:
+            raise SopError(
+                "Original normalized job is unavailable for verified repair "
+                f"target {item.get('application_id') or company or title}"
+            )
+
+        application_id = re.sub(
+            r"[^A-Za-z0-9._-]+",
+            "-",
+            str(item.get("application_id") or "unknown"),
+        ).strip("-") or "unknown"
+        base_dir = (
+            run_dir
+            / "repair"
+            / f"rebuilt-cycle-{cycle:02d}-application-{application_id}"
+        )
+        package_dir = base_dir
+        suffix = 2
+        while package_dir.exists():
+            package_dir = base_dir.with_name(
+                f"{base_dir.name}-{suffix:02d}"
+            )
+            suffix += 1
+
+        summary = dict(
+            _prepare_application_package(
+                _job_from_dict(dict(raw_job)),
+                package_dir,
+                resume_source_dir=config.resume_source_dir,
+                db=config.database,
+                profile=config.profile,
+                sensitive_kb=config.sensitive_kb,
+                use_llm=config.use_llm,
+                runtime_headless=config.browser_headless,
+                profile_vector_db=config.profile_vector_db,
+                required_resume_pdf=config.required_resume_pdf,
+            )
+        )
+        expected_application_id = str(item.get("application_id") or "")
+        rebuilt_application_id = str(summary.get("application_id") or "")
+        if (
+            expected_application_id
+            and rebuilt_application_id
+            and rebuilt_application_id != expected_application_id
+        ):
+            raise SopError(
+                "Scoped repair rebuild changed the tracked application ID"
+            )
+        for key in (
+            "retry",
+            "repair_verified",
+            "retry_scope",
+            "repair_cycle",
+            "original_terminal_status",
+        ):
+            if item.get(key) is not None:
+                summary[key] = item.get(key)
+        if expected_application_id and not rebuilt_application_id:
+            summary["application_id"] = expected_application_id
+        summary["original_package_dir"] = str(item.get("package_dir") or "")
+        summary_path = package_dir / "repair-package-summary.json"
+        _write_json(summary_path, summary)
+        rebuilt.append(summary)
+
+    _write_json_list(retry_summary, rebuilt)
+    return retry_summary
+
+
 def _write_verified_repair_retry_batch(
     config: DailyConfig,
     *,
@@ -2819,6 +3368,13 @@ def _write_verified_repair_retry_batch(
     )
     if retry_summary is None:
         raise SopError("Verified repair has no safe, scoped applications to retry")
+    retry_summary = _rebuild_verified_repair_retry_packages(
+        config,
+        run_dir=run_dir,
+        manifest=manifest,
+        retry_summary=retry_summary,
+        cycle=cycle,
+    )
     recovery_retry = None
     state_artifacts = state.get("artifacts")
     if isinstance(state_artifacts, Mapping):
@@ -3504,7 +4060,9 @@ def _execution_attempt_audits(
     # Keep those same-run audit files visible to reports and recovery planning.
     # Only root-level execution audit files are considered; package-local
     # audits and unrelated artifacts must never be folded into the run.
-    for candidate in sorted(run_dir.glob("execution-audit-*.json")):
+    audit_candidates = [run_dir / "execution-audit.json"]
+    audit_candidates.extend(sorted(run_dir.glob("execution-audit-*.json")))
+    for candidate in audit_candidates:
         try:
             resolved = candidate.resolve()
             resolved.relative_to(run_dir.resolve())
@@ -3662,6 +4220,58 @@ def _execution_audit_for_report(
     return merged
 
 
+def _assert_audit_phase_consistency(
+    run_dir: Path,
+    state: Mapping[str, Any],
+    audit: Mapping[str, Any] | None,
+) -> None:
+    """Reject a lower-layer execution that bypassed Daily SOP transitions."""
+    if not isinstance(audit, Mapping):
+        return
+    progress = audit.get("progress")
+    if not isinstance(progress, Mapping) or not bool(progress.get("complete")):
+        return
+    phase = str(state.get("phase") or "").strip().lower()
+    if phase in {
+        "created",
+        "preparing",
+        "prepared",
+        "prepared_empty",
+        "waiting_for_candidates",
+        "executing",
+    }:
+        raise SopError(
+            "Complete execution audit exists while the run is still in "
+            f"phase '{phase}'; production execution bypassed Daily SOP. "
+            "Use daily_sop.py execute/run --execute after reconciliation."
+        )
+
+
+def _validate_latest_run_phase(config: DailyConfig) -> None:
+    latest_path = config.output_root / LATEST_FILE_NAME
+    latest = _read_optional_json(latest_path)
+    if not isinstance(latest, Mapping):
+        return
+    raw_run_dir = latest.get("run_dir")
+    if not raw_run_dir:
+        return
+    run_dir = Path(str(raw_run_dir))
+    if not run_dir.is_absolute():
+        run_dir = config.root / run_dir
+    if not run_dir.is_dir():
+        return
+    state = _read_optional_json(run_dir / STATE_FILE_NAME)
+    if not isinstance(state, Mapping):
+        return
+    audit = _execution_audit_for_report(
+        state,
+        run_dir=run_dir.resolve(),
+        root=config.root,
+        fallback=_read_optional_json(run_dir / "execution-audit.json"),
+    )
+    _assert_audit_phase_consistency(run_dir, state, audit)
+
+
 def write_run_report(run_dir: Path) -> Path:
     state = _read_json_object(run_dir / STATE_FILE_NAME, "run state")
     settings = state.get("settings") if isinstance(state.get("settings"), dict) else {}
@@ -3686,6 +4296,7 @@ def write_run_report(run_dir: Path) -> Path:
         root=root,
         fallback=_read_optional_json(audit_path),
     )
+    _assert_audit_phase_consistency(run_dir, state, audit)
 
     pipeline_counts = (
         manifest.get("counts", {}) if isinstance(manifest, dict) else {}
@@ -4021,6 +4632,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "checking Codex readiness or starting a repair."
         ),
     )
+    repair_parser.add_argument(
+        "--recover-interrupted",
+        action="store_true",
+        help=(
+            "After confirming no prior repair process is active, record a "
+            "stale 'repairing' phase as an infrastructure interruption and "
+            "resume without consuming a code-repair cycle."
+        ),
+    )
 
     recover_parser = subparsers.add_parser(
         "recover",
@@ -4098,6 +4718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.command == "ledger":
                 return 0
             if args.command == "check":
+                _validate_latest_run_phase(config)
                 report = run_preflight(config)
                 print_preflight(report)
                 return 0 if report.ok else 2
@@ -4164,6 +4785,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         run_dir=run_dir,
                         retry_verified=args.retry_verified,
                         refresh_request_only=args.refresh_request_only,
+                        recover_interrupted=args.recover_interrupted,
                     )
                 finally:
                     refresh_application_ledger(config)
@@ -4192,6 +4814,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _run_command(command: Sequence[str], config: DailyConfig) -> int:
     env = os.environ.copy()
+    # The lower CLI remains useful for offline fixtures, but a real daily
+    # output directory may only be executed by this SOP-owned subprocess.
+    env["JOB_AGENT_DAILY_SOP_EXECUTION"] = "1"
     env["BROWSER_HEADLESS"] = "1" if config.browser_headless else "0"
     env["JOB_AGENT_SUBMIT_COMPLETE"] = "1" if config.submit_complete else "0"
     env["JOB_AGENT_LLM_ANSWERS"] = "1" if config.llm_answers else "0"
@@ -4214,6 +4839,7 @@ def _run_execution_command(
     audit_path: Path,
     run_dir: Path,
     repair_cycle: int,
+    repair_budget_cycle: int | None = None,
     repair_attempt: int | None = None,
     poll_seconds: float = 0.25,
 ) -> tuple[int, IncrementalRepairOutcome | None]:
@@ -4240,6 +4866,9 @@ def _run_execution_command(
                 if candidate is not None:
                     attempt = repair_attempt or repair_cycle
                     candidate["attempt"] = attempt
+                    candidate["budget_cycle"] = (
+                        repair_budget_cycle or repair_cycle
+                    )
                     repair_request = candidate
                     request_path = _repair_request_path(
                         run_dir,
@@ -4667,7 +5296,7 @@ def _read_repair_policy(payload: Mapping[str, Any]) -> RepairPolicy:
                 "max_cycles",
                 default=1,
                 minimum=1,
-                maximum=3,
+                maximum=5,
             ),
             agent_binary=agent_binary,
             agent_timeout_seconds=_read_int(
@@ -4822,11 +5451,14 @@ def _apply_heartbeat_wake_logic(
     state: dict[str, Any],
     transition_details: dict[str, Any],
 ) -> None:
-    """Set next_wake_at with exponential backoff when no candidate is prepared.
+    """Set next_wake_at using the configured interval when no candidate is prepared.
 
-    Also resets the no-progress counter when a new batch appears and writes a
-    small heartbeat-state file that external automations can read without
-    opening every run directory.
+    Empty candidate polls are expected while sources refresh.  The configured
+    interval is the external scheduler contract; exponential backoff can leave
+    an unmet daily target idle for tens of minutes even when new listings have
+    arrived.  Also resets the no-progress counter when a new batch appears and
+    writes a small heartbeat-state file that external automations can read
+    without opening every run directory.
     """
     hb = _read_heartbeat_state(config)
     hb["last_run_at"] = _now()
@@ -4844,10 +5476,7 @@ def _apply_heartbeat_wake_logic(
         empty_count = int(hb.get("empty_wake_count", 0)) + 1
         hb["empty_wake_count"] = empty_count
         base = max(1, config.empty_wake_minutes)
-        backoff = min(
-            base * (2 ** (empty_count - 1)),
-            HEARTBEAT_MAX_EMPTY_BACKOFF_MINUTES,
-        )
+        backoff = base
         next_wake = _next_wake_at(backoff)
         hb["backoff_minutes"] = backoff
         hb["pause_until"] = None

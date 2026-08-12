@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -9,11 +10,59 @@ import pytest
 
 from job_agent.repair_orchestrator import (
     RepairPolicy,
+    _repair_prompt,
+    _run_with_process_group_timeout,
+    _verification_environment,
     build_repair_request,
     check_repair_agent_readiness,
     promote_deferred_repair,
+    repair_result_consumes_cycle,
     run_repair_cycle,
 )
+
+
+def test_repair_subprocess_timeout_terminates_the_full_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    signals: list[tuple[int, int]] = []
+
+    class FakeProcess:
+        pid = 43210
+        returncode = None
+
+        def __init__(self, *args, **kwargs):
+            assert kwargs["start_new_session"] is True
+            self.communicate_calls = 0
+
+        def communicate(self, input=None, timeout=None):
+            self.communicate_calls += 1
+            if self.communicate_calls < 3:
+                raise subprocess.TimeoutExpired(["codex"], timeout)
+            self.returncode = -9
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(
+        "job_agent.repair_orchestrator.os.killpg",
+        lambda process_group, sent_signal: signals.append(
+            (process_group, sent_signal)
+        ),
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_with_process_group_timeout(
+            ["codex", "exec"],
+            cwd=tmp_path,
+            env={},
+            input="repair",
+            timeout=1,
+        )
+
+    assert signals == [
+        (43210, signal.SIGTERM),
+        (43210, signal.SIGKILL),
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -45,9 +94,42 @@ def _write_repair_workspace(root: Path) -> None:
     )
 
 
+def test_verification_environment_does_not_disable_offline_fake_submit(
+    tmp_path: Path,
+) -> None:
+    env = _verification_environment(tmp_path)
+
+    assert "JOB_AGENT_SUBMIT_COMPLETE" not in env
+    assert "BROWSER_HEADLESS" not in env
+    assert env["CAPMONSTER_SOLVE_CAPTCHA"] == "0"
+    assert env["RESUME_SOURCE_DIR"] == ""
+    assert env["PYTHONPATH"] == str(tmp_path / "src")
+
+
+def test_repair_prompt_allows_independent_already_fixed_verification() -> None:
+    prompt = _repair_prompt({"findings": []})
+
+    assert "if they do, do not edit files" in prompt
+    assert "independently verified as already fixed" in prompt
+
+
 def test_build_repair_request_fingerprints_country_and_repeated_timeout_fields(
     tmp_path: Path,
 ) -> None:
+    country_package = tmp_path / "applications" / "example"
+    country_package.mkdir(parents=True)
+    (country_package / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {"Country": "United States"},
+                    "screening_answer_rules": [],
+                }
+            }
+        )
+        + ";\n"
+    )
     timeout_evidence = tmp_path / "applications" / "waymo" / "execution-timeout.txt"
     timeout_evidence.parent.mkdir(parents=True)
     timeout_evidence.write_text(
@@ -67,13 +149,14 @@ def test_build_repair_request_fingerprints_country_and_repeated_timeout_fields(
                 "company": "Example",
                 "title": "Engineer",
                 "status": "autofill_completed_blocked",
+                "package_dir": str(country_package),
                 "review_items": [
                     {
                         "label": "Country",
-                        "reason": (
-                            "fill error: no combobox option matches saved answer; "
-                            "available options: Select..."
-                        ),
+                            "reason": (
+                                "dropdown selection readback failed; available options: "
+                                "Select, United States, Canada"
+                            ),
                         "sensitive": False,
                         "blocking": True,
                     }
@@ -167,6 +250,11 @@ def test_build_repair_request_excludes_user_authored_candidate_answers(
         "What's the most interesting paper, blog post, or documentation "
         "you've read in the past month?"
     )
+    exceptional_ability_label = (
+        "We look for evidence of exceptional ability. Please provide us with "
+        "3-4 examples highlighting your exceptional ability. This is your "
+        "moment to WOW us! First example:*"
+    )
     audit = {
         "applications": [
             {
@@ -190,6 +278,19 @@ def test_build_repair_request_excludes_user_authored_candidate_answers(
                     {
                         "label": "Application form",
                         "reason": "no visible job-application form was found",
+                        "sensitive": False,
+                        "blocking": True,
+                    }
+                ],
+            },
+            {
+                "company": "Neuralink",
+                "title": "Firmware Engineer Intern",
+                "status": "autofill_completed_blocked",
+                "review_items": [
+                    {
+                        "label": exceptional_ability_label,
+                        "reason": "unmapped field",
                         "sensitive": False,
                         "blocking": True,
                     }
@@ -224,7 +325,226 @@ def test_build_repair_request_excludes_user_authored_candidate_answers(
         "Stripe"
     ]
     assert label not in json.dumps(request)
+    assert exceptional_ability_label not in json.dumps(request)
     assert "High School" not in json.dumps(request)
+
+
+def test_build_repair_request_routes_persisted_fact_mapping_and_dynamic_controls(
+    tmp_path: Path,
+) -> None:
+    onsite_label = "Can you regularly work on-site?"
+    package_dir = tmp_path / "applications" / "acme"
+    package_dir.mkdir(parents=True)
+    (package_dir / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {onsite_label: "Yes"},
+                    "screening_answer_rules": [],
+                }
+            }
+        )
+        + ";\n"
+    )
+    audit = {
+        "applications": [
+            {
+                "application_id": "1",
+                "company": "Acme",
+                "title": "Engineer",
+                "status": "autofill_completed_blocked",
+                "package_dir": str(package_dir),
+                "review_items": [
+                    {
+                        "label": onsite_label,
+                        "reason": (
+                            "fill error: no combobox option matches saved answer; "
+                            "available options: Yes, No"
+                        ),
+                        "sensitive": False,
+                        "blocking": True,
+                    },
+                    {
+                        "label": "Please check all that apply:",
+                        "reason": (
+                            "checkbox group needs saved answer / manual selection"
+                        ),
+                        "sensitive": False,
+                        "blocking": True,
+                    },
+                    {
+                        "label": "What is your English level?",
+                        "reason": (
+                            "fill error: no combobox option matches saved answer"
+                        ),
+                        "sensitive": False,
+                        "blocking": True,
+                    },
+                ],
+            }
+        ]
+    }
+
+    request = build_repair_request(audit, run_dir=tmp_path, cycle=1)
+
+    assert request is not None
+    serialized = json.dumps(request)
+    assert onsite_label in serialized
+    assert "Please check all that apply" in serialized
+    assert "English level" not in serialized
+    codes = {
+        fingerprint["code"]
+        for finding in request["findings"]
+        for fingerprint in finding["fingerprints"]
+    }
+    assert "combobox_option_or_commit_failure" in codes
+    assert "checkbox_option_or_commit_failure" in codes
+    assert request["findings"][0]["retry_withheld"] is True
+    assert request["findings"][0]["retry_withheld_reason"] == (
+        "unresolved_candidate_fact"
+    )
+    assert request["retry_targets"] == []
+
+
+def test_build_repair_request_does_not_treat_missing_preference_as_code_defect(
+    tmp_path: Path,
+) -> None:
+    package_dir = tmp_path / "applications" / "anduril"
+    package_dir.mkdir(parents=True)
+    (package_dir / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {
+                        "What is your top location preference? *": "New York City"
+                    },
+                    "screening_answer_rules": [],
+                }
+            }
+        )
+        + ";\n"
+    )
+    audit = {
+        "applications": [
+            {
+                "company": "Anduril",
+                "title": "Engineer",
+                "status": "autofill_completed_blocked",
+                "package_dir": str(package_dir),
+                "review_items": [
+                    {
+                        "label": "What is your top location preference? *",
+                        "reason": (
+                            "fill error: no combobox option matches saved answer; "
+                            "available options: Costa Mesa, Boston, Atlanta"
+                        ),
+                        "sensitive": False,
+                        "blocking": True,
+                    }
+                ],
+            },
+            {
+                "company": "Repairable",
+                "title": "Engineer",
+                "status": "autofill_failed",
+                "review_items": [
+                    {
+                        "label": "Application form",
+                        "reason": "no visible job-application form was found",
+                        "sensitive": False,
+                        "blocking": True,
+                    }
+                ],
+            },
+        ]
+    }
+
+    request = build_repair_request(audit, run_dir=tmp_path, cycle=1)
+
+    assert request is not None
+    assert [finding["company"] for finding in request["findings"]] == [
+        "Repairable"
+    ]
+    assert "top location preference" not in json.dumps(request)
+
+
+def test_build_repair_request_withholds_mixed_fact_application_from_retry(
+    tmp_path: Path,
+) -> None:
+    package_dir = tmp_path / "applications" / "anduril"
+    package_dir.mkdir(parents=True)
+    (package_dir / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {},
+                    "screening_answer_rules": [
+                        {
+                            "patterns": ["export controls"],
+                            "answer": "Not applicable",
+                        }
+                    ],
+                }
+            }
+        )
+        + ";\n"
+    )
+    audit = {
+        "applications": [
+            {
+                "company": "Anduril",
+                "title": "Engineer",
+                "status": "autofill_completed_blocked",
+                "package_dir": str(package_dir),
+                "review_items": [
+                    {
+                        "label": "What is your top location preference? *",
+                        "reason": (
+                            "fill error: no combobox option matches saved answer; "
+                            "available options: Costa Mesa, Boston, Atlanta"
+                        ),
+                        "sensitive": False,
+                        "blocking": True,
+                    },
+                    {
+                        "label": "EXPORT CONTROLS",
+                        "reason": (
+                            "fill error: no combobox option matches saved answer; "
+                            "available options: None of the above"
+                        ),
+                        "sensitive": True,
+                        "blocking": True,
+                    },
+                ],
+            },
+            {
+                "company": "Repairable",
+                "title": "Engineer",
+                "status": "autofill_failed",
+                "review_items": [
+                    {
+                        "label": "Application form",
+                        "reason": "no visible job-application form was found",
+                        "blocking": True,
+                    }
+                ],
+            },
+        ]
+    }
+
+    request = build_repair_request(audit, run_dir=tmp_path, cycle=1)
+
+    assert request is not None
+    anduril = next(
+        finding for finding in request["findings"] if finding["company"] == "Anduril"
+    )
+    assert anduril["retry_withheld"] is True
+    assert [item["company"] for item in request["retry_targets"]] == [
+        "Repairable"
+    ]
 
 
 def test_repair_readiness_reports_expired_authentication(
@@ -317,6 +637,41 @@ def test_repair_readiness_uses_ephemeral_api_key_for_remote_probe(
 
     assert readiness.ready is True
     assert len(commands) == 1
+
+
+def test_repair_readiness_falls_back_to_chatgpt_login_after_stale_openai_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    agent = tmp_path / "codex"
+    agent.write_text("#!/bin/sh\n")
+    agent.chmod(0o755)
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "stale-openai-key")
+    commands: list[list[str]] = []
+
+    def stale_key_then_login(command, **kwargs):
+        commands.append(list(command))
+        if command[1:3] == ["login", "status"]:
+            assert "OPENAI_API_KEY" not in kwargs["env"]
+            assert "CODEX_API_KEY" not in kwargs["env"]
+            return subprocess.CompletedProcess(command, 0, stdout="Logged in using ChatGPT", stderr="")
+        if len([item for item in commands if item[1] == "exec"]) == 1:
+            assert kwargs["env"]["CODEX_API_KEY"] == "stale-openai-key"
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="401 Unauthorized: invalid_api_key")
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+        assert "CODEX_API_KEY" not in kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout="READY", stderr="")
+
+    readiness = check_repair_agent_readiness(
+        RepairPolicy(enabled=True, agent_binary=str(agent)),
+        runner=stale_key_then_login,
+    )
+
+    assert readiness.ready is True
+    assert readiness.code == "ready"
+    assert readiness.auth_mode == "login"
+    assert [command[1] for command in commands] == ["exec", "login", "exec"]
 
 
 def test_repair_readiness_projects_selected_custom_provider_without_secret_leak(
@@ -633,6 +988,35 @@ def test_no_diff_repair_is_verified_before_being_marked_already_fixed(
     )
     assert verification_calls == [["verify-target"], ["verify-all"]]
     assert all(item["status"] == "passed" for item in result["verification"])
+
+
+def test_verified_result_status_overrides_unavailable_word_in_agent_summary() -> None:
+    assert repair_result_consumes_cycle(
+        {
+            "status": "already_fixed_verified",
+            "reason": "repair_agent_made_no_changes_all_verification_passed",
+            "agent_stdout": "Focused tests were unavailable inside the agent shell.",
+        }
+    ) is True
+
+
+def test_exhausted_guard_does_not_consume_a_code_repair_cycle() -> None:
+    assert repair_result_consumes_cycle(
+        {
+            "status": "exhausted",
+            "reason": "maximum_repair_cycles_reached",
+        }
+    ) is False
+
+
+def test_verification_failure_consumes_cycle_even_if_agent_diff_mentions_rate_limit() -> None:
+    assert repair_result_consumes_cycle(
+        {
+            "status": "verification_failed",
+            "reason": "verification_command_failed",
+            "agent_stderr": "commentary mentions rate limit handling",
+        }
+    ) is True
 
 
 def test_no_diff_repair_still_fails_when_verification_fails(

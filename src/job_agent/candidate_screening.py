@@ -19,10 +19,42 @@ _NON_US_LOCATION_PATTERN = re.compile(
     r"germany|france|spain|poland|netherlands|united kingdom|uk|australia|japan|singapore|"
     r"romania|ireland|new zealand|hungary|serbia|denmark|sweden|finland|israel|italy|"
     r"warsaw|wroclaw|bucharest|bangalore|galway|auckland|budapest|belgrade|aarhus|"
-    r"stockholm|helsinki|herzliya|milan|osborne park|kingsgrove)\b",
+    r"stockholm|helsinki|herzliya|milan|osborne park|kingsgrove|"
+    r"london|munich|berlin|dublin|paris|prague|amsterdam|lisbon|madrid|barcelona|"
+    r"zurich|geneva|brussels|vienna|warsaw|oslo|copenhagen|toronto|vancouver|montreal|"
+    r"ottawa|calgary|ontario|dubai|abu dhabi|doha|qatar|bahrain|hong kong|kuala lumpur|manila|jakarta|"
+    r"bangkok|ho chi minh|hanoi|seoul|tokyo|osaka|taipei|mumbai|hyderabad|pune|delhi|"
+    r"chennai|bengaluru|bangalore|sydney|melbourne|brisbane|perth|adelaide|"
+    r"auckland|wellington|manchester|birmingham|edinburgh|glasgow|leeds|bristol|"
+    r"athina|athens|antalya|istanbul|cairo|lagos|nairobi|johannesburg|cape town|"
+    r"mexico city|sao paulo|buenos aires|santiago|lima|bogota|"
+    r"tel aviv|lahore|greece|belgium|portugal|czech republic|czechia|"
+    r"philippines|south korea|taiwan|vietnam|thailand|indonesia|pakistan|"
+    r"norway|iceland|kuwait|gurugram|shanghai|düsseldorf|"
+    r"sao jose dos campos|reykjavík|berlin|vienna|warsaw|"
+    r"zurich|geneva|amsterdam|brussels|hong kong)\b",
     flags=re.IGNORECASE,
 )
 _US_LOCATION_PATTERN = re.compile(r"\b(?:united states|u\.?s\.?a?|usa|america)\b", flags=re.IGNORECASE)
+
+_UNUSABLE_APPLICATION_URL_PATTERNS = (
+    "ycombinator.com/companies",
+    "workatastartup.com",
+    "notion.so",
+    "angel.co",
+    "news.ycombinator.com",
+    "greenhouse.io/coinbase",
+    "greenhouse.io/epicgames",
+    "greenhouse.io/wayve",
+)
+
+
+def application_url_unusable(url: str | None) -> bool:
+    """Return True when a public listing points to a non-direct-application page."""
+    raw = str(url or "").lower()
+    return bool(raw) and any(pattern in raw for pattern in _UNUSABLE_APPLICATION_URL_PATTERNS)
+
+
 _NO_SPONSORSHIP_PATTERN = re.compile(
     r"(?:unable|not\s+(?:currently\s+)?able|cannot|can't|can\s+not)[^.]{0,80}"
     r"(?:sponsor|visa sponsorship|sponsorship)|"
@@ -48,6 +80,14 @@ _US_CITIZENSHIP_REQUIRED_PATTERN = re.compile(
     r"(?:must(?:\s+be)?|requires?)[^.]{0,80}u\.?\s*s\.?\s*person|"
     r"(?:clearance)[^.]{0,80}(?:requires?|requiring)[^.]{0,80}"
     r"(?:u\.?\s*s\.?\s*citizenship|u\.?\s*s\.?\s*citizen)",
+    flags=re.IGNORECASE,
+)
+_CLEARANCE_REQUIRED_PATTERN = re.compile(
+    r"(?:requires?|must(?:\s+be)?|need(?:s)?(?:\s+to\s+be)?|eligible\s+for)"
+    r"[^.]{0,80}(?:security\s+clearance|ts/sci|ts\s*/\s*sci|top\s+secret|secret\s+clearance)|"
+    r"(?:security\s+clearance|ts/sci|ts\s*/\s*sci|top\s+secret|secret\s+clearance)"
+    r"[^.]{0,80}(?:required|mandatory|must\s+hold|must\s+possess|must\s+have)|"
+    r"ts\s*/\s*sci(?:\s+with\s+[a-z\s-]+)?\s+clearance[^.]{0,40}required",
     flags=re.IGNORECASE,
 )
 _MINIMUM_EXPERIENCE_PATTERN = re.compile(
@@ -78,6 +118,24 @@ def screen_job_for_candidate(job: Job, profile: dict[str, Any] | None) -> Candid
     """
     if not profile:
         return CandidateScreeningResult(eligible=True, reasons=[])
+
+    company = str(job.company or "").strip()
+    title = str(job.title or "").strip()
+    if company.lower() in {"", "unknown company"}:
+        return CandidateScreeningResult(
+            eligible=False,
+            reasons=["listing does not identify an employer"],
+        )
+    if title.lower() in {"", "unknown role"}:
+        return CandidateScreeningResult(
+            eligible=False,
+            reasons=["listing does not identify a role"],
+        )
+    if application_url_unusable(job.apply_url or job.source_url):
+        return CandidateScreeningResult(
+            eligible=False,
+            reasons=["listing does not expose a direct application form"],
+        )
 
     overrides = (profile or {}).get("screening_overrides") or {}
 
@@ -119,6 +177,13 @@ def screen_job_for_candidate(job: Job, profile: dict[str, Any] | None) -> Candid
         and _US_CITIZENSHIP_REQUIRED_PATTERN.search(job.raw_jd or "")
     ):
         reasons.append("listing requires U.S. citizenship not supported by the candidate profile")
+
+    if (
+        not overrides.get("ignore_clearance_requirements", False)
+        and not _clearance_eligible(profile)
+        and _CLEARANCE_REQUIRED_PATTERN.search(job.raw_jd or "")
+    ):
+        reasons.append("listing requires a security clearance not supported by the candidate profile")
 
     required_years = _minimum_required_years(raw_jd)
     candidate_years = _candidate_max_years(profile)
@@ -213,3 +278,19 @@ def _is_us_citizen(profile: dict[str, Any]) -> bool:
         if value.get("approved") and str(value.get("answer") or "").strip().lower() in {"yes", "true", "1"}:
             return True
     return False
+
+
+def _clearance_eligible(profile: dict[str, Any]) -> bool:
+    direct = str(profile.get("security_clearance_eligibility") or "").strip().lower()
+    if direct in {"yes", "true", "1"}:
+        return True
+    if direct in {"no", "false", "0"}:
+        return False
+    entry = (profile.get("sensitive_answers") or {}).get("security_clearance_eligibility")
+    if isinstance(entry, dict) and entry.get("approved"):
+        answer = str(entry.get("answer") or "").strip().lower()
+        if answer in {"yes", "true", "1"}:
+            return True
+        if answer in {"no", "false", "0"}:
+            return False
+    return True

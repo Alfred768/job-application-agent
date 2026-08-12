@@ -156,6 +156,11 @@ def _repair_resume_fixture(
     config_path = tmp_path / "daily.local.json"
     config_path.write_text(json.dumps(payload))
     config = DailyConfig.load(config_path, root=tmp_path)
+    monkeypatch.setattr(
+        daily_sop_module,
+        "_rebuild_verified_repair_retry_packages",
+        lambda _config, *, retry_summary, **_kwargs: retry_summary,
+    )
 
     run_dir = config.output_root / "2026-07-27" / "221010"
     applications_dir = run_dir / "applications"
@@ -374,6 +379,97 @@ def test_daily_config_accepts_limit_100_and_rejects_larger_batches(
         )
 
 
+def test_verified_repair_retry_rebuilds_stale_package_with_current_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import job_agent.cli as cli_module
+
+    config = _config(tmp_path, monkeypatch)
+    run_dir = config.output_root / "2026-07-29" / "101010"
+    original_package = run_dir / "applications" / "001-example"
+    original_package.mkdir(parents=True)
+    jobs_path = run_dir / "jobs.json"
+    jobs_path.write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Example",
+                    "title": "Engineer",
+                    "raw_jd": "Build reliable systems.",
+                    "source": "test",
+                    "apply_url": "https://jobs.example.com/engineer",
+                }
+            ]
+        )
+    )
+    retry_summary = run_dir / "repair" / "retry-batch-cycle-03.json"
+    retry_summary.parent.mkdir()
+    retry_summary.write_text(
+        json.dumps(
+            [
+                {
+                    "application_id": "17",
+                    "company": "Example",
+                    "title": "Engineer",
+                    "apply_url": "https://jobs.example.com/engineer",
+                    "package_dir": str(original_package),
+                    "retry": True,
+                    "repair_verified": True,
+                    "retry_scope": "single_application",
+                    "repair_cycle": 3,
+                    "original_terminal_status": "autofill_completed_blocked",
+                }
+            ]
+        )
+    )
+    captured: dict[str, object] = {}
+
+    def fake_prepare(job, out_dir, **kwargs):
+        captured["job"] = job
+        captured["out_dir"] = out_dir
+        captured["profile"] = kwargs["profile"]
+        out_dir.mkdir(parents=True)
+        runtime_script = out_dir / "autofill-runtime.js"
+        runtime_script.write_text("// rebuilt from current code and profile")
+        return {
+            "application_id": "17",
+            "company": job.company,
+            "title": job.title,
+            "apply_url": job.apply_url,
+            "package_dir": str(out_dir),
+            "runtime_script_path": str(runtime_script),
+        }
+
+    monkeypatch.setattr(
+        cli_module,
+        "_prepare_application_package",
+        fake_prepare,
+    )
+
+    rebuilt_path = daily_sop_module._rebuild_verified_repair_retry_packages(
+        config,
+        run_dir=run_dir,
+        manifest={"artifacts": {"jobs": str(jobs_path)}},
+        retry_summary=retry_summary,
+        cycle=3,
+    )
+
+    assert rebuilt_path == retry_summary
+    item = json.loads(retry_summary.read_text())[0]
+    assert item["application_id"] == "17"
+    assert item["repair_verified"] is True
+    assert item["retry_scope"] == "single_application"
+    assert item["original_package_dir"] == str(original_package)
+    assert item["package_dir"] != str(original_package)
+    assert "/repair/rebuilt-cycle-03-application-17" in item["package_dir"]
+    assert Path(item["runtime_script_path"]).read_text() == (
+        "// rebuilt from current code and profile"
+    )
+    assert Path(item["package_dir"], "repair-package-summary.json").is_file()
+    assert captured["profile"] == config.profile
+
+
 def test_daily_submission_progress_counts_only_confirmed_local_day_submissions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -544,6 +640,35 @@ def test_repair_resume_stops_once_when_agent_becomes_unavailable(
     assert daily_sop_module._repair_cycle_count(state, run_dir) == 0
 
 
+def test_repair_cycle_budget_counts_only_failures_after_latest_verified_attempt(
+    tmp_path: Path,
+) -> None:
+    state = {
+        "execution_attempts": [
+            {"finished_at": "2026-08-10T12:05:00-04:00"}
+        ],
+        "repair_attempts": [
+            {"attempt": 1, "cycle": 1, "status": "verification_failed"},
+            {
+                "attempt": 2,
+                "cycle": 2,
+                "status": "already_fixed_verified",
+                "finished_at": "2026-08-10T12:00:00-04:00",
+            },
+            {"attempt": 3, "cycle": 1, "status": "verification_failed"},
+            {"attempt": 4, "cycle": 2, "status": "exhausted"},
+        ],
+        "repair_cycles": [
+            {"attempt": 1, "cycle": 1, "status": "verification_failed"},
+            {"attempt": 2, "cycle": 2, "status": "already_fixed_verified"},
+            {"attempt": 3, "cycle": 1, "status": "verification_failed"},
+            {"attempt": 4, "cycle": 2, "status": "exhausted"},
+        ],
+    }
+
+    assert daily_sop_module._repair_cycle_count(state, tmp_path) == 1
+
+
 def test_repair_resume_uses_retained_scope_without_browser_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -613,6 +738,77 @@ def test_repair_resume_uses_retained_scope_without_browser_retry(
     assert batch[0]["original_terminal_status"] == "autofill_completed_blocked"
 
 
+def test_verified_repair_resume_drops_stale_recovery_targets_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, run_dir, _ = _repair_resume_fixture(tmp_path, monkeypatch)
+    state_path = run_dir / "run-state.json"
+    manifest_path = run_dir / "pipeline-manifest.json"
+    state = json.loads(state_path.read_text())
+    manifest = json.loads(manifest_path.read_text())
+    repair_batch = run_dir / "repair" / "retry-batch-cycle-02.json"
+    repair_item = {
+        "application_id": "17",
+        "company": "Repairable",
+        "title": "Engineer",
+        "package_dir": str(run_dir / "repair" / "rebuilt-17"),
+        "original_package_dir": str(
+            run_dir / "applications" / "001-repairable"
+        ),
+        "retry": True,
+        "repair_verified": True,
+        "retry_scope": "single_application",
+        "repair_cycle": 2,
+    }
+    repair_batch.write_text(json.dumps([repair_item]))
+    stale_combined = run_dir / "repair" / "stale-combined.json"
+    stale_combined.write_text(
+        json.dumps(
+            [
+                repair_item,
+                {
+                    "application_id": "99",
+                    "company": "Stale Recovery",
+                    "title": "Already Submitted",
+                    "recovery_verified": True,
+                    "retry_scope": "single_application",
+                },
+            ]
+        )
+    )
+    state["phase"] = "repair_verified"
+    state["artifacts"]["repair_retry_batch"] = str(repair_batch)
+    state["artifacts"]["scoped_retry_batch"] = str(stale_combined)
+    state["artifacts"].pop("recovery_retry_batch", None)
+    manifest["artifacts"]["repair_retry_batch"] = str(repair_batch)
+    manifest["artifacts"]["scoped_retry_batch"] = str(stale_combined)
+    manifest["artifacts"].pop("recovery_retry_batch", None)
+    state_path.write_text(json.dumps(state))
+    manifest_path.write_text(json.dumps(manifest))
+    executed: list[Path] = []
+
+    def fake_execute(*_args, **kwargs):
+        executed.append(Path(kwargs["_retry_summary_path"]))
+        return run_dir
+
+    monkeypatch.setattr(daily_sop_module, "execute_daily_run", fake_execute)
+
+    repaired = repair_daily_run(
+        config,
+        run_dir=run_dir,
+        retry_verified=True,
+    )
+
+    assert repaired == run_dir
+    assert executed == [repair_batch]
+    assert json.loads(executed[0].read_text()) == [repair_item]
+    refreshed_state = json.loads(state_path.read_text())
+    assert refreshed_state["artifacts"]["scoped_retry_batch"] == str(
+        repair_batch
+    )
+
+
 def test_repair_resume_rebuilds_current_audit_and_accepts_already_fixed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -623,6 +819,18 @@ def test_repair_resume_rebuilds_current_audit_and_accepts_already_fixed(
     state = json.loads(state_path.read_text())
     manifest = json.loads(manifest_path.read_text())
     repairable_dir = run_dir / "applications" / "001-repairable"
+    (repairable_dir / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {"Country": "United States"},
+                    "screening_answer_rules": [],
+                }
+            }
+        )
+        + ";\n"
+    )
     audit_path = run_dir / "execution-audit.json"
     audit_path.write_text(
         json.dumps(
@@ -869,6 +1077,107 @@ def test_repair_resume_persists_rebuilt_scope_before_readiness_check(
     assert final_manifest["artifacts"]["repair_request"] == str(request_path)
 
 
+def test_repair_resume_rechecks_one_transient_authentication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, run_dir, _ = _repair_resume_fixture(tmp_path, monkeypatch)
+    readiness_results = iter(
+        [
+            RepairAgentReadiness(
+                False,
+                "repair_agent_authentication_failed",
+                "token refresh in progress",
+                "codex",
+            ),
+            RepairAgentReadiness(True, "ready", "ready", "codex"),
+        ]
+    )
+    readiness_calls = 0
+
+    def readiness(_policy):
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return next(readiness_results)
+
+    def already_fixed(*_args, **_kwargs):
+        result_path = run_dir / "repair" / "transient-auth-result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result = {
+            "status": "already_fixed_verified",
+            "reason": "repair_agent_made_no_changes_all_verification_passed",
+            "changed_files": [],
+            "verification": [{"command": ["verify"], "status": "passed"}],
+            "result_path": str(result_path),
+        }
+        result_path.write_text(json.dumps(result))
+        return result
+
+    monkeypatch.setattr(
+        daily_sop_module,
+        "check_repair_agent_readiness",
+        readiness,
+    )
+    monkeypatch.setattr(daily_sop_module, "run_repair_cycle", already_fixed)
+
+    repaired = repair_daily_run(config, run_dir=run_dir)
+
+    assert repaired == run_dir
+    assert readiness_calls == 2
+    state = json.loads((run_dir / "run-state.json").read_text())
+    assert state["phase"] == "repair_verified"
+    assert state["consumed_repair_cycles"] == 1
+
+
+def test_latest_verified_repair_attempt_survives_later_failed_attempt(
+    tmp_path: Path,
+) -> None:
+    repair_dir = tmp_path / "repair"
+    repair_dir.mkdir()
+    verified_result = repair_dir / "repair-result-cycle-05.json"
+    verified_result.write_text(
+        json.dumps(
+            {
+                "status": "already_fixed_verified",
+                "changed_files": [],
+                "verification": [
+                    {"command": ["target"], "status": "passed"},
+                    {"command": ["full"], "status": "passed"},
+                ],
+            }
+        )
+    )
+    (repair_dir / "repair-request-cycle-05.json").write_text(
+        json.dumps({"findings": [], "retry_targets": []})
+    )
+    state = {
+        "repair_attempts": [
+            {
+                "attempt": 5,
+                "cycle": 5,
+                "status": "already_fixed_verified",
+                "result_path": str(verified_result),
+            },
+            {
+                "attempt": 6,
+                "cycle": 5,
+                "status": "verification_failed",
+            },
+        ]
+    }
+
+    recovered = daily_sop_module._latest_verified_repair_attempt(
+        state,
+        run_dir=tmp_path,
+    )
+
+    assert recovered is not None
+    attempt, result, request = recovered
+    assert attempt["attempt"] == 5
+    assert result["status"] == "already_fixed_verified"
+    assert request["findings"] == []
+
+
 def test_repair_resume_supersedes_stale_scope_when_complete_audit_has_only_candidate_facts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1030,6 +1339,20 @@ def test_historical_recover_replays_plans_without_browser_retry(
         )
     )
     manifest_path = run_dir / "pipeline-manifest.json"
+    stale_retry_batch = run_dir / "recovery" / "retry-batch-recovery-01.json"
+    stale_retry_batch.parent.mkdir()
+    stale_retry_batch.write_text(
+        json.dumps(
+            [
+                {
+                    "company": "Stale",
+                    "title": "Already Resolved",
+                    "recovery_verified": True,
+                    "retry_scope": "single_application",
+                }
+            ]
+        )
+    )
     manifest_path.write_text(
         json.dumps(
             {
@@ -1041,6 +1364,7 @@ def test_historical_recover_replays_plans_without_browser_retry(
                 "artifacts": {
                     "batch_summary": str(batch_summary),
                     "execution_audit": str(audit_path),
+                    "recovery_retry_batch": str(stale_retry_batch),
                 },
             }
         )
@@ -1060,6 +1384,7 @@ def test_historical_recover_replays_plans_without_browser_retry(
                     "manifest": str(manifest_path),
                     "batch_summary": str(batch_summary),
                     "execution_audit": str(audit_path),
+                    "recovery_retry_batch": str(stale_retry_batch),
                 },
                 "execution_attempts": [],
                 "history": [],
@@ -1089,6 +1414,8 @@ def test_historical_recover_replays_plans_without_browser_retry(
         execution_path
     )
     assert "recovery_retry_batch" not in updated_state["artifacts"]
+    updated_manifest = json.loads(manifest_path.read_text())
+    assert "recovery_retry_batch" not in updated_manifest["artifacts"]
     assert len(updated_state["recovery_attempts"]) == 1
     assert "not_run" not in (run_dir / "RUN_SUMMARY.md").read_text()
 
@@ -1501,10 +1828,12 @@ def test_candidate_fact_recovery_requires_new_fact_and_no_mixed_blockers(
         {},
     )
 
-    assert unchanged["status"] == "pending"
-    assert unchanged["details"]["unchanged_field_count"] == 1
-    assert mixed["status"] == "pending"
-    assert mixed["details"]["nonfact_blocker_count"] == 1
+    # An existing approved answer is enough to rebuild and retry after the
+    # closest-match runtime fix; only genuinely unresolved facts wait for user.
+    assert unchanged["status"] == "completed"
+    assert unchanged["evidence"] == ["approved_candidate_facts"]
+    assert mixed["status"] == "completed"
+    assert mixed["evidence"] == ["approved_candidate_facts"]
 
 
 def test_expired_repair_auth_is_a_nonblocking_preflight_warning(
@@ -1567,10 +1896,9 @@ def test_incremental_repair_starts_before_execution_returns(
                             "status": "autofill_completed_blocked",
                             "review_items": [
                                 {
-                                    "label": "Country",
+                                    "label": "New ATS option control",
                                     "reason": (
-                                        "fill error: no combobox option matches "
-                                        "saved answer"
+                                        "combobox adapter mapping is unavailable"
                                     ),
                                     "sensitive": False,
                                     "blocking": True,
@@ -1705,6 +2033,11 @@ def test_run_until_daily_target_continues_after_complete_blocked_batch(
                 }
             )
         )
+        state_path = run_dir / "run-state.json"
+        state = json.loads(state_path.read_text())
+        state["phase"] = "executed_with_blockers" if index == 0 else "executed"
+        state["history"] = [{"phase": state["phase"]}]
+        state_path.write_text(json.dumps(state))
         return run_dir
 
     monkeypatch.setattr(daily_sop_module, "prepare_daily_run", fake_prepare)
@@ -1831,6 +2164,33 @@ def test_daily_config_loads_bounded_auto_repair_policy(
     assert config.evaluation.min_terminal_audit_coverage == 1.0
 
 
+def test_daily_config_caps_auto_repair_at_five_cycles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _write_workspace(tmp_path)
+    monkeypatch.setenv("TEST_RESUME_DIR", str(workspace["resumes"]))
+    workspace["payload"]["auto_repair"] = {
+        "enabled": True,
+        "max_cycles": 5,
+    }
+
+    config = DailyConfig.from_mapping(
+        workspace["payload"],
+        config_path=tmp_path / "daily.local.json",
+        root=tmp_path,
+    )
+    assert config.auto_repair.max_cycles == 5
+
+    workspace["payload"]["auto_repair"]["max_cycles"] = 6
+    with pytest.raises(SopError, match="between 1 and 5"):
+        DailyConfig.from_mapping(
+            workspace["payload"],
+            config_path=tmp_path / "daily.local.json",
+            root=tmp_path,
+        )
+
+
 def test_daily_config_rejects_non_raw_confirmation_denominator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1945,7 +2305,7 @@ def test_daily_commands_are_built_from_single_config(
     assert "--retry-prior-terminal-outcome" not in resume_execute
 
 
-def test_execute_daily_run_resumes_only_incomplete_canonical_audit(
+def test_execute_daily_run_resumes_only_incomplete_canonical_audit_after_interrupt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2004,7 +2364,7 @@ def test_execute_daily_run_resumes_only_incomplete_canonical_audit(
     state = {
         "schema_version": 1,
         "run_id": run_dir.name,
-        "phase": "executing",
+        "phase": "execution_failed",
         "created_at": "2026-07-27T16:06:25+00:00",
         "updated_at": "2026-07-27T16:26:52+00:00",
         "config_path": str(config.config_path),
@@ -2015,7 +2375,7 @@ def test_execute_daily_run_resumes_only_incomplete_canonical_audit(
             "manifest": str(manifest_path),
             "execution_audit": str(audit_path),
         },
-        "execution_attempts": [],
+        "execution_attempts": [{"attempt": 1, "exit_code": -15}],
         "history": [
             {"at": "2026-07-27T16:26:52+00:00", "phase": "executing"}
         ],
@@ -2081,7 +2441,114 @@ def test_execute_daily_run_resumes_only_incomplete_canonical_audit(
 
     final_state = json.loads((run_dir / "run-state.json").read_text())
     assert final_state["phase"] == "executed_with_blockers"
-    assert final_state["execution_attempts"][0]["audit"] == str(audit_path)
+    assert final_state["execution_attempts"][-1]["audit"] == str(audit_path)
+
+
+def test_resume_incomplete_reconciles_complete_audit_without_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = _write_workspace(tmp_path)
+    monkeypatch.setenv("TEST_RESUME_DIR", str(workspace["resumes"]))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("JOB_AGENT_CLI", str(workspace["cli"]))
+    config_path = tmp_path / "daily.local.json"
+    config_path.write_text(json.dumps(workspace["payload"]))
+    config = DailyConfig.load(config_path, root=tmp_path)
+    run_dir = config.output_root / "2026-08-10" / "141217"
+    applications_dir = run_dir / "applications"
+    applications_dir.mkdir(parents=True)
+    summary_path = applications_dir / "batch-summary.json"
+    summary_path.write_text(
+        json.dumps(
+            [
+                {
+                    "application_id": "1",
+                    "company": "Example",
+                    "title": "Engineer",
+                    "package_dir": str(applications_dir / "001-example-engineer"),
+                }
+            ]
+        )
+    )
+    manifest_path = run_dir / "pipeline-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "counts": {"imported": 1, "shortlisted": 1, "prepared": 1},
+                "artifacts": {"batch_summary": str(summary_path)},
+            }
+        )
+    )
+    audit_path = run_dir / "execution-audit.json"
+    audit_path.write_text(
+        json.dumps(
+            {
+                "counts": {
+                    "total": 1,
+                    "submitted": 1,
+                    "completed": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "submit_clicked_unconfirmed": 0,
+                    "submission_processing_error": 0,
+                    "submission_blocked_by_anti_spam": 0,
+                },
+                "progress": {
+                    "planned": 1,
+                    "terminal": 1,
+                    "remaining": 0,
+                    "complete": True,
+                },
+                "applications": [
+                    {
+                        "application_id": "1",
+                        "company": "Example",
+                        "title": "Engineer",
+                        "status": "submitted",
+                    }
+                ],
+            }
+        )
+    )
+    (run_dir / "resume-preflight.json").write_text("{}")
+    state = {
+        "schema_version": 1,
+        "run_id": run_dir.name,
+        "phase": "executing",
+        "created_at": "2026-08-10T14:12:17-04:00",
+        "updated_at": "2026-08-10T14:12:57-04:00",
+        "config_path": str(config.config_path),
+        "config_sha256": hashlib.sha256(config.config_path.read_bytes()).hexdigest(),
+        # Deliberately stale: reconciliation must not consume current inputs.
+        "input_sha256": "stale-after-browser-exit",
+        "settings": config.snapshot(),
+        "artifacts": {
+            "manifest": str(manifest_path),
+            "execution_audit": str(audit_path),
+        },
+        "execution_attempts": [],
+        "history": [{"at": "2026-08-10T14:12:57-04:00", "phase": "executing"}],
+    }
+    (run_dir / "run-state.json").write_text(json.dumps(state))
+
+    monkeypatch.setattr(
+        daily_sop_module,
+        "run_preflight",
+        lambda _config: pytest.fail("reconciliation must not run browser preflight"),
+    )
+    monkeypatch.setattr(
+        daily_sop_module,
+        "_run_execution_command",
+        lambda *_args, **_kwargs: pytest.fail("reconciliation must not execute a browser"),
+    )
+
+    execute_daily_run(config, run_dir=run_dir, resume_incomplete=True)
+
+    final_state = json.loads((run_dir / "run-state.json").read_text())
+    assert final_state["phase"] == "executed"
+    assert final_state["execution_attempts"][-1]["reconciled_complete_audit"] is True
+    assert final_state["execution_attempts"][-1]["audit"] == str(audit_path)
 
 
 def test_verified_auto_repair_retries_only_repairable_applications(
@@ -2112,6 +2579,18 @@ def test_verified_auto_repair_retries_only_repairable_applications(
     protected_dir = applications_dir / "002-protected"
     repairable_dir.mkdir(parents=True)
     protected_dir.mkdir()
+    (repairable_dir / "autofill-runtime.js").write_text(
+        "const CFG = "
+        + json.dumps(
+            {
+                "profile": {
+                    "answers": {"Country": "United States"},
+                    "screening_answer_rules": [],
+                }
+            }
+        )
+        + ";\n"
+    )
     batch_summary = applications_dir / "batch-summary.json"
     batch_summary.write_text(
         json.dumps(
@@ -2181,7 +2660,7 @@ def test_verified_auto_repair_retries_only_repairable_applications(
                             {
                                 "label": "Country",
                                 "reason": (
-                                    "fill error: no combobox option matches saved answer"
+                                    "combobox adapter mapping is unavailable"
                                 ),
                                 "sensitive": False,
                                 "blocking": True,
@@ -2235,6 +2714,11 @@ def test_verified_auto_repair_retries_only_repairable_applications(
     )
     monkeypatch.setattr(daily_sop_module, "_run_command", fake_run_command)
     monkeypatch.setattr(daily_sop_module, "run_repair_cycle", fake_repair)
+    monkeypatch.setattr(
+        daily_sop_module,
+        "_rebuild_verified_repair_retry_packages",
+        lambda _config, *, retry_summary, **_kwargs: retry_summary,
+    )
 
     execute_daily_run(config, run_dir=run_dir)
 
@@ -2306,6 +2790,36 @@ def test_prepare_empty_batch_waits_for_external_scheduler(
     report = (run_dir / "RUN_SUMMARY.md").read_text()
     assert "external scheduler" in report
     assert "do not sleep inside the Goal" in report
+
+
+def test_empty_batch_wake_uses_configured_interval_after_repeated_polls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(_config(tmp_path, monkeypatch), empty_wake_minutes=5)
+    heartbeat = {"empty_wake_count": 6, "no_progress_count": 0}
+    written = {}
+    monkeypatch.setattr(daily_sop_module, "_read_heartbeat_state", lambda _config: heartbeat)
+    monkeypatch.setattr(
+        daily_sop_module,
+        "_write_heartbeat_state",
+        lambda _config, state: written.update(state),
+    )
+    monkeypatch.setattr(daily_sop_module, "_next_wake_at", lambda minutes: str(minutes))
+    state = {"phase": "waiting_for_candidates"}
+    transition = {}
+
+    daily_sop_module._apply_heartbeat_wake_logic(
+        config,
+        prepared_count=0,
+        run_dir=tmp_path / "run",
+        state=state,
+        transition_details=transition,
+    )
+
+    assert transition["wake_after_minutes"] == 5
+    assert state["next_wake_at"] == "5"
+    assert written["empty_wake_count"] == 7
 
 
 def test_managed_temp_workspace_is_isolated_and_removed(
@@ -2609,6 +3123,71 @@ def test_repair_command_routes_refresh_request_only_to_repair(
             "run_dir": run_dir,
             "retry_verified": False,
             "refresh_request_only": True,
+            "recover_interrupted": False,
+        }
+    ]
+
+
+def test_repair_command_routes_interrupted_recovery_to_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, monkeypatch)
+    config.config_path.write_text("{}")
+    run_dir = config.output_root / "2026-07-28" / "100000"
+    run_dir.mkdir(parents=True)
+    repair_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        DailyConfig,
+        "load",
+        classmethod(lambda cls, path, **kwargs: config),
+    )
+    monkeypatch.setattr(daily_sop_module, "load_env", lambda _path: {})
+    monkeypatch.setattr(
+        daily_sop_module,
+        "refresh_application_ledger",
+        lambda _config: (config.output_root / "APPLICATION_LEDGER.csv", 0),
+    )
+    monkeypatch.setattr(
+        daily_sop_module,
+        "resolve_run_dir",
+        lambda _config, _run_dir: run_dir,
+    )
+    monkeypatch.setattr(
+        daily_sop_module,
+        "repair_daily_run",
+        lambda _config, **kwargs: repair_calls.append(dict(kwargs)) or run_dir,
+    )
+    monkeypatch.setattr(
+        daily_sop_module,
+        "_update_daily_target_state",
+        lambda _config, _run_dir: {},
+    )
+    monkeypatch.setattr(
+        daily_sop_module,
+        "write_run_report",
+        lambda _run_dir: _run_dir / "RUN_SUMMARY.md",
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config.config_path),
+            "repair",
+            "--run-dir",
+            str(run_dir),
+            "--recover-interrupted",
+        ]
+    )
+
+    assert exit_code == 0
+    assert repair_calls == [
+        {
+            "run_dir": run_dir,
+            "retry_verified": False,
+            "refresh_request_only": False,
+            "recover_interrupted": True,
         }
     ]
 
@@ -2758,6 +3337,19 @@ def test_report_records_terminal_states_and_next_action(tmp_path: Path) -> None:
     assert metrics["agent_core"]["round_id"] == "093000"
     assert metrics["agent_core"]["status"] == "needs_attention"
     assert metrics["agent_core"]["recommendations"]
+
+
+def test_report_rejects_complete_audit_left_in_prepared_phase(tmp_path: Path) -> None:
+    run_dir = tmp_path / "output" / "daily" / "2026-07-25" / "093000"
+    run_dir.mkdir(parents=True)
+    audit_path = run_dir / "execution-audit.json"
+    (run_dir / "run-state.json").write_text(
+        json.dumps({"run_id": "093000", "phase": "prepared", "artifacts": {"execution_audit": str(audit_path)}})
+    )
+    audit_path.write_text(json.dumps({"progress": {"complete": True}, "applications": []}))
+
+    with pytest.raises(SopError, match="bypassed Daily SOP"):
+        write_run_report(run_dir)
 
 
 def test_report_combines_scoped_retry_with_prior_terminal_audit(

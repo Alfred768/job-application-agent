@@ -21,6 +21,12 @@ _CODE_PATTERNS = (
     re.compile(r"(?:application|code)\s*:\s*([A-Za-z0-9]{6,16})", re.I),
 )
 _URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+", re.I)
+_APPLICATION_CONFIRMATION_PATTERNS = (
+    re.compile(r"thank(?:s| you) for (?:submitting your application|applying)", re.I),
+    re.compile(r"your application (?:has been|was) (?:received|submitted)", re.I),
+    re.compile(r"we (?:have )?received your application", re.I),
+    re.compile(r"application (?:was )?successfully submitted", re.I),
+)
 
 
 class GmailVerificationError(RuntimeError):
@@ -131,6 +137,55 @@ def find_verification_link(
     )
 
 
+def find_application_confirmation(
+    token_file: str,
+    *,
+    query: str,
+    company: str,
+    title: str,
+) -> dict[str, Any] | None:
+    """Return metadata for an exact application-confirmation email.
+
+    Gmail search narrows the mailbox, but the fetched message still has to
+    contain the normalized company, exact role title, and deterministic
+    confirmation wording.  This prevents a confirmation for another opening
+    at the same employer from reconciling the tracked application.
+    """
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.discovery import build
+    except ImportError as exc:
+        raise GmailVerificationError(
+            "Gmail support requires google-api-python-client and google-auth-oauthlib; install the gmail extra."
+        ) from exc
+
+    try:
+        credentials = Credentials.from_authorized_user_file(token_file, [GMAIL_READONLY_SCOPE])
+    except (OSError, ValueError) as exc:
+        raise GmailVerificationError(f"Could not read Gmail token file: {exc}") from exc
+    if not credentials.valid:
+        if not credentials.refresh_token:
+            raise GmailVerificationError("Gmail token has no refresh token; run gmail authorize again.")
+        try:
+            credentials.refresh(Request())
+        except Exception as exc:
+            raise GmailVerificationError(f"Could not refresh Gmail token: {exc}") from exc
+
+    service = build("gmail", "v1", credentials=credentials, cache_discovery=False)
+    listing = service.users().messages().list(userId="me", q=query, maxResults=20).execute()
+    fetched_messages: list[dict[str, Any]] = []
+    for item in listing.get("messages") or []:
+        message = service.users().messages().get(userId="me", id=item["id"], format="full").execute()
+        if isinstance(message, dict):
+            fetched_messages.append(message)
+    return _latest_application_confirmation(
+        fetched_messages,
+        company=company,
+        title=title,
+    )
+
+
 def _latest_verification_code(messages: list[dict[str, Any]], *, requested_after_ms: int) -> str | None:
     """Select the newest valid code, without relying on Gmail list ordering."""
     candidates: list[tuple[int, str]] = []
@@ -170,6 +225,60 @@ def _latest_verification_link(
     if not candidates:
         return None
     return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def _latest_application_confirmation(
+    messages: list[dict[str, Any]],
+    *,
+    company: str,
+    title: str,
+) -> dict[str, Any] | None:
+    company_norm = _confirmation_norm(company)
+    title_norm = _confirmation_norm(title)
+    if not company_norm or not title_norm:
+        return None
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for message in messages:
+        payload = message.get("payload") or {}
+        headers = payload.get("headers") or []
+        header_text = " ".join(
+            str(item.get("value") or "")
+            for item in headers
+            if isinstance(item, dict)
+            and str(item.get("name") or "").casefold() in {"subject", "from"}
+        )
+        text = " ".join(
+            [
+                header_text,
+                str(message.get("snippet") or ""),
+                *(_html_to_text(value) for value in _payload_texts(payload)),
+            ]
+        )
+        normalized = _confirmation_norm(text)
+        if company_norm not in normalized or title_norm not in normalized:
+            continue
+        if not any(pattern.search(text) for pattern in _APPLICATION_CONFIRMATION_PATTERNS):
+            continue
+        try:
+            received_at_ms = int(message.get("internalDate") or 0)
+        except (TypeError, ValueError):
+            received_at_ms = 0
+        candidates.append(
+            (
+                received_at_ms,
+                {
+                    "message_id": str(message.get("id") or ""),
+                    "received_at_ms": received_at_ms,
+                },
+            )
+        )
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate[0])[1]
+
+
+def _confirmation_norm(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
 
 
 def _code_from_payload(payload: dict[str, Any]) -> str | None:

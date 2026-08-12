@@ -33,6 +33,8 @@ _REMOTE_SOURCE_TOOLS = {
     "rss_job_source",
 }
 _RECOVERY_STATUSES = {
+    "autofill_failed",
+    "autofill_timed_out",
     "autofill_completed_blocked",
     "candidate_account_required",
     "email_verification_required",
@@ -95,6 +97,15 @@ class JobApplicationPolicyGate:
             return self._deny(
                 "failure_circuit_breaker_active",
                 "The affected company or ATS adapter has an active ordinary-failure circuit breaker.",
+            )
+
+        if bool(context.get("network_health_circuit_active")) and call.effect in {
+            ToolEffect.WRITE,
+            ToolEffect.SUBMIT,
+        }:
+            return self._deny(
+                "network_health_circuit_active",
+                "The batch-wide browser/network health circuit is open; no new browser session may start.",
             )
 
         answer_decision = self._evaluate_candidate_answer_validations(context)
