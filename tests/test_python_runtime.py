@@ -479,6 +479,126 @@ def test_export_control_not_applicable_selects_page_none_option():
     }
 
 
+def test_export_control_ineligible_declaration_answers_no_from_approved_fact():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "type": None,
+        "role": "combobox",
+        "label": (
+            "3. Please indicate whether you have been declared ineligible to "
+            "contract with, or to receive a license or other approval to import "
+            "defense articles or defense services from, or to receive an export "
+            "license or other approval from, any agency of the U.S. Government.*"
+        ),
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "Yes"},
+            {"label": "No", "value": "No"},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "us_export_control_status": {
+                "patterns": ["export control"],
+                "answer": "Not applicable",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_deemed_export_employment_effect_answers_no_from_approved_fact():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Does the deemed export rule affect your employment by Pure?*",
+        "required": True,
+        "options": ["Select...", "Yes", "No"],
+    }
+    profile = {
+        "sensitive_answers": {
+            "us_export_control_status": {
+                "patterns": ["export control", "deemed export"],
+                "answer": "Not applicable",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_itar_us_person_combobox_selects_not_a_us_person():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "type": None,
+        "role": "combobox",
+        "label": "Are you a US Person under ITAR (22 CFR §120.15)? Please select appropriate response:",
+        "required": True,
+        "options": [
+            {"label": "US citizen", "value": "US citizen"},
+            {"label": "Lawful permanent resident (ie green card holder)", "value": "Lawful permanent resident"},
+            {"label": "A protected individual under 8 U.S.C. 1324b(a)(3)", "value": "Protected individual"},
+            {"label": "Not a US person", "value": "Not a US person"},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "us_export_control_status": {
+                "patterns": ["us person", "export control"],
+                "answer": "Not applicable",
+                "approved": True,
+            }
+        }
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "combobox"
+    assert plan["value"] == "Not a US person"
+
+
+def test_itar_citizen_or_green_card_radiogroup_selects_no():
+    field = {
+        "kind": "radiogroup",
+        "label": "US Citizen or Green Card (ITAR)",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "Yes"},
+            {"label": "No", "value": "No"},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "citizenship": {
+                "patterns": ["us citizen"],
+                "answer": "No",
+                "approved": True,
+            },
+            "us_export_control_status": {
+                "patterns": ["us person", "export control"],
+                "answer": "Not applicable",
+                "approved": True,
+            },
+        }
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "check"
+    assert plan["option"]["label"] == "No"
+
+
 def test_highest_education_saved_master_degree_matches_plural_option():
     field = {
         "label": "Please indicate your highest level of education*",
@@ -878,6 +998,20 @@ def test_candidate_fact_plan_never_uses_fuzzy_answer_overlap():
         "sensitive": False,
         "blocking": True,
     }
+
+
+def test_explicit_candidate_fact_matches_embedded_approved_question():
+    profile = {
+        "answers": {
+            "How many months are you available?": "6 months",
+            "Do you have over 2 years of industry work experience (non-internship experience)?": "Yes",
+        }
+    }
+    label = (
+        "How many months are you available? Please specify the duration, "
+        "e.g., 6 months \u2013 April to September 2026"
+    )
+    assert python_runtime._explicit_candidate_fact_answer(label, profile) == "6 months"
 
 
 def test_nationality_and_english_level_require_explicit_profile_facts():
@@ -2547,6 +2681,270 @@ def test_map_text_value_uses_explicit_work_and_education_entries():
     assert python_runtime._map_text_value("Major", profile) == "Computer Science"
 
 
+def test_highest_education_entry_prefers_most_recent_degree():
+    profile = {
+        "education": [
+            {
+                "school": "Guangming High School",
+                "degree": "High School",
+                "end_year": "2019",
+            },
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "end_year": "2026",
+            },
+            {
+                "school": "Shenzhen University",
+                "degree": "Bachelor's",
+                "end_year": "2023",
+            },
+        ]
+    }
+
+    entry = python_runtime._highest_education_entry(profile)
+    assert entry["school"] == "Stevens Institute of Technology"
+    assert entry["degree"] == "Master's"
+    assert python_runtime._current_education_value(profile, "school") == "Stevens Institute of Technology"
+    assert python_runtime._current_education_value(profile, "degree") == "Master's"
+    assert python_runtime._current_education_value(profile, "field") == "Computer Science"
+
+
+def test_generic_greenhouse_school_field_uses_highest_education_fact():
+    profile = {
+        "education": [
+            {
+                "school": "Guangming High School",
+                "degree": "High School",
+                "end_year": "2019",
+            },
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "end_year": "2026",
+            },
+        ]
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "label": "Please select your current school from the list below:",
+        "id": "school",
+        "section": "education",
+        "role": "combobox",
+        "required": True,
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Stevens Institute of Technology",
+    }
+
+
+def test_highest_education_prose_uses_master_degree_entry():
+    profile = {
+        "education": [
+            {
+                "school": "Guangming High School",
+                "degree": "High School",
+                "end_year": "2019",
+            },
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "end_year": "2026",
+            },
+        ]
+    }
+
+    assert python_runtime._auto_answer(
+        "What is the highest level of education you have completed, and from which institution?",
+        profile,
+    ) == "Master's in Computer Science from Stevens Institute of Technology"
+    assert python_runtime._auto_answer(
+        "What is the highest level of education you have completed?",
+        profile,
+    ) == "Master's Degree"
+
+
+def test_high_school_specific_questions_still_use_high_school_fact():
+    profile = {
+        "education": [
+            {
+                "school": "Guangming High School",
+                "degree": "High School",
+                "end_year": "2019",
+            },
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "end_year": "2026",
+            },
+        ]
+    }
+
+    assert python_runtime._auto_answer(
+        "What high school did you attend?",
+        profile,
+    ) == "Guangming High School"
+    assert python_runtime._auto_answer(
+        "Year of High School Graduation",
+        profile,
+    ) == "2019"
+
+
+def test_high_school_performance_questions_use_saved_answer_not_school_name():
+    profile = {
+        "education": [
+            {
+                "school": "Guangming High School",
+                "degree": "High School",
+                "end_year": "2019",
+            }
+        ],
+        "answers": {
+            "How did you perform in mathematics at high school?": "Top 10%",
+            "How did you perform in your native language at high school?": "Top 10%",
+        },
+    }
+    for label in (
+        "How did you perform in mathematics at high school?*",
+        "How did you perform in your native language at high school?*",
+    ):
+        assert python_runtime._plan_field(
+            {
+                "kind": "single",
+                "tag": "input",
+                "type": "text",
+                "role": "combobox",
+                "label": label,
+                "required": True,
+                "options": ["Top 10%", "Above average", "Average", "Below average"],
+            },
+            profile,
+            None,
+        ) == {"action": "combobox", "value": "Top 10%"}
+
+
+def test_bachelor_degree_result_uses_saved_undergraduate_gpa():
+    profile = {
+        "education": [
+            {"school": "Guangming High School", "degree": "High School"},
+            {
+                "school": "University of X",
+                "degree": "Bachelor's",
+                "gpa": "3.3",
+            },
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "gpa": "4.0",
+            },
+        ],
+        "answers": {
+            "GPA (Undergraduate)": "3.3",
+            "GPA (Graduate)": "4.0",
+        },
+    }
+    label = (
+        "What was your bachelor's university degree result, or expected result "
+        "if you have not yet graduated? Please include the grading system to help "
+        "us understand your result e.g. '85 out of 100', '2:1 (Grading system: "
+        "first class, 2:1, 2:2, third class)' or 'GPA score of 3.8/4.0 "
+        "(predicted)'. We have hired outstanding individuals who did not attend "
+        "or complete university. If this describes you, please continue with your "
+        "application and enter 'no degree'.*"
+    )
+    assert python_runtime._plan_field(
+        {
+            "kind": "single",
+            "tag": "input",
+            "type": "text",
+            "role": "combobox",
+            "label": label,
+            "required": True,
+        },
+        profile,
+        None,
+    ) == {"action": "combobox", "value": "GPA score of 3.3/4.0"}
+
+
+def test_live_outside_us_question_selects_inside_option_for_us_profile():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": (
+            "1.1 Do you live OUTSIDE of the United States? Only U.S. based candidates "
+            "will be considered for this role."
+        ),
+        "required": True,
+        "options": [
+            "I live OUTSIDE of the United States.",
+            "I live INSIDE the United States.",
+        ],
+    }
+    profile = {"location": "Jersey City, NJ, USA"}
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "I live INSIDE the United States.",
+    }
+
+
+def test_remote_role_preference_uses_saved_work_mode():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "I'm looking for a remote role.*",
+        "required": True,
+        "options": ["Yes", "No"],
+    }
+    profile = {
+        "answers": {"Do you prefer onsite, hybrid, or remote?": "Hybrid or Onsite"},
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_python_production_experience_uses_profile_evidence():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Do you have experience using Python in production?*",
+        "required": True,
+        "options": ["Yes", "No"],
+    }
+    profile = {
+        "work_history": [
+            {
+                "description": (
+                    "Productionized Python ML retraining and deployed Dockerized REST "
+                    "microservices with AWS ECS."
+                )
+            }
+        ]
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
 def test_greenhouse_education_date_components_are_planned_from_iso_date():
     profile = {
         "education": [
@@ -2946,6 +3344,158 @@ def test_school_combobox_detection_excludes_schoolwork_essay():
     )
 
 
+def test_select_greenhouse_school_combobox_clicks_matching_option():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+    html = """
+        <div>
+          <label>Please select your current school from the list below:</label>
+          <div id="school" role="combobox" tabindex="0" data-job-agent-autofill-index="school-1" class="select-shell">
+            <input id="school-input" role="combobox" aria-autocomplete="list" aria-controls="school-listbox">
+            <span id="school-current"></span>
+          </div>
+          <ul id="school-listbox" role="listbox">
+            <li role="option">Stevens Institute of Technology</li>
+            <li role="option">Shenzhen University</li>
+          </ul>
+          <script>
+            document.querySelectorAll('[role="option"]').forEach((option) => {
+              option.addEventListener('click', () => {
+                const input = document.getElementById('school-input');
+                input.value = option.textContent.trim();
+                document.getElementById('school-current').textContent = option.textContent.trim();
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                document.querySelectorAll('[role="option"]').forEach((item) => {
+                  item.removeAttribute('aria-selected');
+                });
+                option.setAttribute('aria-selected', 'true');
+              });
+            });
+          </script>
+        </div>
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=html,
+            ),
+        )
+        page.goto("https://job-boards.greenhouse.io/jumptrading/jobs/8003019")
+        field = {
+            "label": "Please select your current school from the list below:",
+            "role": "combobox",
+            "id": "school",
+            "autofillId": "school-1",
+            "tag": "div",
+            "required": True,
+        }
+        result = python_runtime._select_greenhouse_school_combobox(
+            page,
+            page.locator('[data-job-agent-autofill-index="school-1"]'),
+            field,
+            "Stevens Institute of Technology",
+        )
+        assert result == "Stevens Institute of Technology"
+        browser.close()
+
+
+def test_select_greenhouse_school_via_native_select():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+    html = """
+        <div class="select-shell">
+          <label>School</label>
+          <select id="school" data-job-agent-autofill-index="school-1" aria-label="Select is focused">
+            <option value="">Select...</option>
+            <option value="Stevens Institute of Technology">Stevens Institute of Technology</option>
+            <option value="Shenzhen University">Shenzhen University</option>
+          </select>
+        </div>
+        <script>
+          document.getElementById('school').addEventListener('change', (event) => {
+            const shell = event.target.closest('.select-shell');
+            shell.setAttribute('data-value', event.target.value);
+          });
+        </script>
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=html,
+            ),
+        )
+        page.goto("https://job-boards.greenhouse.io/freeformfuturecorp/jobs/7826615003")
+        field = {
+            "label": "School",
+            "role": "combobox",
+            "id": "school",
+            "autofillId": "school-1",
+            "tag": "select",
+            "required": True,
+        }
+        result = python_runtime._select_greenhouse_school_via_native_select(
+            page,
+            page.locator('[data-job-agent-autofill-index="school-1"]'),
+            field,
+            "Stevens Institute of Technology",
+        )
+        assert result == "Stevens Institute of Technology"
+        assert page.locator("#school").input_value() == "Stevens Institute of Technology"
+        browser.close()
+
+
+def test_select_ashby_school_combobox_clicks_matching_option():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+    html = """
+        <div data-field-path="_systemfield_education_history-school">
+          <label>Education History School</label>
+          <input id="school" role="combobox" aria-autocomplete="list"
+                 aria-controls="school-listbox" data-job-agent-autofill-index="school-1">
+          <ul id="school-listbox" role="listbox">
+            <li role="option">Stevens Institute of Technology</li>
+            <li>Shenzhen University</li>
+          </ul>
+        </div>
+    """
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.route(
+            "**/*",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=html,
+            ),
+        )
+        page.goto("https://jobs.ashbyhq.com/applied/a5000134-d36a-48eb-9a4f-2d5f9ab60027/application")
+        field = {
+            "label": "Education History School",
+            "role": "combobox",
+            "id": "school",
+            "autofillId": "school-1",
+            "tag": "input",
+            "ashbyEduSubfield": "school",
+            "required": True,
+        }
+        result = python_runtime._select_ashby_school_combobox(
+            page,
+            page.locator('[data-job-agent-autofill-index="school-1"]'),
+            field,
+            "Stevens Institute of Technology",
+        )
+        assert result == "Stevens Institute of Technology"
+        browser.close()
+
+
 def test_map_text_value_does_not_treat_long_work_country_question_as_address_country():
     question = (
         "Will you now or at any time in the future require employer sponsorship "
@@ -3329,6 +3879,56 @@ def test_company_specific_employment_combobox_defaults_to_no():
         "action": "combobox",
         "value": "No",
     }
+
+
+def test_company_specific_worked_for_combobox_defaults_to_no_from_approved_fact():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Do you currently work for, or have you previously worked for Zscaler?*",
+        "required": True,
+        "options": ["Yes", "No"],
+    }
+    profile = {
+        "answers": {},
+        "personal_us_company_employment_history": "Never worked for a United States company.",
+    }
+
+    assert python_runtime._explicit_candidate_fact_answer(field["label"], profile) == "No"
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_current_company_employment_variants_default_to_no_from_approved_fact():
+    profile = {
+        "answers": {},
+        "personal_us_company_employment_history": "Never worked for a United States company.",
+    }
+    labels = [
+        "Are you currently working at New Relic?*",
+        "Are you currently working for New Relic?*",
+        "Are you currently employed by New Relic?*",
+        "Are you currently an employee of the company?*",
+        "Are you a current MongoDB employee?*",
+    ]
+    for label in labels:
+        field = {
+            "kind": "single",
+            "tag": "input",
+            "type": "text",
+            "role": "combobox",
+            "label": label,
+            "required": True,
+            "options": ["Yes", "No"],
+        }
+        assert python_runtime._plan_field(field, profile, None) == {
+            "action": "combobox",
+            "value": "No",
+        }
 
 
 def test_workday_compensation_factor_and_authorization_select_one_use_yes_no():
@@ -4982,6 +5582,30 @@ def test_captcha_recovery_failure_does_not_create_anti_spam_marker():
     assert "spam" not in error
 
 
+def test_detect_submission_processing_error_handles_application_limit():
+    class Page:
+        def evaluate(self, script, arg=None):
+            return {
+                "url": "https://jobs.ashbyhq.com/example/application",
+                "title": "Application",
+                "text": "You have reached your application limit. To ensure the best possible "
+                "candidate experience in light of high application volumes, we limit repeat "
+                "applications within a span of 100 days.",
+                "recaptcha": True,
+            }
+
+    error = python_runtime._detect_submission_processing_error(Page())
+
+    assert error.startswith("matched 'reached your application limit' at ")
+    assert python_runtime._is_retryable_captcha_error(error) is False
+
+
+def test_application_limit_is_immediately_terminal():
+    assert python_runtime._is_retryable_captcha_error(
+        "matched 'application limit' with recaptcha present"
+    ) is False
+
+
 def test_wait_for_submit_settle_ignores_ambient_captcha_until_confirmation(monkeypatch):
     class Page:
         waits = 0
@@ -5539,6 +6163,7 @@ def test_capmonster_hcaptcha_unsupported_uses_vision_fallback(monkeypatch):
     monkeypatch.setenv("CAPMONSTER_SOLVE_CAPTCHA", "true")
     monkeypatch.setenv("CAPTCHA_VISION_FALLBACK", "1")
     monkeypatch.setenv("OPENAI_API_KEY", "vision-key")
+    monkeypatch.setenv("CAPTCHA_VISION_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setattr(
         python_runtime,
         "_discover_captcha",
@@ -5701,6 +6326,7 @@ def test_capmonster_hcaptcha_tries_token_tasks_before_vision_fallback(monkeypatc
     monkeypatch.setenv("CAPMONSTER_SOLVE_CAPTCHA", "true")
     monkeypatch.setenv("CAPTCHA_VISION_FALLBACK", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "vision-key")
+    monkeypatch.setenv("CAPTCHA_VISION_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.delenv("CAPMONSTER_HCAPTCHA_TASK_TYPE", raising=False)
     monkeypatch.setattr(
         python_runtime,
@@ -5724,6 +6350,27 @@ def test_capmonster_hcaptcha_tries_token_tasks_before_vision_fallback(monkeypatc
     assert result["status"] == "unsupported"
     assert "HCaptchaTaskProxyless: ERROR_TASK_NOT_SUPPORTED" in result["detail"]
     assert "vision fallback: vision failed" in result["detail"]
+
+
+def test_captcha_vision_endpoint_refuses_text_only_llm_base_url(monkeypatch):
+    monkeypatch.delenv("CAPTCHA_VISION_BASE_URL", raising=False)
+    monkeypatch.setenv("LLM_BASE_URL", "http://text-only.example.com:8080/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "vision-key")
+    monkeypatch.setenv("CAPTCHA_VISION_MODEL", "gpt-5.5")
+
+    assert python_runtime._captcha_vision_endpoint() is None
+
+
+def test_captcha_vision_endpoint_uses_explicit_vision_base_url(monkeypatch):
+    monkeypatch.setenv("CAPTCHA_VISION_BASE_URL", "https://vision.example.com/v1/")
+    monkeypatch.setenv("CAPTCHA_VISION_API_KEY", "vision-key")
+    monkeypatch.setenv("CAPTCHA_VISION_MODEL", "vision-model")
+
+    assert python_runtime._captcha_vision_endpoint() == {
+        "base_url": "https://vision.example.com/v1",
+        "api_key": "vision-key",
+        "model": "vision-model",
+    }
 
 
 def test_capmonster_task_for_datadome_requires_proxy(monkeypatch):
@@ -5849,6 +6496,60 @@ def test_work_authorization_dropdown_label_noise_resolves_to_sponsorship_answer(
         "work authorization in the country in which this position is based (e.g. H-1B, TN, etc.)"
     )
     assert python_runtime._option_matches(option, answer)
+
+
+def test_sponsorship_work_authorization_dropdown_selects_require_option_without_visa_type():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Work Authorization*",
+        "required": True,
+        "options": [
+            "I am authorized to work for any employer in the country in which this position is based.",
+            "I require/will require Lyft's sponsorship to obtain work authorization in the country in which this position is based (e.g. H-1B, TN, etc.)",
+            "My status to work in the country in which this position is based is unknown.",
+        ],
+    }
+    profile = {
+        "target_company": "Lyft",
+        "sensitive_answers": {
+            "work_authorization_us": {
+                "patterns": ["authorized to work"],
+                "answer": "Yes",
+                "approved": True,
+            },
+            "sponsorship": {
+                "patterns": ["sponsorship"],
+                "answer": "Yes",
+                "approved": True,
+            },
+        },
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "I require/will require Lyft's sponsorship to obtain work authorization in the country in which this position is based (e.g. H-1B, TN, etc.)",
+        "sensitive": True,
+    }
+
+
+def test_add_another_employment_confirmation_selects_thank_you():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Please enter your relevant employment and military service above using the + Add Another Employment link.*",
+        "required": True,
+        "options": ["Thank you"],
+    }
+
+    assert python_runtime._plan_field(field, {"answers": {}}, None) == {
+        "action": "combobox",
+        "value": "Thank you",
+    }
 
 
 def test_option_token_containment_never_matches_negated_statement():
@@ -7721,6 +8422,152 @@ def test_phone_communication_consent_uses_option_semantics():
     }
 
 
+def test_communication_consent_labeled_phone_number_uses_saved_no():
+    field = {
+        "kind": "radiogroup",
+        "type": "radio",
+        "label": "Phone Number",
+        "name": "communicationConsent",
+        "required": True,
+        "options": [
+            {"value": "given", "label": "Yes - I consent to receiving text messages"},
+            {"value": "notGiven", "label": "No - I do not consent to receiving text messages"},
+        ],
+    }
+    profile = {
+        "phone": "+1 (201) 283-4980",
+        "answers": {
+            "Phone Number": "+1 (201) 283-4980",
+            "Would you like to receive communications via SMS and/or WhatsApp": "No",
+            "It's ok to text me updates on my application.": "No",
+        },
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan == {
+        "action": "check",
+        "option": {"value": "notGiven", "label": "No - I do not consent to receiving text messages"},
+    }
+
+
+def test_timezone_combobox_uses_eastern_for_jersey_city():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": "What is your current working timezone?",
+        "required": True,
+        "options": [{"label": "Eastern"}, {"label": "Central"}, {"label": "Mountain"}, {"label": "Pacific"}],
+    }
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "region": "New Jersey",
+        "answers": {"What time zone are you in?": "Eastern Time"},
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Eastern",
+    }
+
+
+def test_bachelors_degree_yes_uses_education():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": "Do you have a Bachelors degree?",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {"education": [{"degree": "Bachelor's"}, {"degree": "Master's"}]}
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_clearance_yes_no_combobox_maps_never_held_to_no():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": "Do you have a clearance?",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "sensitive_answers": {
+            "active_security_clearance": {
+                "patterns": ["active security clearance", "have security clearance"],
+                "answer": "No",
+                "approved": True,
+            },
+            "security_clearance_level_never_held": {
+                "patterns": ["security clearance level", "clearance level have you held"],
+                "answer": "N/A - have never held U.S. security clearance",
+                "approved": True,
+            },
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_citizenship_status_selects_not_us_citizen():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": "Citizenship Status",
+        "required": True,
+        "options": [
+            {"label": "U.S. citizen or national of the United States"},
+            {"label": 'U.S. lawful permanent resident (i.e., "Green Card" holder'},
+            {"label": "Not a US Citizen"},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "citizenship": {
+                "patterns": ["citizenship", "citizen", "us citizen"],
+                "answer": "No",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Not a US Citizen",
+    }
+
+
+def test_proficiency_level_question_does_not_reuse_degree_answer():
+    answers = {"Degree": "Master's Degree"}
+    label = "What is your level of proficiency in Python"
+
+    assert python_runtime._find_answer(label, answers) is None
+    assert python_runtime._auto_answer(label, {"answers": answers}, sensitive=False) is None
+
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": label,
+        "required": True,
+        "options": [{"label": "Novice"}, {"label": "Some knowledge"}, {"label": "Highly proficient"}, {"label": "Expert"}],
+    }
+    plan = python_runtime._plan_field(field, {"answers": answers}, None)
+    assert plan["action"] == "skip"
+    assert plan["reason"] == "combobox needs saved answer / manual selection"
+
+
 def test_detect_submission_confirmation_accepts_ashby_success_copy():
     class Page:
         def evaluate(self, _script):
@@ -7839,6 +8686,41 @@ def test_binary_yes_answer_does_not_guess_between_relocation_timelines():
         "reason": "no option matches saved answer",
         "sensitive": True,
     }
+
+
+def test_gamma_bay_area_onsite_question_selects_relocation_option():
+    field = {
+        "kind": "radiogroup",
+        "type": "radio",
+        "label": (
+            "This position is based onsite at our Potrero Hill office in San Francisco, "
+            "4–5 days per week. Are you currently located in the Bay Area and open to "
+            "this schedule?"
+        ),
+        "name": "locationCommitment",
+        "required": True,
+        "options": [
+            {"label": "Yes, I'm currently in the Bay Area and open to 4–5 days onsite"},
+            {"label": "I'm not currently in the Bay Area but am open to relocation and 4-5 days onsite"},
+            {"label": "No, I am looking for remote opportunities"},
+        ],
+    }
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "answers": {"Are you open to relocation?": "Yes"},
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "check"
+    assert "relocation" in plan["option"]["label"]
+
+    local_profile = {
+        "location": "San Francisco, CA, USA",
+        "answers": {"Are you open to relocation?": "Yes"},
+    }
+    plan = python_runtime._plan_field(field, local_profile, None)
+    assert plan["action"] == "check"
+    assert "currently in the Bay Area" in plan["option"]["label"]
 
 
 def test_binary_no_answer_deduplicates_duplicate_options():
@@ -8912,6 +9794,100 @@ def test_location_checkbox_group_selects_approved_relocation_offices():
     ]
 
 
+def test_location_checkbox_group_selects_all_us_options_when_approved():
+    profile = {
+        "answers": {
+            "which locations you're 100% committed to": "Use LLM to select all US locations from options"
+        }
+    }
+    field = {
+        "kind": "checkboxgroup",
+        "type": "checkbox",
+        "label": "What office(s) would you be willing to relocate to? (Select all that apply)",
+        "required": True,
+        "options": [
+            "New York, NY",
+            "San Francisco, CA",
+            "London, UK",
+            "International",
+            "Outside of the United States",
+        ],
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "checkmany"
+    assert [python_runtime._option_text(option) for option in plan["options"]] == [
+        "New York, NY",
+        "San Francisco, CA",
+    ]
+
+
+def test_office_location_checkbox_checks_any_us_option_when_all_us_approved():
+    profile = {
+        "answers": {
+            "which locations you're 100% committed to": "Use LLM to select all US locations from options"
+        }
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "checkbox",
+        "label": "Los Angeles, CA",
+        "required": True,
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "check",
+    }
+
+
+def test_preferred_office_combobox_picks_us_option_when_nyc_unavailable():
+    profile = {
+        "desired_locations": ["New York City"],
+        "answers": {
+            "which locations you're 100% committed to": "Use LLM to select all US locations from options"
+        },
+    }
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "Which is your preferred office location?",
+        "name": "office",
+        "required": True,
+        "options": [
+            {"label": "San Diego"},
+            {"label": "South San Francisco"},
+            {"label": "Austin"},
+            {"label": "Remote"},
+        ],
+    }
+
+    assert python_runtime._preferred_office_location_option(field, profile)["label"] == "San Diego"
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "San Diego",
+    }
+
+
+def test_all_us_locations_do_not_apply_to_negative_location_prompts():
+    profile = {
+        "answers": {
+            "which locations you're 100% committed to": "Use LLM to select all US locations from options"
+        }
+    }
+    field = {
+        "kind": "checkboxgroup",
+        "type": "checkbox",
+        "label": "Which locations are you not willing to work in?",
+        "required": True,
+        "options": ["New York, NY", "San Francisco, CA"],
+    }
+
+    assert python_runtime._location_checkbox_group_plan(field, profile) is None
+
+
 def test_current_security_clearance_level_uses_none():
     profile = {
         "sensitive_answers": {
@@ -9252,6 +10228,94 @@ def test_start_availability_question_uses_existing_when_can_you_start_answer():
     }
 
     assert python_runtime._plan_field(field, profile, None) == {"action": "fill", "value": "Within a month"}
+
+
+def test_availability_or_notice_period_prefers_earliest_availability():
+    profile = {
+        "answers": {
+            "What is your earliest availability?": "Within a month",
+            "What is your current notice period?": "N/A",
+        }
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "What is your availability or notice period? *",
+        "required": True,
+        "options": ["Within a month", "2 weeks", "1 month", "N/A"],
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Within a month",
+    }
+
+
+def test_profile_link_field_uses_linkedin_url():
+    profile = {
+        "linkedin": "https://www.linkedin.com/in/gaoyiwu/",
+        "answers": {"LinkedIn URL": "https://www.linkedin.com/in/gaoyiwu/"},
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Profile Link*",
+        "required": True,
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "https://www.linkedin.com/in/gaoyiwu/",
+    }
+
+
+def test_evidence_of_excellence_uses_approved_additional_information():
+    profile = {
+        "answers": {},
+        "screening_answer_rules": [
+            {
+                "patterns": ["additional information"],
+                "answer": "First-author AAAI paper and 4.0 graduate GPA.",
+            }
+        ],
+    }
+    field = {
+        "kind": "single",
+        "tag": "textarea",
+        "label": "Evidence of Excellence*",
+        "required": True,
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "fill",
+        "value": "First-author AAAI paper and 4.0 graduate GPA.",
+    }
+
+
+def test_current_employer_resignation_question_answers_no_from_good_standing():
+    profile = {
+        "answers": {
+            "Are you currently in good standing in your current position for at least one full year?": "Yes",
+        }
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Have you resigned from your current employer?*",
+        "required": True,
+        "options": ["Yes", "No"],
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
 
 
 def test_pronouns_question_falls_back_to_privacy_preserving_option():
@@ -11835,3 +12899,648 @@ def test_dynamic_radiogroup_fallback_prefers_willing_relocation_statement():
         "",
         profile,
     ) == "I will relocate and am happy to work in office"
+
+
+def test_conditional_relative_detail_fills_na_from_approved_no():
+    label = (
+        'If you responded "Yes" to the question above, please enter the '
+        'name(s) of known relative(s). If you responded "No," please enter N/A:'
+    )
+    profile = {
+        "answers": {
+            "Do you have any relatives or family members currently employed at Acme?": "No",
+        }
+    }
+    assert python_runtime._conditional_fact_detail_answer(label, profile) == "N/A"
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "label": label,
+        "name": "relatives_detail",
+        "required": True,
+        "options": [],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "fill",
+        "value": "N/A",
+    }
+
+
+def test_conditional_relative_detail_stays_blocked_when_approved_yes():
+    label = (
+        'If you responded "Yes" to the question above, please enter the '
+        'name(s) of known relative(s). If you responded "No," please enter N/A:'
+    )
+    profile = {
+        "answers": {
+            "Do you have any relatives or family members currently employed at Acme?": "Yes",
+        }
+    }
+    assert python_runtime._conditional_fact_detail_answer(label, profile) is None
+
+
+def test_phone_country_option_picks_us_from_translated_dial_options():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "País*",
+        "name": "pais",
+        "required": True,
+        "options": [
+            {"label": "Afeganistão +93", "value": "+93"},
+            {"label": "Anguilla +1", "value": "+1"},
+            {"label": "Estados Unidos +1", "value": "+1"},
+        ],
+    }
+    profile = {"phone_country_code": "+1", "phone": "+12012834980"}
+    assert python_runtime._phone_country_option(field, profile)["label"] == "Estados Unidos +1"
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Estados Unidos +1",
+    }
+
+
+def test_portuguese_city_residence_maps_to_profile_city():
+    profile = {"city": "Jersey City", "location": "Jersey City, NJ, USA"}
+    assert (
+        python_runtime._map_text_value("Em qual cidade você reside atualmente?", profile)
+        == "Jersey City"
+    )
+
+
+def test_metropolitan_area_option_selects_nyc_for_jersey_city():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "Where are you based out of?*",
+        "name": "location",
+        "required": True,
+        "options": [
+            {"label": "New York City metropolitan area", "value": "nyc"},
+            {"label": "Atlanta metropolitan area", "value": "atl"},
+            {"label": "Other US city (specify below)", "value": "other"},
+            {"label": "Outside of the US", "value": "outside"},
+        ],
+    }
+    profile = {"location": "Jersey City, NJ, USA", "city": "Jersey City"}
+    assert (
+        python_runtime._metropolitan_area_option(field, profile)["label"]
+        == "New York City metropolitan area"
+    )
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "New York City metropolitan area",
+    }
+
+
+def test_company_relative_yes_no_uses_approved_family_fact():
+    label = "Do you have relatives that currently work at Obsidian Security?*"
+    profile = {
+        "family_employment_history_us": "No family members have worked in the United States.",
+        "answers": {},
+    }
+    assert python_runtime._family_employment_negative_answer(label, profile) == "No"
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": label,
+        "name": "relatives",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_referral_name_text_field_defaults_to_na():
+    label = "If you were referred by a current Pivotal employee, please share their name."
+    profile = {
+        "target_company": "Pivotal",
+        "answers": {},
+    }
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "label": label,
+        "required": True,
+        "options": [],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "fill",
+        "value": "N/A",
+    }
+
+
+def test_related_to_employee_question_uses_family_employment_fact():
+    label = (
+        "Are you related to anyone who is currently working for Allegiant? "
+        "If Yes - please list the name of the person(s) and their relationship to you."
+    )
+    profile = {
+        "family_employment_history_us": "No family members have worked in the United States.",
+        "answers": {},
+    }
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": label,
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_metro_office_location_question_picks_willing_to_relocate_option():
+    label = (
+        "Are you located in the Chicagoland area or Houston, TX and able to "
+        "work in our Rosemont HQ or Houston office Tuesday-Thursday?"
+    )
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "city": "Jersey City",
+        "answers": {"Are you open to relocation?": "Yes"},
+        "sensitive_answers": {
+            "relocation": {
+                "patterns": ["relocation"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+    field = {
+        "kind": "radiogroup",
+        "label": label,
+        "required": True,
+        "options": [
+            {"label": "Rosemont, IL", "value": "rosemont"},
+            {"label": "Houston, TX", "value": "houston"},
+            {"label": "No - I would be considered a Remote employee", "value": "remote"},
+            {"label": "No - Willing to relocate without assistance to an office location", "value": "relocate"},
+        ],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "check",
+        "option": {
+            "label": "No - Willing to relocate without assistance to an office location",
+            "value": "relocate",
+        },
+    }
+
+
+def test_start_season_and_year_comboboxes_use_profile_availability():
+    profile = {
+        "answers": {"What is your earliest availability?": "Within a month"},
+        "education": [
+            {
+                "degree": "Master's",
+                "end_year": "2026",
+            }
+        ],
+    }
+    season_field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "What time of year would you like to begin?",
+        "required": True,
+        "options": [
+            {"label": "January - March", "value": "q1"},
+            {"label": "April - June", "value": "q2"},
+            {"label": "July - September", "value": "q3"},
+            {"label": "October - December", "value": "q4"},
+        ],
+    }
+    season_plan = python_runtime._plan_field(season_field, profile, None)
+    assert season_plan["action"] == "combobox"
+    assert season_plan["value"] in {
+        "January - March",
+        "April - June",
+        "July - September",
+        "October - December",
+    }
+
+    year_field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "What year would you be interested in beginning at Galatea?",
+        "required": True,
+        "options": [
+            {"label": "2025", "value": "2025"},
+            {"label": "2026", "value": "2026"},
+            {"label": "2027", "value": "2027"},
+        ],
+    }
+    assert python_runtime._plan_field(year_field, profile, None) == {
+        "action": "combobox",
+        "value": "2026",
+    }
+
+
+def test_post_university_experience_and_ranked_location_comboboxes():
+    profile = {
+        "years_experience": "3",
+        "location": "Jersey City, NJ, USA",
+        "open_to_all_us_locations": True,
+        "answers": {
+            "How many years of relevant experience do you have outside internships/academia?": "3 years",
+        },
+        "desired_locations": ["New York City"],
+    }
+    experience_field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "How many years of post university experience do you (or the candidate) have?",
+        "required": True,
+        "options": [
+            {"label": "< 1 year", "value": "lt1"},
+            {"label": "1 - 3 Years", "value": "1-3"},
+            {"label": "4 - 6 Years", "value": "4-6"},
+            {"label": "7 - 10 years", "value": "7-10"},
+            {"label": "10+ years", "value": "10p"},
+        ],
+    }
+    assert python_runtime._plan_field(experience_field, profile, None) == {
+        "action": "combobox",
+        "value": "1 - 3 Years",
+    }
+
+    location_field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": (
+            "Please select the preferred job location in order of preference. "
+            "Please select the first preferred location below"
+        ),
+        "required": True,
+        "options": [
+            {"label": "Somerville, Massachusetts, United States", "value": "somerville"},
+            {"label": "Durham, North Carolina, United States", "value": "durham"},
+            {"label": "St. Petersburg, Florida, United States", "value": "stpete"},
+            {"label": "London, United Kingdom", "value": "london"},
+        ],
+    }
+    assert python_runtime._plan_field(location_field, profile, None) == {
+        "action": "combobox",
+        "value": "Somerville, Massachusetts, United States",
+    }
+
+
+def test_desired_salary_range_combobox_picks_satisfying_range():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "What is your desired (target) salary?",
+        "required": True,
+        "options": [
+            {"label": "80-100k", "value": "80-100"},
+            {"label": "100-115k", "value": "100-115"},
+            {"label": "120-140k", "value": "120-140"},
+            {"label": "Other", "value": "other"},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "salary": {
+                "patterns": ["salary"],
+                "answer": "At least $70k USD",
+                "approved": True,
+            }
+        }
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "80-100k",
+    }
+
+
+def test_desired_salary_range_uses_profile_minimum_expected_salary():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Desired Salary*",
+        "required": True,
+        "options": [
+            "$40,000-$60,000",
+            "$61,000-$80,000",
+            "$81,000-$100,000",
+            "$101,000-$120,000",
+            "prefer not to disclose",
+        ],
+    }
+    profile = {
+        "minimum_expected_salary": "At least $70k USD",
+        "answers": {},
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "$81,000-$100,000",
+    }
+
+
+def test_1099_contractor_question_answers_no_for_full_time_seeker():
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": "Are you comfortable working as a 1099 independent contractor (not an employee)?",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    profile = {"role_types": ["Full-Time"]}
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "No",
+    }
+
+
+def test_salary_acknowledgement_combobox_answers_yes():
+    label = "I acknowledge that I have reviewed the posted compensation range for this position."
+    profile = {
+        "answers": {"Do you accept the listed salary range for this position?": "Yes"},
+        "sensitive_answers": {
+            "salary": {
+                "label": "Salary Expectation",
+                "patterns": ["salary", "compensation"],
+                "answer": "At least $70k USD",
+                "approved": True,
+            }
+        },
+    }
+    assert python_runtime._legal_terms_consent_answer(label, profile) == "Yes"
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": label,
+        "name": "compensation_ack",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_salary_range_comfort_combobox_answers_yes():
+    label = "Are you comfortable moving forward with the salary range posted? *"
+    profile = {
+        "answers": {"Do you accept the listed salary range for this position?": "Yes"},
+        "sensitive_answers": {
+            "salary": {
+                "label": "Salary Expectation",
+                "patterns": ["salary", "compensation"],
+                "answer": "At least $70k USD",
+                "approved": True,
+            }
+        },
+    }
+    assert python_runtime._legal_terms_consent_answer(label, profile) == "Yes"
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "role": "combobox",
+        "label": label,
+        "name": "salary_comfort",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_age_button_group_uses_age_in_years_when_bucket_has_no_exact_match():
+    field = {
+        "kind": "radiogroup",
+        "tag": "div",
+        "label": "What is your current age?",
+        "required": True,
+        "options": ["Under 30", "30-39", "40-49"],
+    }
+    profile = {"birthday": "1998-06-01", "answers": {}, "sensitive_answers": {}}
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan == {"action": "check", "option": "Under 30"}
+
+
+def test_mandarin_option_matches_approved_chinese_language_answer():
+    assert python_runtime._option_matches("Mandarin", "Chinese")
+    assert python_runtime._option_matches("Chinese", "Mandarin")
+
+
+def test_equal_opportunity_consent_group_checks_approved_affirmative_option():
+    field = {
+        "kind": "checkboxgroup",
+        "tag": "div",
+        "label": (
+            "We are an Equal Opportunity Employer. All persons shall have the "
+            "opportunity to be considered for employment without regard to race, "
+            "color, creed, religion, national origin, ancestry, citizenship status, age, "
+            "sex or gender, gender identity or expression, sexual orientation, marital "
+            "status, military and veteran status, physical or mental disability, protected "
+            "medical condition, genetic information or any other characteristic protected "
+            "by applicable law."
+        ),
+        "required": True,
+        "options": [
+            {"label": "I agree", "value": "I agree"},
+            {"label": "I do not agree", "value": "No"},
+        ],
+    }
+    profile = {
+        "answers": {},
+        "sensitive_answers": {
+            "legal_attestation": {
+                "patterns": ["attestation", "acknowledge"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan == {
+        "action": "checkmany",
+        "options": [{"label": "I agree", "value": "I agree"}],
+        "sensitive": True,
+    }
+
+
+def test_primary_office_combobox_uses_preferred_metro():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Which HRT office are you primarily interested in being considered for?*",
+        "required": True,
+        "options": [
+            {"label": "Austin", "value": "Austin"},
+            {"label": "New York", "value": "New York"},
+            {"label": "London", "value": "London"},
+        ],
+    }
+    profile = {
+        "desired_locations": ["New York City"],
+        "answers": {},
+        "sensitive_answers": {},
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "New York",
+    }
+
+
+def test_retained_consent_checkbox_checks_from_approved_privacy_answer():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "checkbox",
+        "label": "I consent to have my personal information retained*",
+        "required": True,
+    }
+    profile = {
+        "answers": {},
+        "sensitive_answers": {
+            "privacy_consent": {
+                "patterns": ["privacy"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        },
+    }
+
+    assert python_runtime._legal_terms_consent_answer(field["label"], profile) == "Yes"
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "check",
+        "sensitive": True,
+    }
+
+
+def test_available_cities_combobox_prefers_approved_metro():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "In what cities are you available to work?*",
+        "required": True,
+    }
+    profile = {
+        "desired_locations": ["New York City"],
+        "answers": {},
+        "sensitive_answers": {},
+    }
+    available = [
+        "Amsterdam",
+        "Atlanta",
+        "Boston",
+        "New York City",
+        "San Francisco",
+        "Seattle",
+    ]
+
+    choice = python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        available,
+        "",
+        profile,
+    )
+
+    assert choice == "New York City"
+
+
+def test_required_location_combobox_answers_yes_from_all_us_preference():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Are you willing to work from the required location?",
+        "required": True,
+    }
+    profile = {
+        "open_to_all_us_locations": True,
+        "desired_locations": ["New York City"],
+        "answers": {},
+        "sensitive_answers": {},
+    }
+    available = ["Yes", "No"]
+
+    choice = python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        available,
+        "",
+        profile,
+    )
+
+    assert choice == "Yes"
+
+
+def test_based_in_metro_long_option_matches_negative_answer():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": (
+            "Are you located in the Chicagoland area or Houston, TX and able to work "
+            "in our Rosemont HQ or Houston office Tuesday-Thursday?"
+        ),
+        "required": True,
+    }
+    profile = {
+        "location": "Jersey City, NJ, USA",
+        "answers": {},
+        "sensitive_answers": {},
+    }
+    available = [
+        "Yes, I am located in the Chicagoland area or Houston, TX",
+        "No, I am not located in the Chicagoland area or Houston, TX",
+    ]
+
+    choice = python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        available,
+        "",
+        profile,
+    )
+
+    assert choice == "No, I am not located in the Chicagoland area or Houston, TX"

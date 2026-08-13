@@ -111,6 +111,9 @@ _RATE_LIMIT_MARKERS = (
     "too many requests",
     "rate limit",
     "server limit",
+    "reached your application limit",
+    "application limit",
+    "already applied",
 )
 
 

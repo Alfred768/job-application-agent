@@ -380,7 +380,19 @@ function sensitivePatternMatches(label, pattern) {
 }
 
 // Fuzzy match a field label against the saved answer bank.
+function isProficiencyLevelQuestion(label) {
+  const n = norm(label);
+  if (n.includes("working proficiency") || n.includes("do you have")) return false;
+  return [
+    "level of proficiency",
+    "proficiency level",
+    "how proficient",
+    "rate your proficiency",
+  ].some((marker) => n.includes(marker));
+}
+
 function findAnswer(label, answers) {
+  if (isProficiencyLevelQuestion(label)) return null;
   if (!answers) return null;
   const ln = norm(label);
   let best = null;
@@ -666,11 +678,68 @@ function approvedCandidateFactAnswer(label, profile) {
   const answers = profile.answers || {};
   const exact = findExactAnswer(label, answers);
   if (exact != null) return exact;
+  const conditionalDetail = conditionalFactDetailAnswer(label, profile);
+  if (conditionalDetail != null) return conditionalDetail;
+  const familyNegative = familyEmploymentNegativeAnswer(label, profile);
+  if (familyNegative != null) return familyNegative;
   const structured = structuredExplicitCandidateFactAnswer(label, profile);
   if (structured != null) return structured;
   const semantic = semanticCandidateFactAnswer(label, answers);
   if (semantic != null) return semantic;
   return matchScreeningRule(label, profile.screening_answer_rules);
+}
+
+function conditionalFactDetailAnswer(label, profile) {
+  const n = norm(label);
+  if (!n) return null;
+  const conditional = [
+    "if you responded",
+    "if you answered",
+    "if you selected",
+    "if you have",
+    "if yes",
+    "if no",
+    "if so",
+    "if applicable",
+  ].some((phrase) => n.includes(phrase));
+  const detailAsk = [
+    "name", "names", "list", "enter", "explain", "specify", "provide",
+    "description", "detail",
+  ].some((phrase) => n.includes(phrase));
+  const factMarkers = ["relative", "relatives", "family member", "family members", "referral", "referrer"];
+  if (!conditional || !detailAsk || !factMarkers.some((marker) => n.includes(marker))) return null;
+  const answers = profile.answers || {};
+  for (const [key, value] of Object.entries(answers)) {
+    const kn = norm(key);
+    if (factMarkers.some((marker) => kn.includes(marker)) && isNegativeAnswer(value)) return "N/A";
+  }
+  return null;
+}
+
+function familyEmploymentNegativeAnswer(label, profile) {
+  const n = norm(label);
+  if (!["relative", "relatives", "family member", "family members"].some((marker) => n.includes(marker))) return null;
+  const answers = profile.answers || {};
+  for (const [key, value] of Object.entries(answers)) {
+    const kn = norm(key);
+    if (
+      ["relative", "relatives", "family member", "family members"].some((marker) => kn.includes(marker))
+      && isNegativeAnswer(value)
+    ) {
+      return String(value);
+    }
+  }
+  const familyHistory = norm(profile.family_employment_history_us || "");
+  if (
+    familyHistory
+    && (familyHistory.includes("no family")
+      || familyHistory.includes("none")
+      || familyHistory.includes("never")
+      || familyHistory.startsWith("no "))
+  ) {
+    return "No";
+  }
+  return null;
 }
 
 function requiresUserAuthoredAnswer(label, profile) {
@@ -889,6 +958,7 @@ function developerFacingProductsAnswer(label, profile) {
 
 function autoAnswer(label, profile, sensitive = false) {
   if (!label || requiresUserAuthoredAnswer(label, profile)) return null;
+  if (isProficiencyLevelQuestion(label)) return null;
   const n = norm(label);
   const company = String(profile.target_company || "the company");
   const title = String(profile.target_title || "this role");
@@ -922,6 +992,20 @@ function autoAnswer(label, profile, sensitive = false) {
     const location = norm(profile.location || "");
     const targetCities = ["denver", "st louis", "saint louis", "indianapolis"].filter((city) => n.includes(city));
     return targetCities.some((city) => location.includes(city)) ? "Yes" : "No";
+  }
+  if (n.includes("live outside") && (n.includes("united states") || n.includes(" u s ") || n.includes(" us "))) {
+    const location = norm(`${profile.location || ""} ${profile.country || ""}`);
+    const insideUS = ["united states", "united states of america", "usa", " us "].some((marker) => location.includes(marker));
+    return insideUS ? "No" : "Yes";
+  }
+  if (n.includes("looking for") && n.includes("remote role")) {
+    const workMode = norm(answers["Do you prefer onsite, hybrid, or remote?"] || "");
+    if (workMode.includes("hybrid") || workMode.includes("onsite")) return "No";
+    if (workMode.includes("remote")) return "Yes";
+  }
+  if (n.includes("python") && n.includes("production") && (n.includes("experience") || n.includes("used"))) {
+    const profileText = profileEvidenceText(profile);
+    return profileText.includes("python") && hasProfileEvidence(profileText, "production", "deployed", "dockerized") ? "Yes" : "No";
   }
   if (
     n.includes("currently based in any of these countries") ||
@@ -1012,14 +1096,14 @@ function autoAnswer(label, profile, sensitive = false) {
     return truthyAnswer(relocation) ? "Yes" : null;
   }
   if (n.includes("highest level of education") && (n.includes("institution") || n.includes("from which"))) {
-    const education = (profile.education || []).find((item) => item && typeof item === "object") || {};
+    const education = highestEducationEntry(profile.education) || {};
     const degree = String(education.degree || "Master's Degree");
     const field = String(education.field || "Computer Science");
     const school = String(education.school || "Stevens Institute of Technology");
     return `${degree} in ${field} from ${school}`;
   }
   if (n.includes("highest level of education") && n.includes("completed")) {
-    const education = (profile.education || []).find((item) => item && typeof item === "object") || {};
+    const education = highestEducationEntry(profile.education) || {};
     const degree = String(education.degree || "Master's Degree");
     const normalizedDegree = norm(degree);
     if (normalizedDegree.includes("master")) return "Master's Degree";
@@ -1131,12 +1215,14 @@ function autoAnswer(label, profile, sensitive = false) {
     return savedCompensationFactor != null ? String(savedCompensationFactor) : "No";
   }
   if (
-    n.includes("desired compensation") ||
-    n.includes("compensation range") ||
-    n.includes("compensation expectation") ||
-    n.includes("compensation expectations") ||
-    n.includes("desired pay") ||
-    n.includes("salary expectation")
+    (
+      n.includes("desired compensation") ||
+      n.includes("compensation range") ||
+      n.includes("compensation expectation") ||
+      n.includes("compensation expectations") ||
+      n.includes("desired pay") ||
+      n.includes("salary expectation")
+    ) && !isSalaryAcknowledgement(label)
   ) {
     const savedCompensation = findAnswer(label, answers);
     if (savedCompensation != null) return String(savedCompensation);
@@ -1715,8 +1801,62 @@ function basedInMetroQuestionAnswer(label, profile) {
   return "No";
 }
 
+function communicationConsentAnswer(label, profile) {
+  const n = norm(label);
+  if (!["sms", "text message", "text messages", "whatsapp"].some((marker) => n.includes(marker))) return null;
+  if (!["consent", "agree", "contact", "receive", "updates", "communications", "ok", "opt in", "opt-in"].some((marker) => n.includes(marker))) return null;
+  const semantic = findSemanticCandidateFactAnswer(label, profile.answers || {});
+  if (semantic != null) return semantic;
+  return approvedSensitiveEntryAnswer(profile, "terms_consent");
+}
+
+function timezoneAnswer(label, profile) {
+  const n = norm(label);
+  if (!n.includes("timezone") && !n.includes("time zone")) return null;
+  const answers = profile.answers || {};
+  const exact = findExactAnswer(label, answers);
+  if (exact != null) return String(exact);
+  for (const [key, value] of Object.entries(answers)) {
+    const kn = norm(key);
+    if ((kn.includes("timezone") || kn.includes("time zone")) && value != null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  const combined = norm(`${profile.region || profile.state || ""} ${profile.location || ""}`);
+  const zones = {
+    eastern: ["new jersey", "nj", "new york", "ny", "connecticut", "ct", "pennsylvania", "pa", "massachusetts", "ma", "maryland", "md", "district of columbia", "dc", "virginia", "va", "delaware", "de", "rhode island", "ri", "new hampshire", "nh", "vermont", "vt", "maine", "me", "ohio", "oh", "west virginia", "wv", "georgia", "ga", "florida", "fl", "north carolina", "nc", "south carolina", "sc", "tennessee", "tn", "kentucky", "ky", "indiana", "in", "michigan", "mi", "alabama", "al", "mississippi", "ms"],
+    central: ["texas", "tx", "illinois", "il", "wisconsin", "wi", "minnesota", "mn", "iowa", "ia", "missouri", "mo", "arkansas", "ar", "louisiana", "la", "oklahoma", "ok", "kansas", "ks", "nebraska", "ne", "north dakota", "nd", "south dakota", "sd"],
+    mountain: ["colorado", "co", "utah", "ut", "wyoming", "wy", "montana", "mt", "idaho", "id", "new mexico", "nm", "arizona", "az"],
+    pacific: ["california", "ca", "washington", "wa", "oregon", "or", "nevada", "nv", "alaska", "ak", "hawaii", "hi"],
+  };
+  for (const [zone, tokens] of Object.entries(zones)) {
+    if (tokens.some((token) => combined.includes(token))) {
+      return zone.charAt(0).toUpperCase() + zone.slice(1);
+    }
+  }
+  return null;
+}
+
+function bachelorsDegreeAnswer(label, profile) {
+  const n = norm(label);
+  if (!n.includes("bachelor") || !n.includes("degree")) return null;
+  if (["highest", "field", "year", "graduation", "graduate", "completed", "level"].some((marker) => n.includes(marker))) return null;
+  for (const entry of profile.education || []) {
+    if (!entry || typeof entry !== "object") continue;
+    const degree = norm(String(entry.degree || ""));
+    if (["bachelor", "master", "phd", "doctor"].some((marker) => degree.includes(marker))) return "Yes";
+  }
+  return "No";
+}
+
 function priorityAutoAnswer(label, profile) {
   const n = norm(label);
+  const consent = communicationConsentAnswer(label, profile);
+  if (consent != null) return consent;
+  const timezone = timezoneAnswer(label, profile);
+  if (timezone != null) return timezone;
+  const bachelors = bachelorsDegreeAnswer(label, profile);
+  if (bachelors != null) return bachelors;
   if (isSchoolComboboxField({ label }) && !n.includes("degree") && !n.includes("level")) {
     return currentEducationValue(profile, "school");
   }
@@ -1934,7 +2074,15 @@ function legalTermsConsentAnswer(label, profile) {
     n.includes("understand") &&
     n.includes("agree") &&
     n.includes("statement");
-  if (!(isTermsConsent || isStatementAck || isPrivacyConsent || isTruthfulnessAttestation)) {
+  const isAffirmationConsent = n.includes("affirmation") &&
+    (["agree", "consent", "confirm", "accept", "acknowledge"].some((marker) => n.includes(marker)) || n.split(" ").length <= 2);
+  const salaryAck = isSalaryAcknowledgement(label);
+  if (!(isTermsConsent || isStatementAck || isPrivacyConsent || isTruthfulnessAttestation || isAffirmationConsent || salaryAck)) {
+    return null;
+  }
+  if (salaryAck) {
+    const accepted = (profile.answers || {})["Do you accept the listed salary range for this position?"];
+    if (truthyAnswer(accepted) || approvedSensitiveEntryAnswer(profile, "salary") != null) return "Yes";
     return null;
   }
   const approved = isPrivacyConsent
@@ -1945,6 +2093,16 @@ function legalTermsConsentAnswer(label, profile) {
       || approvedSensitiveEntryAnswer(profile, "legal_attestation"));
   if (approved == null) return null;
   return truthyAnswer(approved) ? "Yes" : String(approved);
+}
+
+function isSalaryAcknowledgement(label) {
+  const n = norm(label);
+  if ((n.includes("acknowledge") || n.includes("acknowledged")) &&
+    (n.includes("compensation range") || n.includes("salary range")
+      || n.includes("posted compensation") || n.includes("posted salary")
+      || n.includes("reviewed the posted"))) return true;
+  return (n.includes("salary range") || n.includes("compensation range")) &&
+    ["comfortable", "accept", "accepted", "confirm", "agree", "moving forward"].some((marker) => n.includes(marker));
 }
 
 function biopharmaComplianceAnswer(label, profile) {
@@ -2351,6 +2509,15 @@ const LOCATION_STATE_NAMES = {
   wa: "washington", wv: "west virginia", wi: "wisconsin", wy: "wyoming", dc: "district of columbia",
 };
 
+const LOCATION_CITY_MARKERS = [
+  "atlanta", "austin", "bellevue", "boston", "chicago", "dallas", "denver",
+  "houston", "los angeles", "miami", "minneapolis", "mountain view",
+  "nashville", "new york", "palo alto", "philadelphia", "pittsburgh",
+  "portland", "raleigh", "redmond", "salt lake city", "san diego",
+  "san francisco", "san jose", "santa clara", "seattle", "sunnyvale",
+  "washington dc", "washington d c",
+];
+
 function expandedLocationText(value) {
   const ambiguousWords = new Set(["in", "or", "me", "hi", "ok", "id", "ma"]);
   const rawTokens = String(value || "").match(/[A-Za-z]+/g) || [];
@@ -2625,16 +2792,40 @@ function locationsCompatible(option, desired) {
 function looksLikeLocationCheckboxOption(label) {
   const n = norm(label);
   if (!n) return false;
+  if (["outside", "not in", "non us", "excluding", "except"].some((marker) => n.includes(marker))) return false;
+  if (["us", "u s", "usa", "u s a", "united states"].includes(n) || n.includes("united states") || n.includes("usa")) return true;
   if (n.includes("remote") && (n.includes("us") || n.includes("usa") || n.includes("united states"))) return true;
   const tokens = new Set(n.split(" ").filter(Boolean));
   if (tokens.size > 8) return false;
   if ([...tokens].some((token) => Object.prototype.hasOwnProperty.call(LOCATION_STATE_NAMES, token))) return true;
-  return Object.values(LOCATION_STATE_NAMES).some((state) => n.includes(state));
+  return Object.values(LOCATION_STATE_NAMES).some((state) => n.includes(state)) ||
+    LOCATION_CITY_MARKERS.some((city) => n.includes(city));
+}
+
+function approvedAllUSLocations(profile) {
+  if (profile.open_to_all_us_locations === true) return true;
+  const policy = norm(String(profile.location_policy || profile.target_region || ""));
+  if (["all us", "all u s", "all united states", "anywhere in the us", "anywhere in the united states"].some((marker) => policy.includes(marker))) return true;
+  const answers = profile.answers || {};
+  for (const raw of Object.values(answers)) {
+    if (typeof raw !== "string") continue;
+    const normalized = norm(raw);
+    if (["all locations", "anywhere in the united states"].includes(normalized)) return true;
+    if (normalized.includes("all us locations") || normalized.includes("select all us")) return true;
+    if (normalized.includes("all locations") && ["us", "usa", "united states", "american"].some((marker) => normalized.includes(marker))) return true;
+  }
+  return false;
+}
+
+function negativeLocationPrompt(text) {
+  const n = norm(text);
+  return ["not willing", "not interested", "not open", "do not want", "don t want", "not able", "excluding", "except", "not consider"].some((marker) => n.includes(marker));
 }
 
 function officeLocationCheckboxPlan(f, profile) {
   const label = String(f.label || "");
   const combined = norm([f.label, f.section, f.ariaLabel, f.ariaDescription, f.name, f.id].filter(Boolean).join(" "));
+  if (negativeLocationPrompt(combined)) return null;
   if (!(
     combined.includes("which office location") ||
     combined.includes("office locations") ||
@@ -2644,6 +2835,9 @@ function officeLocationCheckboxPlan(f, profile) {
   const option = norm(label);
   if (!option) return null;
   if (option.includes("remote") && (option.includes("us") || option.includes("united states") || option.includes("usa"))) {
+    return { action: "check" };
+  }
+  if (approvedAllUSLocations(profile) && looksLikeLocationCheckboxOption(option)) {
     return { action: "check" };
   }
   if (desiredLocationValues(profile).some((desired) => locationsCompatible(label, desired))) {
@@ -2656,6 +2850,7 @@ function locationCheckboxGroupPlan(f, profile) {
   const options = (f && f.options) || [];
   if (!options.length) return null;
   const context = norm([f.label, f.section, f.ariaLabel, f.ariaDescription, f.name, f.id].filter(Boolean).join(" "));
+  if (negativeLocationPrompt(context)) return null;
   const optionTexts = options.map((option) => norm(optionText(option)));
   if (!(
     ["location", "locations", "office", "relocate", "relocation", "placed"].some((marker) => context.includes(marker)) &&
@@ -2676,12 +2871,19 @@ function locationCheckboxGroupPlan(f, profile) {
       }
     }
   }
-  if (!desired.length) return null;
+  if (!desired.length && !approvedAllUSLocations(profile)) return null;
   const matched = options.filter((option) => {
     const text = optionText(option);
     if (norm(text) === "international") return false;
     return desired.some((part) => locationsCompatible(text, part));
   });
+  if (approvedAllUSLocations(profile)) {
+    const usMatched = options.filter((option) => {
+      const text = optionText(option);
+      return norm(text) !== "international" && looksLikeLocationCheckboxOption(norm(text));
+    });
+    if (usMatched.length) return { action: "checkmany", options: usMatched };
+  }
   if (!matched.length) return null;
   return { action: "checkmany", options: matched };
 }
@@ -2711,7 +2913,10 @@ function preferredOfficeLocationOption(f, profile) {
   return options.find((option) => {
     const optionLabel = norm(optionText(option));
     return officeKeywords.some((keyword) => optionLabel.includes(keyword));
-  }) || null;
+  }) || (approvedAllUSLocations(profile) ? options.find((option) => {
+    const optionLabel = norm(optionText(option));
+    return looksLikeLocationCheckboxOption(optionLabel) || optionLabel === "remote";
+  }) : null) || null;
 }
 
 function preferredOfficeLocationAnswer(f, profile) {
@@ -2781,6 +2986,18 @@ function citizenshipStatusOption(field, profile) {
   if (!normalized.includes("citizenship") || !normalized.includes("status")) return null;
   const approved = matchSensitive(field.label || "") || approvedSensitiveEntryAnswer(profile, "citizenship");
   if (approved == null || !containsNegation(approved)) return null;
+  const nonCitizen = options.find((option) => {
+    const text = norm(optionText(option));
+    return [
+      "not a us citizen",
+      "not a u.s. citizen",
+      "not a u s citizen",
+      "non us citizen",
+      "non u.s. citizen",
+      "non u s citizen",
+    ].some((marker) => text.includes(marker));
+  });
+  if (nonCitizen) return nonCitizen;
   return options.find((option) => {
     const text = norm(optionText(option));
     return text.includes("other") && text.includes("please explain");
@@ -2896,6 +3113,41 @@ function guardLocalResidencyOption(field, option, profile, label) {
   return option;
 }
 
+function localResidencyCommitmentOption(field, profile) {
+  const options = (field && field.options) || [];
+  if (!options.length) return null;
+  const normalized = norm(field.label || "");
+  if (!["onsite", "on site", "in office", "in-office", "office"].some((marker) => normalized.includes(marker))) return null;
+  if (!["bay area", "san francisco", "mountain view", "sunnyvale", "palo alto"].some((marker) => normalized.includes(marker))) return null;
+  if (!["open to", "willing to", "able to", "comfortable", "commit"].some((marker) => normalized.includes(marker))) return null;
+  const relocation = (profile.answers || {})["Are you open to relocation?"]
+    || matchScreeningRule("open to relocation", profile.screening_answer_rules)
+    || approvedSensitiveEntryAnswer(profile, "relocation");
+  if (relocation == null) return null;
+  const profileLocation = norm(profile.location || profile.city || "");
+  const localMarkers = ["san francisco", "sf", "bay area", "oakland", "berkeley", "palo alto", "mountain view", "sunnyvale"];
+  const isLocal = localMarkers.some((marker) => profileLocation.includes(marker));
+  if (isLocal) {
+    return options.find((option) => {
+      const text = norm(optionText(option));
+      return [
+        "currently in the bay area",
+        "currently in the san francisco bay area",
+        "currently based in the bay area",
+        "i m currently in",
+        "i am currently in",
+      ].some((marker) => text.includes(marker));
+    }) || null;
+  }
+  if (!truthyAnswer(relocation)) return null;
+    return options.find((option) => {
+    const text = norm(optionText(option));
+    if (!["relocat", "willing to move", "open to moving", "can relocate"].some((marker) => text.includes(marker))) return false;
+    if (["not willing", "not open to", "not interested", "no longer willing", "unable", "won t", "do not want", "don t want", "cannot relocate", "can not relocate", "does not want to relocate", "do not wish to relocate", "not able to relocate", "no, i do not"].some((marker) => text.includes(marker))) return false;
+    return true;
+  }) || null;
+}
+
 function clearanceLevelChoice(field, profile) {
   const normalized = norm(field.label || "");
   if (![
@@ -2954,6 +3206,13 @@ function matchingOptions(field, answer, profile) {
     return true;
   });
   if (matches.length) return matches;
+  const answerNorm = norm(answer);
+  const insideOptions = usableOptions.filter((option) => /inside|within/.test(norm(optionText(option))));
+  const outsideOptions = usableOptions.filter((option) => /outside/.test(norm(optionText(option))));
+  if (insideOptions.length && outsideOptions.length) {
+    if (["yes", "true", "1"].includes(answerNorm)) return outsideOptions;
+    if (["no", "false", "0"].includes(answerNorm)) return insideOptions;
+  }
   const best = bestOptionMatch(usableOptions, answer);
   if (best) {
     const original = usableOptions.find((option) => optionText(option) === best || optionValue(option) === best);
@@ -3062,6 +3321,9 @@ function answerAliases(answer) {
       "No, I don't have a disability",
       "No, I don't have a disability and have not had one in the past",
       "No - I do not consent to receiving text messages",
+      "Not a US Citizen",
+      "Not a U.S. Citizen",
+      "Non-US Citizen",
       "N/A - have never held U.S. security clearance",
       "N/A - have never held US security clearance",
       "None of the above",
@@ -3072,7 +3334,7 @@ function answerAliases(answer) {
     aliases.push("None of the above", "None", "Not applicable", "N/A");
   }
   if (n.includes("never held") && n.includes("clearance")) {
-    aliases.push("None", "None of the above", "N/A", "Not applicable");
+    aliases.push("None", "None of the above", "N/A", "Not applicable", "No");
   }
   if (["company website", "company site", "company careers", "company career site", "career site", "career website", "careers website", "careers site"].includes(n)) {
     aliases.push(
@@ -3179,6 +3441,32 @@ function firstProfileEntry(entries) {
   return entries.find((entry) => entry && typeof entry === "object") || null;
 }
 
+function highestEducationEntry(entries) {
+  if (!Array.isArray(entries)) return null;
+  const items = entries.filter((entry) => entry && typeof entry === "object");
+  if (!items.length) return null;
+  const rank = (entry) => {
+    const d = norm(entry.degree || "");
+    if (d.includes("phd") || d.includes("doctor")) return 4;
+    if (d.includes("master")) return 3;
+    if (d.includes("bachelor") || d.includes("undergrad")) return 2;
+    if (d.includes("associate")) return 1;
+    if (d.includes("high school") || d.includes("secondary")) return -1;
+    return 0;
+  };
+  const endYear = (entry) => {
+    const raw = String(entry.end_year || (entry.end_date || "").slice(0, 4) || "");
+    const value = Number(raw);
+    return Number.isInteger(value) ? value : 0;
+  };
+  return items.reduce((best, item) => {
+    if (!best) return item;
+    const left = rank(item), right = rank(best);
+    if (left !== right) return left > right ? item : best;
+    return endYear(item) >= endYear(best) ? item : best;
+  }, null);
+}
+
 function currentWorkValue(profile, key) {
   const current = (profile.work_history || []).find((entry) => entry && entry.current) || firstProfileEntry(profile.work_history);
   if (!current) return null;
@@ -3189,7 +3477,7 @@ function currentWorkValue(profile, key) {
 }
 
 function currentEducationValue(profile, key) {
-  const education = firstProfileEntry(profile.education);
+  const education = highestEducationEntry(profile.education);
   return education && education[key] ? education[key] : null;
 }
 
@@ -3236,7 +3524,7 @@ function entryDatePart(entry, boundary, part) {
 }
 
 function educationDatePart(profile, boundary, part) {
-  return entryDatePart(firstProfileEntry(profile.education) || {}, boundary, part);
+  return entryDatePart(highestEducationEntry(profile.education) || {}, boundary, part);
 }
 
 function educationFieldForLevel(profile, level) {
@@ -3630,6 +3918,9 @@ function mapTextValue(fieldOrLabel, profile) {
   if (n === "address" || n === "address 1" || compact.includes("resumatoraddressvalue") || n.includes("address line 1") || n.includes("street address") || n.includes("mailing address")) return profile.address_line1 || profile.street_address || profile.address || (profile.answers || {})["Address"] || null;
   if (n.includes("address line 2")) return profile.address_line2 || (profile.answers || {})["Address 2"] || null;
   if (n.includes("postal code") || n.includes("zip code") || n === "zip") return profile.postal_code || profile.zip || (profile.answers || {})["Postal Code"] || null;
+  if (n.includes("cidade") && ["reside", "mora", "atualmente", "atual"].some((marker) => n.includes(marker))) {
+    return profile.city || cityFromLocation(profile.location);
+  }
   if (hasWholePhrase(n, "city")) return profile.city || cityFromLocation(profile.location);
   if (hasWholePhrase(n, "location") || hasWholePhrase(n, "address")) return profile.location || profile.city || null;
   if (n.includes("first name")) return profile.first_name || (profile.name ? profile.name.split(" ")[0] : null);
@@ -3735,6 +4026,96 @@ function inferPhoneCountryCode(profile) {
   if (match) return `+${match[1]}`;
   const country = norm(mapCountryValue(profile) || "");
   if (["united states", "united states of america", "usa", "us", "canada"].includes(country)) return "+1";
+  return null;
+}
+
+function phoneCountryOptionAnswer(f, profile) {
+  const options = Array.isArray(f.options) ? f.options : [];
+  if (!options.length) return null;
+  const dialCandidates = options.filter((option) =>
+    /\+\d{1,4}(?:\b|$)/.test(`${optionText(option)} ${String(option.value || "")}`)
+  );
+  if (!dialCandidates.length) return null;
+  const code = inferPhoneCountryCode(profile);
+  if (!code) return null;
+  const matching = dialCandidates.filter((option) => {
+    const combined = `${optionText(option)} ${String(option.value || "")}`;
+    const dialCodes = Array.from(combined.matchAll(/\+\d{1,4}/g), (match) => match[0]);
+    return new RegExp(code.replace("+", "\\+") + "(?:\\b|$)").test(combined)
+      || dialCodes.includes(code);
+  });
+  if (!matching.length) return null;
+  const preferred = matching.find((option) =>
+    ["united states", "estados unidos", "usa", "eua", "america"]
+      .some((alias) => norm(optionText(option)).includes(alias))
+  );
+  return preferred || matching[0];
+}
+
+const METRO_ALIASES = {
+  "new york": ["new york", "jersey city", "hoboken", "weehawken", "union city", "west new york", "secaucus", "newark", "edison", "clifton", "bayonne"],
+  "san francisco": ["san francisco", "oakland", "san jose", "berkeley", "palo alto", "mountain view", "redwood city", "fremont", "hayward", "santa clara"],
+  "seattle": ["seattle", "bellevue", "redmond", "tacoma", "kent"],
+  "austin": ["austin", "round rock", "cedar park"],
+  "boston": ["boston", "cambridge", "somerville", "quincy"],
+  "chicago": ["chicago", "evanston", "naperville"],
+  "los angeles": ["los angeles", "pasadena", "glendale", "long beach", "anaheim", "irvine"],
+  "washington dc": ["washington", "arlington", "alexandria", "bethesda", "mclean"],
+  "denver": ["denver", "boulder", "aurora"],
+  "phoenix": ["phoenix", "scottsdale", "tempe", "mesa", "chandler"],
+  "dallas": ["dallas", "fort worth", "plano", "irving", "frisco", "mckinney"],
+  "houston": ["houston", "sugar land"],
+  "philadelphia": ["philadelphia", "camden", "cherry hill"],
+  "miami": ["miami", "fort lauderdale"],
+  "san diego": ["san diego", "chula vista"],
+  "portland": ["portland", "vancouver", "beaverton"],
+  "atlanta": ["atlanta", "marietta", "alpharetta", "decatur"],
+  "minneapolis": ["minneapolis", "saint paul"],
+  "detroit": ["detroit", "ann arbor"],
+  "pittsburgh": ["pittsburgh"],
+  "charlotte": ["charlotte"],
+  "raleigh": ["raleigh", "durham", "chapel hill"],
+  "salt lake city": ["salt lake city", "provo"],
+  "las vegas": ["las vegas", "henderson"],
+  "orlando": ["orlando"],
+  "tampa": ["tampa", "st petersburg"],
+  "cleveland": ["cleveland"],
+  "cincinnati": ["cincinnati"],
+  "columbus": ["columbus"],
+  "kansas city": ["kansas city", "overland park"],
+  "indianapolis": ["indianapolis"],
+  "milwaukee": ["milwaukee"],
+  "nashville": ["nashville"],
+  "richmond": ["richmond"],
+  "san antonio": ["san antonio"],
+  "sacramento": ["sacramento"],
+  "baltimore": ["baltimore"],
+  "louisville": ["louisville"],
+  "memphis": ["memphis"],
+  "new orleans": ["new orleans"],
+  "st louis": ["st louis"],
+  "hartford": ["hartford"],
+  "providence": ["providence"],
+  "buffalo": ["buffalo"],
+  "rochester": ["rochester"],
+  "albany": ["albany"],
+};
+
+function metropolitanAreaOption(f, profile) {
+  const options = Array.isArray(f.options) ? f.options : [];
+  if (!["combobox", "select"].includes(f.role) && !["single", "combobox"].includes(f.kind)) return null;
+  const metroOptions = options.filter((option) => {
+    const text = norm(optionText(option));
+    return text.includes("metropolitan area") || text.includes("metro area");
+  });
+  if (!metroOptions.length) return null;
+  const locationText = norm([profile.location, profile.city, profile.region, profile.state]
+    .filter(Boolean).join(" "));
+  for (const [metro, aliases] of Object.entries(METRO_ALIASES)) {
+    if (!aliases.some((alias) => locationText.includes(alias))) continue;
+    const found = metroOptions.find((option) => norm(optionText(option)).includes(metro));
+    if (found) return found;
+  }
   return null;
 }
 
@@ -4651,6 +5032,30 @@ function planField(f, profile, ctx) {
       || ["checkbox", "radio"].includes(f.type)
       || ["checkbox", "radio", "switch"].includes(f.role)) && isSensitive(mappingLabel)
   ));
+  const localResidencyOption = localResidencyCommitmentOption(f, profile);
+  if (localResidencyOption) {
+    if (f.kind === "buttongroup") {
+      return { action: "buttonclick", optionAutofillId: localResidencyOption.autofillId, optionValue: localResidencyOption.value, optionText: optionText(localResidencyOption) };
+    }
+    if (f.role === "combobox" || f.kind === "single") {
+      return { action: "combobox", value: optionText(localResidencyOption) };
+    }
+    return { action: "check", optionId: localResidencyOption.id, optionValue: localResidencyOption.value, optionText: optionText(localResidencyOption), optionAutofillId: localResidencyOption.autofillId, groupName: f.name };
+  }
+  const phoneCountryOption = phoneCountryOptionAnswer(f, profile);
+  if (phoneCountryOption) {
+    if (f.role === "combobox" || f.kind === "single" || f.kind === "combobox") {
+      return { action: "combobox", value: optionText(phoneCountryOption) };
+    }
+    return { action: "select", value: phoneCountryOption.value || optionText(phoneCountryOption) };
+  }
+  const metroOption = metropolitanAreaOption(f, profile);
+  if (metroOption) {
+    if (f.role === "combobox" || f.kind === "single" || f.kind === "combobox") {
+      return { action: "combobox", value: optionText(metroOption) };
+    }
+    return { action: "select", value: metroOption.value || optionText(metroOption) };
+  }
   const explicitCandidateFact = requiresExplicitCandidateFact(answerLabel);
   let explicitCandidateAnswer = explicitCandidateFact
     ? approvedCandidateFactAnswer(answerLabel, profile)
@@ -7843,6 +8248,11 @@ async function detectSubmissionProcessingError(page) {
     "rate limit",
     "http 429",
     "status 429",
+    "reached your application limit",
+    "application limit",
+    "already applied",
+    "you have already applied",
+    "only one application",
     "your form needs corrections",
     "missing entry for required field",
     "there was an error processing your application",
@@ -8623,11 +9033,19 @@ async function injectCaptchaSolution(page, challenge, solution) {
 
 function captchaVisionConfig() {
   const enabled = /^(1|true|yes|on)$/i.test(String(process.env.CAPTCHA_VISION_FALLBACK || "0").trim());
-  const apiKey = String(process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || "").trim();
+  const apiKey = String(process.env.CAPTCHA_VISION_API_KEY || process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || "").trim();
   const model = String(process.env.CAPTCHA_VISION_MODEL || process.env.LLM_MODEL_ID || "gpt-4.1-mini").trim();
-  const baseUrl = String(process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const configuredBaseUrl = String(process.env.CAPTCHA_VISION_BASE_URL || "").trim();
+  const defaultBaseUrl = String(process.env.LLM_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const baseUrl = String(
+    configuredBaseUrl
+      ? configuredBaseUrl.replace(/\/+$/, "")
+      : defaultBaseUrl.toLowerCase().includes("api.openai.com")
+        ? defaultBaseUrl
+        : ""
+  );
   const rounds = Math.min(12, Math.max(1, Number(process.env.CAPTCHA_VISION_MAX_ROUNDS || 8) || 8));
-  return { enabled: enabled && Boolean(apiKey) && Boolean(model), apiKey, model, baseUrl, rounds };
+  return { enabled: enabled && Boolean(apiKey) && Boolean(model) && Boolean(baseUrl), apiKey, model, baseUrl, rounds };
 }
 
 function postVisionJson(endpoint, apiKey, payload) {

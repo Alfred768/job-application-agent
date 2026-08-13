@@ -2077,6 +2077,11 @@ def _is_anti_spam_rejection(stdout: str) -> bool:
             "rate-limited",
             "http 429",
             "status 429",
+            "reached your application limit",
+            "application limit",
+            "already applied",
+            "you have already applied",
+            "only one application",
         )
     )
 

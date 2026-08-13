@@ -59,6 +59,14 @@ def test_screening_rejects_foreign_city_only_locations_for_us_candidate():
         "Dublin",
         "Paris",
         "Prague",
+        "Zürich",
+        "Wien",
+        "Rotterdam",
+        "Kyiv, Ukraine",
+        "Brasil",
+        "Toulouse",
+        "Nantes",
+        "Espoo",
         "Bengaluru",
         "Tel Aviv",
         "Abu Dhabi",
@@ -83,6 +91,89 @@ def test_screening_rejects_foreign_city_only_locations_for_us_candidate():
 
         assert result.eligible is False, location
         assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_strong_non_us_origin_statement_in_jd():
+    result = screen_job_for_candidate(
+        Job(
+            title="IT Infrastructure Engineer",
+            company="Kyivstar",
+            raw_jd="Kyivstar.Tech is a Ukrainian hybrid IT company.",
+            location="All",
+        ),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_portuguese_brazilian_origin_statement_in_jd():
+    result = screen_job_for_candidate(
+        Job(
+            title="Sênior Software Engineer",
+            company="Stone",
+            raw_jd="A Stone é a maior empresa independente de meios de pagamentos do Brasil.",
+            location="Remoto",
+        ),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_portuguese_remote_jd_for_us_candidate():
+    result = screen_job_for_candidate(
+        Job(
+            title="Data Scientist I",
+            company="Arco",
+            raw_jd=(
+                "Todas as vagas da Arco são elegíveis para Pessoas com "
+                "Deficiência. No dia a dia você irá atuar com o time."
+            ),
+            location="Remoto",
+        ),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_foreign_only_employers_for_us_candidate():
+    for company, title, location in [
+        ("SFEIR", "GenAI Engineer", "Niort"),
+        ("ICEYE", "Flight Software Engineer", "Espoo"),
+        ("Arco Educação", "Data Scientist I", "Remoto"),
+        ("Kyivstar", "IT Infrastructure Engineer", "All"),
+        ("iFood", "Software Engineer", "Brasil"),
+        ("Stone", "Software Engineer", "Remoto"),
+    ]:
+        result = screen_job_for_candidate(
+            Job(title=title, company=company, raw_jd="", location=location),
+            _early_career_profile(),
+        )
+
+        assert result.eligible is False, (company, location)
+        assert any("foreign-only" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_non_us_board_without_us_location():
+    result = screen_job_for_candidate(
+        Job(
+            title="Junior Software Engineer",
+            company="Clarity AI",
+            raw_jd="Clarity AI is a global tech company.",
+            location="Remote",
+            apply_url="https://job-boards.eu.greenhouse.io/clarityai/jobs/1",
+            source_url="https://job-boards.eu.greenhouse.io/clarityai/jobs/1",
+        ),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("non-U.S. application board" in reason for reason in result.reasons)
 
 
 def test_screening_rejects_listing_without_identifiable_employer():

@@ -91,3 +91,117 @@ def test_classify_research_engineer_machine_learning_as_mle():
     )
 
     assert classify_role(job) == "MLE"
+
+
+def test_obvious_non_technical_agent_titles_are_hard_rejected():
+    titles = [
+        "Real Estate Field Agent",
+        "Customer Service Agent",
+        "Front Desk Agent",
+        "Insurance Agent",
+        "Commissary Agent",
+        "Executive Protection Agent",
+        "Junior Accountant",
+        "Entry Level Auto Body Repair Technician",
+        "Business Development Representative",
+    ]
+    for title in titles:
+        job = import_job_from_text(
+            f"Title: {title}\n\nBuild Python AI agents with LangChain and Kubernetes."
+        )
+
+        result = score_fit(job)
+
+        assert result.role_track == "Other"
+        assert result.score < 50
+        assert result.recommendation == "reject"
+
+
+def test_engineering_agent_titles_are_not_hard_rejected():
+    titles = [
+        "AI Agent Engineer",
+        "ML Agent Engineer",
+        "Software Engineer, New Grad",
+        "Forward Deployed Engineer",
+        "Site Reliability Engineer",
+        "Machine Learning Engineer",
+    ]
+    for title in titles:
+        job = import_job_from_text(
+            f"Title: {title}\n\nBuild Python AI agents with LangChain and Kubernetes."
+        )
+
+        result = score_fit(job)
+
+        assert result.role_track != "Other"
+        assert result.score >= 50
+
+
+def test_itar_citizenship_requirements_are_hard_rejected():
+    job = import_job_from_text(
+        "Title: Software Engineer, Defense\n\n"
+        "Due to ITAR regulations, applicants must be U.S. Citizens or lawful "
+        "permanent residents."
+    )
+
+    result = score_fit(job)
+
+    assert result.recommendation == "reject"
+    assert result.score == 5
+    assert result.role_track == "Other"
+
+
+def test_no_sponsorship_requirements_are_hard_rejected():
+    job = import_job_from_text(
+        "Title: Software Engineer\n\n"
+        "This role is not eligible for visa sponsorship."
+    )
+
+    result = score_fit(job)
+
+    assert result.recommendation == "reject"
+    assert result.score == 5
+
+
+def test_active_clearance_requirements_are_hard_rejected():
+    job = import_job_from_text(
+        "Title: Software Engineer\n\n"
+        "An active U.S. government security clearance is required."
+    )
+
+    result = score_fit(job)
+
+    assert result.recommendation == "reject"
+    assert result.score == 5
+
+
+def test_non_us_location_is_hard_rejected():
+    job = import_job_from_text(
+        "Title: Software Engineer\nLocation: Brasil\n\nBuild Python services."
+    )
+
+    result = score_fit(job)
+
+    assert result.recommendation == "reject"
+    assert result.score == 5
+
+
+def test_non_us_diacritic_and_foreign_city_locations_are_hard_rejected():
+    for location in ("Zürich", "Wien", "Rotterdam", "Kyiv, Ukraine", "Brasil", "Toulouse", "Nantes", "Espoo"):
+        job = import_job_from_text(
+            f"Title: Software Engineer\nLocation: {location}\n\nBuild Python services."
+        )
+
+        result = score_fit(job)
+
+        assert result.recommendation == "reject"
+        assert result.score == 5
+
+
+def test_us_location_and_remote_roles_are_not_hard_rejected_by_location():
+    for location in ("New York, NY, United States", "Remote", "United States"):
+        job = import_job_from_text(
+            f"Title: Software Engineer\nLocation: {location}\n\nBuild Python services."
+        )
+
+        assert score_fit(job).recommendation != "reject"

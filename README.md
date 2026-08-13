@@ -137,6 +137,11 @@ CAPMONSTER_PROXY_ADDRESS=
 CAPMONSTER_PROXY_PORT=
 CAPMONSTER_PROXY_LOGIN=
 CAPMONSTER_PROXY_PASSWORD=
+CAPTCHA_VISION_FALLBACK=false
+CAPTCHA_VISION_MAX_ROUNDS=8
+CAPTCHA_VISION_MODEL=
+CAPTCHA_VISION_BASE_URL=
+CAPTCHA_VISION_API_KEY=
 JOB_AGENT_SUBMIT_COMPLETE=1
 JOB_AGENT_SELF_HEAL_PASSES=3
 JOB_AGENT_ANTI_SPAM_COOLDOWN_HOURS=24
@@ -174,6 +179,8 @@ Before recording a blocker, the runtime re-inspects and refills dynamic fields u
 For hands-free Gmail verification, install the optional extra with `pip install -e '.[gmail]'`, create a Google OAuth client with the Gmail API enabled, then run `job-agent inbox gmail-authorize --client-secret /path/to/client_secret.json`. You can also set `JOB_AGENT_GMAIL_CLIENT_SECRET_FILE` and run `job-agent inbox gmail-authorize` without repeating the path. The token is stored at `.job-agent-secrets/gmail-token.json` by default, and the runtime uses that path automatically when `JOB_AGENT_GMAIL_TOKEN_FILE` is not set. Set `JOB_AGENT_GMAIL_TOKEN_FILE` to override the token path. The runtime uses only the `gmail.readonly` scope, queries messages newer than the current verification request, and never reads a stale code file. Change `JOB_AGENT_GMAIL_VERIFICATION_QUERY` for a different ATS sender or subject.
 
 Optional CAPTCHA handling uses CapMonster Cloud only when `CAPMONSTER_API_KEY` is set and `CAPMONSTER_SOLVE_CAPTCHA=true`. The runtime calls it only after all blocking review fields have been resolved; when fields still block submission, the audit prints `CapMonster CAPTCHA: skipped (blocking review fields present)` and preserves those fields as the primary outcome. The runtime currently attempts supported reCAPTCHA v2/v3, reCAPTCHA Enterprise, Cloudflare Turnstile, FunCaptcha, GeeTest, and DataDome challenges by creating a CapMonster task, polling until it is ready, and injecting the returned token or cookie into the browser context. After submit, only an explicit CAPTCHA challenge/token error permits one bounded recovery attempt. A `possible spam`, HTTP 429, or server rate-limit response is immediately terminal even when a persistent CAPTCHA element remains in the DOM. `CAPMONSTER_TIMEOUT_SECONDS=240` is recommended for live Greenhouse reCAPTCHA Enterprise submissions, where a solver task can exceed 120 seconds. The default reCAPTCHA v2 and Turnstile task names follow current CapMonster docs; task-type errors retry compatible legacy aliases. DataDome requires the `CAPMONSTER_PROXY_*` settings because CapMonster requires proxy details for that task type. Unsupported solver responses and CAPTCHA recovery failures remain `submission_processing_error`; only explicit server-side spam or rate-limit responses become `submission_blocked_by_anti_spam`. CapMonster cannot remove HTTP 429, server throttling, account restrictions, or unresolved factual fields.
+
+The hCaptcha image fallback is only active when `CAPTCHA_VISION_FALLBACK=true` and a vision-capable endpoint is configured. `CAPTCHA_VISION_BASE_URL` names that endpoint (with `CAPTCHA_VISION_API_KEY` and `CAPTCHA_VISION_MODEL`); without it the fallback refuses a text-only `LLM_BASE_URL` instead of sending images to an endpoint that cannot accept them. Sites that explicitly reject repeat applications (for example "you have reached your application limit") are now classified as anti-spam/duplicate outcomes rather than generic submission processing errors.
 
 Anti-spam suppression is time-bounded. `JOB_AGENT_ANTI_SPAM_COOLDOWN_HOURS=24` pauses a company when its latest outcome inside that window is an explicit anti-spam block, while a later successful submission clears the company cooldown. A shared apply host is paused only when its recent unresolved blocks reach `JOB_AGENT_ANTI_SPAM_HOST_COOLDOWN_THRESHOLD` (default 5). Greenhouse, Lever, and Ashby hosts are grouped by their company or board tenant so one customer cannot suppress every job on the ATS.
 

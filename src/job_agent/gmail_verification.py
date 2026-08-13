@@ -29,6 +29,40 @@ _APPLICATION_CONFIRMATION_PATTERNS = (
 )
 
 
+def check_gmail_token(token_file: str) -> None:
+    """Raise when the configured read-only Gmail token cannot refresh.
+
+    The check does not read any mailbox contents; it only verifies that the
+    stored refresh token can obtain a new access token, so an expired or
+    revoked token is detected before a browser run waits on it.
+    """
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+    except ImportError as exc:
+        raise GmailVerificationError(
+            "Gmail support requires google-auth-oauthlib; install the gmail extra."
+        ) from exc
+    try:
+        credentials = Credentials.from_authorized_user_file(
+            token_file, [GMAIL_READONLY_SCOPE]
+        )
+    except (OSError, ValueError) as exc:
+        raise GmailVerificationError(
+            f"Could not read Gmail token file: {exc}"
+        ) from exc
+    if not credentials.valid:
+        if not credentials.refresh_token:
+            raise GmailVerificationError(
+                "Gmail token has no refresh token; run gmail authorize again."
+            )
+        try:
+            credentials.refresh(Request())
+        except Exception as exc:
+            raise GmailVerificationError(
+                f"Could not refresh Gmail token: {exc}"
+            ) from exc
+
 class GmailVerificationError(RuntimeError):
     """Raised only for a configured Gmail integration that cannot be used."""
 

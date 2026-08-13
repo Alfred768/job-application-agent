@@ -75,17 +75,25 @@ class CapMonsterClient:
 
     def _post(self, endpoint: str, payload: dict[str, Any]) -> dict[str, Any]:
         data = json.dumps(payload).encode("utf-8")
-        request = Request(
-            f"{self.api_base}{endpoint}",
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urlopen(request, timeout=30) as response:
-                raw = response.read().decode("utf-8")
-        except URLError as exc:
-            raise CapMonsterError(f"CapMonster request failed: {exc}") from exc
+        last_error: Exception | None = None
+        for attempt in range(3):
+            request = Request(
+                f"{self.api_base}{endpoint}",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(request, timeout=30) as response:
+                    raw = response.read().decode("utf-8")
+                last_error = None
+                break
+            except (URLError, TimeoutError) as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(1 + attempt * 2)
+        if last_error is not None:
+            raise CapMonsterError(f"CapMonster request failed: {last_error}") from last_error
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:

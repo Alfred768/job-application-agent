@@ -1,4 +1,7 @@
 import base64
+import sys
+
+import pytest
 
 from job_agent.gmail_verification import (
     _code_from_payload,
@@ -137,3 +140,37 @@ def test_application_confirmation_requires_exact_company_title_and_confirmation_
         company="Point72",
         title="Quantitative Researcher - Machine Learning",
     ) == {"message_id": "exact-role", "received_at_ms": 1000}
+
+
+def test_check_gmail_token_rejects_unrefreshable_token(tmp_path, monkeypatch):
+    token_file = tmp_path / "gmail-token.json"
+    token_file.write_text("{}")
+
+    class FakeCredentials:
+        valid = False
+        refresh_token = "stale"
+
+        def refresh(self, _request):
+            raise RuntimeError("invalid_grant")
+
+    class FakeCredentialsLoader:
+        @staticmethod
+        def from_authorized_user_file(_path, _scopes):
+            return FakeCredentials()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "google.oauth2.credentials",
+        type("credentials", (), {"Credentials": FakeCredentialsLoader}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "google.auth.transport.requests",
+        type("requests", (), {"Request": object}),
+    )
+
+    from job_agent.gmail_verification import GmailVerificationError, check_gmail_token
+
+    with pytest.raises(GmailVerificationError) as excinfo:
+        check_gmail_token(str(token_file))
+    assert "Could not refresh Gmail token" in str(excinfo.value)

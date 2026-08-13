@@ -3556,3 +3556,33 @@ def test_report_indexes_unified_application_trajectory_and_continuity(
     assert trajectory["stages"]["evaluation"]["agent_core"][
         "evaluator"
     ] == "job_application_round"
+
+
+def test_preflight_reports_invalid_gmail_token_as_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, monkeypatch)
+    token = tmp_path / "gmail-token.json"
+    token.write_text("{}")
+    monkeypatch.setenv("JOB_AGENT_GMAIL_TOKEN_FILE", str(token))
+    monkeypatch.setattr(
+        daily_sop_module,
+        "_check_playwright",
+        lambda _checks: None,
+    )
+
+    def fake_check(token_file):
+        raise daily_sop_module.GmailVerificationError(
+            "Could not refresh Gmail token: invalid_grant"
+        )
+
+    monkeypatch.setattr(daily_sop_module, "check_gmail_token", fake_check)
+
+    report = run_preflight(config)
+
+    gmail_checks = [
+        check for check in report.checks if check.name == "Gmail verification"
+    ]
+    assert any(check.level == "ERROR" and "invalid" in check.message for check in gmail_checks)
+    assert report.ok is False

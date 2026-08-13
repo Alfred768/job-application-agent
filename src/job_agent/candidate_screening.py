@@ -15,27 +15,86 @@ _SENIOR_TITLE_PATTERN = re.compile(
 )
 _EARLY_CAREER_PATTERN = re.compile(r"\b(?:intern|student|new grad|graduate assistant)\b", flags=re.IGNORECASE)
 _NON_US_LOCATION_PATTERN = re.compile(
-    r"\b(?:europe|emea|mexico|uruguay|brazil|canada|india|china|argentina|colombia|"
+    r"\b(?:europe|emea|mexico|uruguay|brazil|brasil|canada|india|china|argentina|colombia|"
     r"germany|france|spain|poland|netherlands|united kingdom|uk|australia|japan|singapore|"
     r"romania|ireland|new zealand|hungary|serbia|denmark|sweden|finland|israel|italy|"
     r"warsaw|wroclaw|bucharest|bangalore|galway|auckland|budapest|belgrade|aarhus|"
     r"stockholm|helsinki|herzliya|milan|osborne park|kingsgrove|"
     r"london|munich|berlin|dublin|paris|prague|amsterdam|lisbon|madrid|barcelona|"
-    r"zurich|geneva|brussels|vienna|warsaw|oslo|copenhagen|toronto|vancouver|montreal|"
+    r"zurich|geneva|brussels|vienna|wien|oslo|copenhagen|toronto|vancouver|montreal|"
     r"ottawa|calgary|ontario|dubai|abu dhabi|doha|qatar|bahrain|hong kong|kuala lumpur|manila|jakarta|"
     r"bangkok|ho chi minh|hanoi|seoul|tokyo|osaka|taipei|mumbai|hyderabad|pune|delhi|"
     r"chennai|bengaluru|bangalore|sydney|melbourne|brisbane|perth|adelaide|"
-    r"auckland|wellington|manchester|birmingham|edinburgh|glasgow|leeds|bristol|"
+    r"auckland|wellington|manchester|birmingham|edinburgh|glasgow|leeds|bristol|toulouse|nantes|espoo|"
     r"athina|athens|antalya|istanbul|cairo|lagos|nairobi|johannesburg|cape town|"
     r"mexico city|sao paulo|buenos aires|santiago|lima|bogota|"
     r"tel aviv|lahore|greece|belgium|portugal|czech republic|czechia|"
     r"philippines|south korea|taiwan|vietnam|thailand|indonesia|pakistan|"
-    r"norway|iceland|kuwait|gurugram|shanghai|düsseldorf|"
-    r"sao jose dos campos|reykjavík|berlin|vienna|warsaw|"
-    r"zurich|geneva|amsterdam|brussels|hong kong)\b",
+    r"norway|iceland|kuwait|gurugram|shanghai|dusseldorf|"
+    r"sao jose dos campos|reykjavik|berlin|vienna|warsaw|"
+    r"zurich|geneva|amsterdam|brussels|hong kong|ukraine|ukrainian|kyiv|"
+    r"rotterdam|austria|switzerland|swiss)\b",
     flags=re.IGNORECASE,
 )
 _US_LOCATION_PATTERN = re.compile(r"\b(?:united states|u\.?s\.?a?|usa|america)\b", flags=re.IGNORECASE)
+_DIACRITIC_TRANSLATION = str.maketrans(
+    {
+        "ü": "u", "ö": "o", "ä": "a", "é": "e", "è": "e", "ê": "e", "ë": "e",
+        "á": "a", "à": "a", "â": "a", "ã": "a", "å": "a",
+        "í": "i", "ì": "i", "î": "i", "ï": "i",
+        "ó": "o", "ò": "o", "ô": "o", "õ": "o", "ø": "o",
+        "ú": "u", "ù": "u", "û": "u", "ů": "u",
+        "ý": "y", "ÿ": "y", "ç": "c", "ñ": "n", "ß": "ss",
+        "æ": "ae", "œ": "oe", "š": "s", "ž": "z", "č": "c",
+        "ř": "r", "ď": "d", "ť": "t", "ň": "n", "ě": "e",
+    }
+)
+_STRONG_NON_US_ORIGIN_PATTERN = re.compile(
+    r"\bis an?\s+(?:ukrainian|brazilian|dutch|german|french|spanish|italian|austrian|swiss|"
+    r"swedish|finnish|danish|norwegian|portuguese|polish|indian|japanese|chinese|israeli|"
+    r"singaporean|canadian|mexican|australian)\s+(?:[a-z-]+\s+){0,3}"
+    r"(?:company|startup|firm|business|technology|tech)\b"
+    r"|\bbrasileir\w*\b|\b(?:do|da|de)\s+brasil\b"
+    r"|\b(?:based|located|headquartered|office|offices)\s+in\s+"
+    r"(?:kyiv|ukraine|rotterdam|wien|vienna|zurich|brasil|brazil)\b",
+    flags=re.IGNORECASE,
+)
+_PORTUGUESE_JD_MARKERS = (
+    "todas as vagas",
+    "para você",
+    "para voce",
+    "nossa empresa",
+    "pessoas com deficiência",
+    "pessoas com deficiencia",
+    "empresa brasileira",
+    "do brasil",
+    "brasileir",
+    "no dia a dia você",
+    "salário",
+    "salario",
+    "contratação",
+    "contratacao",
+)
+_NON_US_ONLY_COMPANY_MARKERS = (
+    "sfeir",
+    "iceye",
+    "arcoeducacao",
+    "arco educacao",
+    "kyivstar",
+    "ifoodcarreiras",
+    "ifood carreiras",
+    "ifood",
+    "qualysoft",
+    "wingtra",
+    "stone",
+)
+_NON_US_APPLICATION_BOARD_MARKERS = (
+    "eu.greenhouse.io",
+    "eu2.greenhouse.io",
+    "emea.greenhouse.io",
+    "jobs.eu.",
+    "eu.jobs.",
+)
 
 _UNUSABLE_APPLICATION_URL_PATTERNS = (
     "ycombinator.com/companies",
@@ -141,17 +200,26 @@ def screen_job_for_candidate(job: Job, profile: dict[str, Any] | None) -> Candid
 
     reasons: list[str] = []
     country = str(profile.get("country") or "").strip().lower()
-    location = " ".join(
-        part for part in [str(job.location or ""), str(job.remote_policy or "")] if part
-    )
     if (
         not overrides.get("ignore_location_filter", False)
         and country in {"united states", "us", "u.s.", "usa"}
-        and location_is_outside_us(location)
+        and _company_is_non_us_only(company)
+    ):
+        reasons.append("listing company is a foreign-only employer")
+    if (
+        not overrides.get("ignore_location_filter", False)
+        and country in {"united states", "us", "u.s.", "usa"}
+        and _listing_uses_non_us_board(job)
+    ):
+        reasons.append("listing uses a non-U.S. application board without a U.S. location")
+    if (
+        not overrides.get("ignore_location_filter", False)
+        and country in {"united states", "us", "u.s.", "usa"}
+        and _job_origin_is_outside_us(job)
     ):
         reasons.append(
             "listing location is outside the candidate's U.S. work "
-            f"authorization: {location}"
+            f"authorization: {job.location or job.raw_jd or ''}"
         )
 
     if (
@@ -202,15 +270,63 @@ def screen_job_for_candidate(job: Job, profile: dict[str, Any] | None) -> Candid
     return CandidateScreeningResult(eligible=not reasons, reasons=reasons)
 
 
+def _company_is_non_us_only(company: str) -> bool:
+    normalized = _normalize_location_text(company)
+    return any(marker in normalized for marker in _NON_US_ONLY_COMPANY_MARKERS)
+
+
+def _listing_uses_non_us_board(job: Job) -> bool:
+    location = _normalize_location_text(job.location or "")
+    if _US_LOCATION_PATTERN.search(location) or " us" in f" {location} " or location.endswith(" us"):
+        return False
+    urls = [str(job.apply_url or ""), str(job.source_url or "")]
+    normalized_urls = " ".join(_normalize_location_text(url) for url in urls)
+    return any(marker in normalized_urls for marker in _NON_US_APPLICATION_BOARD_MARKERS)
+
+
 def location_is_outside_us(location: str | None) -> bool:
     """Return true only for an explicitly non-U.S. location."""
     value = str(location or "")
-    normalized = value.lower()
+    normalized = _normalize_location_text(value)
     return bool(
-        _NON_US_LOCATION_PATTERN.search(value)
-        and not _US_LOCATION_PATTERN.search(value)
+        _NON_US_LOCATION_PATTERN.search(normalized)
+        and not _US_LOCATION_PATTERN.search(normalized)
         and "worldwide" not in normalized
     )
+
+
+def _normalize_location_text(value: str | None) -> str:
+    return str(value or "").lower().translate(_DIACRITIC_TRANSLATION)
+
+
+def _job_origin_is_outside_us(job: Job) -> bool:
+    """Detect non-U.S. origins from the location or a strong JD origin statement."""
+    location = _normalize_location_text(
+        " ".join(part for part in [str(job.location or ""), str(job.remote_policy or "")] if part)
+    )
+    if (
+        _NON_US_LOCATION_PATTERN.search(location)
+        and not _US_LOCATION_PATTERN.search(location)
+        and "worldwide" not in location
+    ):
+        return True
+    origin = _normalize_location_text(
+        " ".join(part for part in [str(job.company or ""), str(job.title or ""), str(job.raw_jd or "")] if part)
+    )
+    if _STRONG_NON_US_ORIGIN_PATTERN.search(origin):
+        return True
+    return _looks_like_portuguese_remote_listing(job)
+
+
+def _looks_like_portuguese_remote_listing(job: Job) -> bool:
+    location = _normalize_location_text(job.location or "")
+    if location not in {"remoto", "remota", "remote", "remoto - brasil", "brasil"}:
+        return False
+    raw = _normalize_location_text(job.raw_jd or "")
+    if not raw or _US_LOCATION_PATTERN.search(raw):
+        return False
+    hits = sum(1 for marker in _PORTUGUESE_JD_MARKERS if marker in raw)
+    return hits >= 2
 
 
 def _is_early_career_profile(profile: dict[str, Any]) -> bool:

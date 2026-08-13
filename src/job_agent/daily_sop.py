@@ -42,6 +42,7 @@ from job_agent.agent_session import (
     latest_trajectory_observation,
 )
 from job_agent.db import connect, export_application_ledger, init_db
+from job_agent.gmail_verification import GmailVerificationError, check_gmail_token
 from job_agent.recovery_executor import (
     execute_audit_recovery,
     write_recovery_retry_batch,
@@ -501,17 +502,31 @@ def run_preflight(
             str(config.root / ".job-agent-secrets" / "gmail-token.json"),
         )
     ).expanduser()
-    if config.require_gmail_token:
-        if gmail_token.is_file():
-            _add(checks, "PASS", "Gmail verification", "OAuth token is available")
-        else:
+    if gmail_token.is_file():
+        _add(checks, "PASS", "Gmail verification", "OAuth token is available")
+        try:
+            check_gmail_token(str(gmail_token))
+            _add(
+                checks,
+                "PASS",
+                "Gmail verification",
+                "OAuth token can refresh read-only access",
+            )
+        except GmailVerificationError as exc:
             _add(
                 checks,
                 "ERROR",
                 "Gmail verification",
-                "A Gmail OAuth token is required but missing",
+                f"OAuth token is invalid: {exc}",
             )
-    elif not gmail_token.is_file():
+    elif config.require_gmail_token:
+        _add(
+            checks,
+            "ERROR",
+            "Gmail verification",
+            "A Gmail OAuth token is required but missing",
+        )
+    else:
         _add(
             checks,
             "WARN",

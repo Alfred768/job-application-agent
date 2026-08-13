@@ -60,6 +60,31 @@ def test_runtime_autofill_script_includes_office_location_combobox_rule():
     assert "function preferredOfficeLocationAnswer" in script
 
 
+def test_runtime_autofill_script_includes_conditional_fact_detail_rule():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "function conditionalFactDetailAnswer" in script
+    assert "conditionalFactDetailAnswer(label, profile)" in script
+    assert "function familyEmploymentNegativeAnswer" in script
+    assert "familyEmploymentNegativeAnswer(label, profile)" in script
+
+
+def test_runtime_autofill_script_includes_phone_country_and_portuguese_city_rules():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "function phoneCountryOptionAnswer" in script
+    assert "phoneCountryOptionAnswer(f, profile)" in script
+    assert 'n.includes("cidade")' in script
+
+
+def test_runtime_autofill_script_includes_metropolitan_area_rule():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "function metropolitanAreaOption" in script
+    assert "metropolitanAreaOption(f, profile)" in script
+    assert "isSalaryAcknowledgement" in script
+
+
 def test_runtime_autofill_script_includes_sponsorship_type_guard():
     script = render_runtime_autofill_script(profile=_profile())
 
@@ -91,9 +116,13 @@ def test_runtime_autofill_script_includes_truthful_option_guards():
         "clearanceLevelChoice",
         "englishLevelChoice",
         "bachelorGraduationYearChoice",
+        "approvedAllUSLocations",
+        "negativeLocationPrompt",
         "locationCheckboxGroupPlan",
     ]:
         assert f"function {name}" in script
+    assert "LOCATION_CITY_MARKERS" in script
+    assert "approvedAllUSLocations(profile) ? options.find" in script
     assert "function matchingOptions(field, answer, profile)" in script
     assert "options.allowGeneric !== false" in script
     assert "repeatedWorkdaySignInPages > 1" in script
@@ -108,6 +137,23 @@ def test_runtime_autofill_script_includes_truthful_option_guards():
     assert "restoreWorkdayApplicationFromCandidateHome" in script
     assert "you have no applications" in script
     assert "const isWorkdayApplication" in script
+
+
+def test_runtime_autofill_script_includes_consent_timezone_and_degree_rules():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    for name in [
+        "isProficiencyLevelQuestion",
+        "communicationConsentAnswer",
+        "timezoneAnswer",
+        "bachelorsDegreeAnswer",
+    ]:
+        assert f"function {name}" in script
+    assert "Not a US Citizen" in script
+    assert "Not a U.S. Citizen" in script
+    assert '"level of proficiency"' in script
+    assert '!n.includes("timezone") && !n.includes("time zone")' in script
+    assert '!n.includes("bachelor") || !n.includes("degree")' in script
 
 
 def test_runtime_autofill_script_includes_ashby_motivation_question_rules():
@@ -605,6 +651,28 @@ def test_runtime_autofill_script_supports_composite_education_dates():
     assert 'end_month: ["end date month"]' in script
     assert 'end_year: ["end date year"]' in script
     assert 'if (last.role === "combobox")' in script
+
+
+def test_runtime_autofill_script_uses_highest_education_entry():
+    profile = _profile()
+    profile["education"] = [
+        {"school": "Guangming High School", "degree": "High School", "end_year": "2019"},
+        {"school": "State University", "degree": "Master's", "field": "Computer Science", "end_year": "2026"},
+    ]
+    script = render_runtime_autofill_script(profile=profile)
+
+    assert "function highestEducationEntry(entries)" in script
+    assert "const education = highestEducationEntry(profile.education);" in script
+    assert "const education = highestEducationEntry(profile.education) || {};" in script
+
+
+def test_runtime_autofill_script_handles_common_blocking_screening_fields():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert 'n.includes("live outside")' in script
+    assert 'n.includes("looking for") && n.includes("remote role")' in script
+    assert 'n.includes("python") && n.includes("production")' in script
+    assert "const insideOptions = usableOptions.filter" in script
 
 
 def test_runtime_autofill_script_searches_school_comboboxes():
@@ -3168,6 +3236,7 @@ def test_runtime_autofill_script_handles_notion_screening_and_suppresses_stale_r
             "Are you open to working in-person in one of our offices 25% of the time?": "Yes",
             "Are you able to commit to working from one of our offices on Anchor Days each week?": "Yes",
             "Please indicate all of the locations that you would be interested in relocating to for this position.": "San Francisco, CA",
+            "which locations you're 100% committed to": "Use LLM to select all US locations from options",
         }
     )
     profile["education"] = [{"degree": "Master's Degree"}]
@@ -3187,6 +3256,7 @@ const labels = {
   '[data-job-agent-autofill-index="pronouns_decline_auto"]': 'Prefer not to say',
   '[data-job-agent-autofill-index="degree_masters_auto"]': "Master's Degree",
   '[data-job-agent-autofill-index="reloc_sf_auto"]': 'San Francisco, CA',
+  '[data-job-agent-autofill-index="reloc_nyc_auto"]': 'New York, NY',
 };
 
 function hiddenLocator() {
@@ -3280,6 +3350,7 @@ const page = {
           name: 'relocation',
           required: true,
           options: [
+            { id: 'reloc_nyc', value: 'New York, NY', label: 'New York, NY', autofillId: 'reloc_nyc_auto' },
             { id: 'reloc_sf', value: 'San Francisco, CA', label: 'San Francisco, CA', autofillId: 'reloc_sf_auto' },
           ],
         },
@@ -3336,7 +3407,7 @@ module.exports = {
     assert "ANCHOR=Yes" in result.stdout
     assert "[buttonclick] Are you able to commit to working from one of our offices on Anchor Days each week? | readback=filled" in result.stdout
     assert "[check] What pronouns would you like our team to use when addressing you? | readback=selected: Prefer not to say" in result.stdout
-    assert "[checkmany] Please indicate all of the locations that you would be interested in relocating to for this position. | readback=selected: San Francisco, CA" in result.stdout
+    assert "[checkmany] Please indicate all of the locations that you would be interested in relocating to for this position. | readback=selected: New York, NY, San Francisco, CA" in result.stdout
     assert "[checkmany] Degree Type | readback=selected: Master's Degree" in result.stdout
     assert "Review-required (0):" in result.stdout
 

@@ -88,6 +88,141 @@ BUSINESS_OPERATIONS_TITLE_PATTERNS = (
     r"\bgo[\s-]?to[\s-]?market\b",
 )
 
+# Titles that carry generic business/operations "agent" words or non-engineering
+# trade terms.  These are hard rejects even when the job description mentions
+# AI/ML/software keywords, so the candidate does not spend an application slot
+# on a role that is not an engineering track.
+NON_TECHNICAL_TITLE_PATTERN = re.compile(
+    r"\b(?:"
+    r"customer\s+service\s+agent|"
+    r"customer\s+experience\s+agent|"
+    r"customer\s+support\s+agent|"
+    r"front\s+desk\s+agent|"
+    r"commissary\s+agent|"
+    r"rental\s+agent|"
+    r"loaner\s+agent|"
+    r"executive\s+protection\s+agent|"
+    r"field\s+agent|"
+    r"field\s+flex\s+agent|"
+    r"insurance\s+agent|"
+    r"real\s+estate\s+agent|"
+    r"survey\s+agent|"
+    r"claims\s+agent|"
+    r"qa\s*/\s*qc\s+agent|"
+    r"business\s+development\s+representative|"
+    r"sales\s+development\s+representative|"
+    r"account\s+executive|"
+    r"junior\s+accountant|"
+    r"accountant\b|"
+    r"auto\s+body\s+repair\s+technician|"
+    r"repair\s+technician\b|"
+    r"receptionist\b|"
+    r"cashier\b|"
+    r"mechanic\b|"
+    r"recruiter\b|"
+    r"talent\s+acquisition\b|"
+    r"strategist\b"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+# Hard blockers that no runtime autofill can truthfully satisfy.  These roles
+# are rejected before scoring so the batch does not spend a slot on an
+# application the candidate is ineligible for.
+HARD_REQUIREMENT_PATTERNS = (
+    r"must be a u\.?s\.? (?:citizen|national|person)",
+    r"u\.?s\.? citizenship\s+is\s+required",
+    r"only\s+u\.?s\.? citizens",
+    r"u\.?s\.? citizens?\s+(?:or|and)\s+lawful\s+permanent\s+residents?",
+    r"must\s+be\s+(?:a\s+)?u\.?s\.? (?:citizen|person)[^.]{0,80}required",
+    r"u\.?s\.? person[^.]{0,80}required",
+    r"active\s+(?:u\.?s\.? )?(?:government\s+)?security\s+clearance\s+(?:is\s+)?required",
+    r"must\s+(?:hold|have|maintain)\s+(?:an\s+)?active\s+.*?security\s+clearance",
+    r"current\s+.*?clearance\s+(?:is\s+)?required",
+    r"interim\s+secret\s+within",
+    r"not\s+eligible\s+for\s+visa\s+sponsorship",
+    r"not\s+eligible\s+for\s+(?:h-?1b|visa)",
+    r"no\s+visa\s+sponsorship",
+    r"(?:does|will)\s+not\s+(?:provide|offer|support)\s+visa\s+sponsorship",
+    r"(?:cannot|unable\s+to)\s+(?:provide\s+)?sponsorship",
+    r"will\s+not\s+sponsor",
+    r"does\s+not\s+sponsor",
+)
+
+NON_US_LOCATION_MARKERS = (
+    "brasil",
+    "brazil",
+    "canada",
+    "mexico",
+    "ukraine",
+    "ukrainian",
+    "kyiv",
+    "united kingdom",
+    "uk,",
+    "london",
+    "germany",
+    "berlin",
+    "france",
+    "paris",
+    "netherlands",
+    "amsterdam",
+    "india",
+    "singapore",
+    "japan",
+    "tokyo",
+    "china",
+    "beijing",
+    "shanghai",
+    "australia",
+    "sydney",
+    "cyprus",
+    "nicosia",
+    "limassol",
+    "rotterdam",
+    "wien",
+    "vienna",
+    "zurich",
+    "zürich",
+    "austria",
+    "switzerland",
+    "dusseldorf",
+    "düsseldorf",
+    "reykjavik",
+    "reykjavík",
+    "toulouse",
+    "nantes",
+    "espoo",
+)
+
+
+def _hard_requirement_conflict(job: Job) -> str | None:
+    text = _job_text(job)
+    for pattern in HARD_REQUIREMENT_PATTERNS:
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return f"Job requires eligibility the candidate does not have ({pattern})"
+    location = (job.location or "").lower().strip()
+    if location and location not in {"remote", "united states"}:
+        has_us_marker = any(
+            marker in location
+            for marker in (
+                "united states",
+                " usa",
+                " u.s.",
+                " us,",
+                " us;",
+                "us only",
+                ", us",
+                "; us",
+                "us and",
+                "in the us",
+            )
+        )
+        if not has_us_marker:
+            for marker in NON_US_LOCATION_MARKERS:
+                if marker in location:
+                    return f"Job location is outside the United States ({job.location})"
+    return None
+
 
 def _job_text(job: Job) -> str:
     return f"{job.title}\n{job.raw_jd}".lower()
@@ -107,6 +242,8 @@ def _contains_keyword(text: str, keyword: str) -> bool:
 
 def _title_role_override(job: Job) -> str | None:
     title = job.title or ""
+    if NON_TECHNICAL_TITLE_PATTERN.search(title):
+        return "Other"
     if any(re.search(pattern, title, flags=re.IGNORECASE) for pattern in BUSINESS_OPERATIONS_TITLE_PATTERNS):
         return "Other"
     for role, patterns in TITLE_ROLE_HINTS:
@@ -129,6 +266,23 @@ def classify_role(job: Job) -> str:
 
 
 def score_fit(job: Job) -> FitScore:
+    hard_conflict = _hard_requirement_conflict(job)
+    if hard_conflict:
+        return FitScore(
+            score=5,
+            role_track="Other",
+            reasons=[hard_conflict],
+            recommendation="reject",
+            explanation="Candidate does not meet a hard job requirement.",
+        )
+    if NON_TECHNICAL_TITLE_PATTERN.search(job.title or ""):
+        return FitScore(
+            score=5,
+            role_track="Other",
+            reasons=["Non-technical role title"],
+            recommendation="reject",
+            explanation="Title is an obvious non-engineering role.",
+        )
     text = _job_text(job)
     role_track = classify_role(job)
     keywords = ROLE_KEYWORDS.get(role_track, [])

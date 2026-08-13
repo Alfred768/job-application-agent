@@ -1,4 +1,5 @@
 import json
+from urllib.error import URLError
 
 import pytest
 
@@ -291,3 +292,22 @@ def test_capmonster_client_raises_on_api_error(monkeypatch):
 
     with pytest.raises(CapMonsterError, match="ERROR_KEY_DOES_NOT_EXIST"):
         CapMonsterClient("bad-key").create_task(build_turnstile_task("https://example.com", "site-key"))
+
+
+def test_capmonster_client_retries_transient_network_error(monkeypatch):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise URLError("The read operation timed out")
+        return _Response({"errorId": 0, "taskId": 123})
+
+    monkeypatch.setattr("job_agent.capmonster.urlopen", fake_urlopen)
+
+    task_id = CapMonsterClient("cap-key").create_task(
+        build_turnstile_task("https://example.com", "site-key")
+    )
+
+    assert task_id == 123
+    assert len(calls) == 2

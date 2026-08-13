@@ -19,12 +19,19 @@ from job_agent.db import (
     update_application_execution_status,
 )
 from job_agent.execution import (
+    _is_anti_spam_rejection,
     _sanitize_runtime_action_output,
     execute_application_batch,
 )
 from job_agent.models import Job
 from job_agent.python_runtime import RuntimeActionDenied
 from job_agent.runtime_filler import render_runtime_autofill_script
+
+
+def test_is_anti_spam_rejection_application_limit():
+    assert _is_anti_spam_rejection("You have reached your application limit.") is True
+    assert _is_anti_spam_rejection("This company accepts only one application.") is True
+    assert _is_anti_spam_rejection("You have already applied to this role.") is True
 
 
 def test_execute_application_batch_records_success_without_sensitive_stdout(tmp_path):

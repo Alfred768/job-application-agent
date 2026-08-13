@@ -355,4 +355,8 @@ def test_processing_failure_classifier_is_privacy_safe():
         == "captcha_unsupported"
     )
     assert classify_processing_failure("HTTP 429 Too Many Requests") == "rate_limited"
+    assert (
+        classify_processing_failure("You have reached your application limit.")
+        == "rate_limited"
+    )
     assert classify_processing_failure("unknown site message") == "site_processing_error"
