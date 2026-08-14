@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 from typing import Any
 
 from job_agent.jobs import format_job_as_jd_text
 from job_agent.models import Job
 from job_agent.profile_vector_store import search_profile_embeddings
+from job_agent.resumes import extract_resume_text
 
 
 NO_AI_APPLICATION_PATTERNS = [
@@ -310,6 +312,7 @@ def _profile_fact_summary(profile: dict[str, Any]) -> str:
         for item in (profile.get("work_history") or [])
         if isinstance(item, dict)
     )
+    resume_excerpt = _resume_fact_excerpt(profile)
     return "\n".join(
         part
         for part in [
@@ -318,9 +321,48 @@ def _profile_fact_summary(profile: dict[str, Any]) -> str:
             f"Skills: {skills}",
             f"Projects/publications: {projects}",
             f"Education: {_education_summary(profile)}",
+            f"Resume excerpt: {resume_excerpt}" if resume_excerpt else "",
         ]
         if part and not part.endswith(": ")
     )
+
+
+_RESUME_EXCERPT_MAX_CHARS = 2500
+
+
+@functools.lru_cache(maxsize=8)
+def _extract_resume_text_cached(path: str, size: int, mtime_ns: int) -> str | None:
+    try:
+        return extract_resume_text(path)
+    except Exception:
+        return None
+
+
+def _resume_fact_excerpt(profile: dict[str, Any]) -> str:
+    """Return a bounded resume excerpt for grounded non-sensitive answers."""
+    text = profile.get("resume_text") or profile.get("resume")
+    if text:
+        text = str(text)
+    else:
+        path = str(profile.get("resume_file") or "")
+        if not path:
+            return ""
+        try:
+            resolved = Path(path).expanduser()
+            stat = resolved.stat()
+            text = _extract_resume_text_cached(
+                str(resolved.resolve()),
+                stat.st_size,
+                stat.st_mtime_ns,
+            )
+        except (OSError, ValueError):
+            text = None
+    if not text or not str(text).strip():
+        return ""
+    excerpt = " ".join(str(text).split())
+    if len(excerpt) > _RESUME_EXCERPT_MAX_CHARS:
+        excerpt = excerpt[:_RESUME_EXCERPT_MAX_CHARS].rsplit(" ", 1)[0] + " ..."
+    return excerpt
 
 
 def _education_summary(profile: dict[str, Any]) -> str:

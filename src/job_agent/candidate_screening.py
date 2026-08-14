@@ -16,6 +16,8 @@ _SENIOR_TITLE_PATTERN = re.compile(
 _EARLY_CAREER_PATTERN = re.compile(r"\b(?:intern|student|new grad|graduate assistant)\b", flags=re.IGNORECASE)
 _NON_US_LOCATION_PATTERN = re.compile(
     r"\b(?:europe|emea|mexico|uruguay|brazil|brasil|canada|india|china|argentina|colombia|"
+    r"malaysia|johor bahru|johor|latam|latin america|chile|paraguay|bolivia|ecuador|"
+    r"dominican republic|peru|"
     r"germany|france|spain|poland|netherlands|united kingdom|uk|australia|japan|singapore|"
     r"romania|ireland|new zealand|hungary|serbia|denmark|sweden|finland|israel|italy|"
     r"warsaw|wroclaw|bucharest|bangalore|galway|auckland|budapest|belgrade|aarhus|"
@@ -33,7 +35,9 @@ _NON_US_LOCATION_PATTERN = re.compile(
     r"norway|iceland|kuwait|gurugram|shanghai|dusseldorf|"
     r"sao jose dos campos|reykjavik|berlin|vienna|warsaw|"
     r"zurich|geneva|amsterdam|brussels|hong kong|ukraine|ukrainian|kyiv|"
-    r"rotterdam|austria|switzerland|swiss)\b",
+    r"rotterdam|austria|switzerland|swiss|bulgaria|sofia|slovenia|ljubljana|"
+    r"latvia|riga|slovakia|bratislava|estonia|tallinn|croatia|zagreb|cyprus|"
+    r"limassol|luxembourg|malta|edmonton|ramat gan|can)\b",
     flags=re.IGNORECASE,
 )
 _US_LOCATION_PATTERN = re.compile(r"\b(?:united states|u\.?s\.?a?|usa|america)\b", flags=re.IGNORECASE)
@@ -55,8 +59,13 @@ _STRONG_NON_US_ORIGIN_PATTERN = re.compile(
     r"singaporean|canadian|mexican|australian)\s+(?:[a-z-]+\s+){0,3}"
     r"(?:company|startup|firm|business|technology|tech)\b"
     r"|\bbrasileir\w*\b|\b(?:do|da|de)\s+brasil\b"
-    r"|\b(?:based|located|headquartered|office|offices)\s+in\s+"
-    r"(?:kyiv|ukraine|rotterdam|wien|vienna|zurich|brasil|brazil)\b",
+    r"|\b(?:based|located|headquartered|office|offices|onsite)\s+(?:in|at)\s+"
+    r"(?:kyiv|ukraine|rotterdam|wien|vienna|zurich|brasil|brazil|johor bahru|"
+    r"malaysia|singapore|latin america|latam|bulgaria|sofia|slovenia|ljubljana|"
+    r"latvia|riga|slovakia|bratislava|estonia|tallinn|croatia|zagreb|cyprus|"
+    r"limassol|luxembourg|malta|edmonton|ramat gan)\b"
+    r"|\b(?:malaysia citizen|malaysia permanent resident|johor bahru|"
+    r"public agency it teams of singapore)\b",
     flags=re.IGNORECASE,
 )
 _PORTUGUESE_JD_MARKERS = (

@@ -156,7 +156,7 @@ Policy Gate；LinkedIn 自动访问、未验证档案、重复/受保护终态�
 
 每个岗位的自动恢复顺序固定为：
 
-1. 依据真实档案、approved sensitive KB 和受约束的非敏感 LLM 回答填写字段；
+1. 依据真实档案、approved sensitive KB、本人简历文本和受约束的非敏感 LLM 回答填写字段；
    动态下拉若在规划时尚未暴露选项，会在控件打开后把真实可见选项重新交给受控生成器；
    生成结果必须回映射到页面原始选项并通过读回校验，不能提交页面不存在的自由文本；
 2. 对动态字段、读回失败和可恢复的普通填写错误执行最多
@@ -333,8 +333,9 @@ approved sensitive KB 验证原阻塞字段，在原运行的 `recovery/` 子目
 普通自定义答案写入 `ops/daily.local.json` 中 `profile` 指向文件的 `answers`；敏感、法律、
 身份、授权和人口统计答案写入 `sensitive_kb` 并设为 `approved: true`。配置中的
 `profile_vector_db` 是这些批准事实的派生检索索引，`database` 则是投递历史库，二者都不是
-直接批准候选人答案的位置。要求候选人原创内容的问题，即使审计原因为 `unmapped field`，
-也进入 `candidate_fact_resolution`，Repair Agent 不得编写答案。
+直接批准候选人答案的位置。非敏感开放题允许运行时 LLM 依据已批准档案事实和候选人本人
+简历文本合理生成；要求候选人原创且明确禁止 AI 的问题仍进入 `candidate_fact_resolution`，
+Repair Agent 不得编写答案。
 
 `retry_allowed` 不是立即重试授权。恢复动作和证据全部满足后，执行请求还必须带
 `recovery_verified=true` 和 `retry_scope=single_application` 通过 Policy Gate；不得重放

@@ -102,6 +102,16 @@ def test_recaptcha_retry_restores_api_and_requests_a_fresh_solver_token():
 
     assert "_restore_native_recaptcha(page, retry_challenge)" in retry_source
     assert "retry_captcha = _solve_captcha_if_configured(page)" in retry_source
+    assert "_apply_captcha_user_agent(page, retry_captcha)" in retry_source
+
+
+def test_submit_flow_applies_capmonster_solution_user_agent():
+    source = inspect.getsource(python_runtime.run_runtime_payload)
+
+    assert "captcha_result = _solve_captcha_if_configured(page)" in source
+    assert "_apply_captcha_user_agent(page, captcha_result)" in source
+    assert "_apply_captcha_user_agent(page, retry_captcha)" in source
+    assert "_apply_captcha_user_agent(page, verification_captcha)" in source
 
 
 def test_blocking_review_does_not_promote_captcha_presence_to_processing_error():
@@ -5742,6 +5752,7 @@ def test_capmonster_task_for_extended_captcha_types(monkeypatch):
             "websiteURL": "https://job-boards.greenhouse.io/waymark/jobs/4711827005",
             "websiteKey": "greenhouse-enterprise-key",
             "pageAction": "apply_to_job",
+            "apiDomain": "www.recaptcha.net",
         }
     ) == {
         "type": "RecaptchaV3EnterpriseTask",
@@ -5749,6 +5760,26 @@ def test_capmonster_task_for_extended_captcha_types(monkeypatch):
         "websiteKey": "greenhouse-enterprise-key",
         "pageAction": "apply_to_job",
         "minScore": 0.7,
+        "apiDomain": "www.recaptcha.net",
+    }
+    tasks = python_runtime._capmonster_tasks_for(
+        {
+            "kind": "recaptchaV3Enterprise",
+            "websiteURL": "https://job-boards.greenhouse.io/waymark/jobs/4711827005",
+            "websiteKey": "greenhouse-enterprise-key",
+            "pageAction": "apply_to_job",
+            "apiDomain": "www.recaptcha.net",
+        }
+    )
+    assert tasks[0]["type"] == "RecaptchaV3EnterpriseTask"
+    assert tasks[1] == {
+        "type": "RecaptchaV3TaskProxyless",
+        "websiteURL": "https://job-boards.greenhouse.io/waymark/jobs/4711827005",
+        "websiteKey": "greenhouse-enterprise-key",
+        "pageAction": "apply_to_job",
+        "minScore": 0.7,
+        "apiDomain": "www.recaptcha.net",
+        "isEnterprise": True,
     }
     assert python_runtime._capmonster_task_for(
         {
@@ -5765,6 +5796,40 @@ def test_capmonster_task_for_extended_captcha_types(monkeypatch):
         "funcaptchaApiJSSubdomain": "client-api.arkoselabs.com",
         "data": '{"blob":"abc"}',
     }
+
+
+def test_greenhouse_captcha_min_score_uses_env_override(monkeypatch):
+    monkeypatch.delenv("CAPMONSTER_GREENHOUSE_MIN_SCORE", raising=False)
+    assert python_runtime._greenhouse_captcha_min_score() == 0.7
+
+    monkeypatch.setenv("CAPMONSTER_GREENHOUSE_MIN_SCORE", "0.9")
+    assert python_runtime._greenhouse_captcha_min_score() == 0.9
+
+    monkeypatch.setenv("CAPMONSTER_GREENHOUSE_MIN_SCORE", "not-a-number")
+    assert python_runtime._greenhouse_captcha_min_score() == 0.7
+
+    monkeypatch.setenv("CAPMONSTER_GREENHOUSE_MIN_SCORE", "2.0")
+    assert python_runtime._greenhouse_captcha_min_score() == 0.9
+
+
+def test_discover_captcha_greenhouse_branch_uses_api_domain_and_env_min_score(monkeypatch):
+    class CapturePage:
+        def __init__(self):
+            self.script = ""
+
+        def evaluate(self, script):
+            self.script = str(script)
+            return None
+
+    monkeypatch.setenv("CAPMONSTER_GREENHOUSE_MIN_SCORE", "0.9")
+    page = CapturePage()
+
+    python_runtime._discover_captcha(page)
+
+    assert "apiDomain: ghApiDomain" in page.script
+    assert "new URL(ghEndpoint).hostname" in page.script
+    assert "__JOB_AGENT_GREENHOUSE_MIN_SCORE__" not in page.script
+    assert "minScore: 0.9," in page.script
 
 
 def test_recaptcha_v3_enterprise_solution_intercepts_execute_call():
@@ -5940,6 +6005,117 @@ def test_solve_captcha_waits_for_recaptcha_api_before_capmonster(monkeypatch):
         ("solve", "RecaptchaV3EnterpriseTask"),
         ("inject", "solved-token"),
     ]
+
+
+def test_solve_captcha_propagates_solution_user_agent(monkeypatch):
+    class FakeClient:
+        def __init__(self, api_key):
+            pass
+
+        def solve_task(self, task, timeout_seconds, poll_interval_seconds):
+            return {
+                "gRecaptchaResponse": "solved-token",
+                "userAgent": "Mozilla/5.0 (CapMonster Solver)",
+            }
+
+    monkeypatch.setenv("CAPMONSTER_API_KEY", "cap-key")
+    monkeypatch.setenv("CAPMONSTER_SOLVE_CAPTCHA", "true")
+    monkeypatch.setattr(
+        python_runtime,
+        "_discover_captcha",
+        lambda _page: {
+            "kind": "recaptchaV3Enterprise",
+            "websiteURL": "https://job-boards.greenhouse.io/acme/jobs/1",
+            "websiteKey": "site-key",
+            "pageAction": "apply_to_job",
+        },
+    )
+    monkeypatch.setattr(
+        python_runtime,
+        "_wait_for_captcha_api_ready",
+        lambda _page, _challenge: True,
+    )
+    monkeypatch.setattr(python_runtime, "CapMonsterClient", FakeClient)
+    monkeypatch.setattr(
+        python_runtime,
+        "_inject_captcha_solution",
+        lambda _page, _challenge, _solution: True,
+    )
+
+    assert python_runtime._solve_captcha_if_configured(object()) == {
+        "status": "solved",
+        "detail": (
+            "recaptchaV3Enterprise at https://job-boards.greenhouse.io/acme/jobs/1 "
+            "(solution userAgent returned)"
+        ),
+        "user_agent": "Mozilla/5.0 (CapMonster Solver)",
+    }
+
+
+def test_apply_captcha_user_agent_overrides_submission_requests():
+    class FakeRequest:
+        def __init__(self, headers):
+            self.headers = headers
+
+    class FakeRoute:
+        def __init__(self, request):
+            self.request = request
+            self.continued = []
+
+        def continue_(self, **kwargs):
+            self.continued.append(kwargs)
+
+    class FakePage:
+        def __init__(self):
+            self.routes = []
+            self.handler = None
+
+        def route(self, pattern, handler):
+            self.routes.append((pattern, handler))
+            self.handler = handler
+
+    page = FakePage()
+    captcha_result = {
+        "status": "solved",
+        "detail": "recaptchaV3Enterprise at https://job-boards.greenhouse.io/acme/jobs/1",
+        "user_agent": "capmonster-UA/1.0",
+    }
+
+    assert python_runtime._apply_captcha_user_agent(page, captcha_result) is True
+    assert page.routes == [("**/*", page.handler)]
+
+    route = FakeRoute(FakeRequest({"user-agent": "base-UA/1.0", "accept": "application/json"}))
+    page.handler(route)
+    assert route.continued[0]["headers"] == {
+        "user-agent": "capmonster-UA/1.0",
+        "accept": "application/json",
+    }
+    assert len(route.continued) == 1
+
+    # A later solution updates the same route instead of stacking handlers.
+    updated = {
+        "status": "solved",
+        "detail": "recaptchaV3Enterprise at https://job-boards.greenhouse.io/acme/jobs/1",
+        "user_agent": "capmonster-UA/2.0",
+    }
+    assert python_runtime._apply_captcha_user_agent(page, updated) is True
+    assert len(page.routes) == 1
+
+    route2 = FakeRoute(FakeRequest({"user-agent": "base-UA/1.0"}))
+    page.handler(route2)
+    assert route2.continued[0]["headers"] == {"user-agent": "capmonster-UA/2.0"}
+
+    # A solution without a userAgent restores the browser's original header.
+    assert (
+        python_runtime._apply_captcha_user_agent(
+            page,
+            {"status": "solved", "detail": "recaptchaV3Enterprise"},
+        )
+        is False
+    )
+    route3 = FakeRoute(FakeRequest({"user-agent": "base-UA/1.0"}))
+    page.handler(route3)
+    assert route3.continued == [{}]
 
 
 def test_captcha_solution_detail_redacts_greenhouse_embed_tokens():
@@ -13514,6 +13690,153 @@ def test_required_location_combobox_answers_yes_from_all_us_preference():
     assert choice == "Yes"
 
 
+def test_work_from_san_francisco_combobox_answers_yes_from_all_us_preference():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "Are you able to work from San Francisco, CA?",
+        "required": True,
+    }
+    profile = {
+        "open_to_all_us_locations": True,
+        "desired_locations": ["New York City"],
+        "answers": {},
+        "sensitive_answers": {},
+    }
+
+    choice = python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["Yes", "No"],
+        "",
+        profile,
+    )
+
+    assert choice == "Yes"
+
+
+def test_sierra_san_francisco_commitment_questions_choose_relocation_option():
+    profile = {
+        "open_to_all_us_locations": True,
+        "answers": {"Are you open to relocation?": "Yes"},
+        "sensitive_answers": {},
+    }
+    first = {
+        "kind": "single",
+        "role": "combobox",
+        "label": "Are you able to work from San Francisco, CA?",
+        "required": True,
+        "options": [
+            {"label": "Yes", "value": "yes"},
+            {"label": "No", "value": "no"},
+        ],
+    }
+    second = {
+        "kind": "radiogroup",
+        "label": (
+            "Sierra believes working alongside one another as a team is an important part "
+            "of building great products and a great culture. We are primarily an in-person "
+            "company based in San Francisco. Does that work for you?"
+        ),
+        "required": True,
+        "options": [
+            {"label": "Yes, and I currently live in the SF Bay Area.", "value": "a"},
+            {
+                "label": "Yes, and while I do not currently live in the SF Bay Area, I am open to relocation.",
+                "value": "b",
+            },
+            {
+                "label": 'No or Other. Please add more details in the "Anything else" section below.',
+                "value": "c",
+            },
+        ],
+    }
+
+    assert python_runtime._plan_field(first, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+    second_plan = python_runtime._plan_field(second, profile, None)
+    assert second_plan["action"] == "check"
+    assert "open to relocation" in second_plan["option"]["label"]
+
+
+def test_waymo_departments_combobox_prefers_ai_foundations():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "label": "Departments",
+        "required": True,
+    }
+    profile = {
+        "interested_roles": ["AI & Machine Learning"],
+        "specializations": ["AI Research", "Machine Learning"],
+        "answers": {},
+    }
+
+    choice = python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["AI Foundations", "Engineering", "Product"],
+        "Engineering",
+        profile,
+    )
+
+    assert choice == "AI Foundations"
+
+
+def test_most_recent_degree_year_combobox_uses_highest_education_end_year():
+    field = {
+        "kind": "single",
+        "tag": "input",
+        "type": "text",
+        "role": "combobox",
+        "label": "What year did you receive your most recent degree?*",
+        "required": True,
+    }
+    profile = {
+        "education": [
+            {"degree": "Bachelor's", "end_year": "2023"},
+            {"degree": "Master's", "end_year": "2026"},
+        ],
+        "answers": {},
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan == {"action": "combobox", "value": "2026"}
+    assert python_runtime._dynamic_combobox_fallback_choice(
+        field,
+        ["2019", "2023", "2026"],
+        "",
+        profile,
+    ) == "2026"
+
+
+def test_optional_language_checkbox_without_matching_option_is_non_blocking():
+    field = {
+        "kind": "checkboxgroup",
+        "label": "Bonus: Do you have working proficiency in any languages other than English?",
+        "required": True,
+        "options": [
+            {"label": "French", "value": "french"},
+            {"label": "German", "value": "german"},
+            {"label": "Portuguese", "value": "portuguese"},
+            {"label": "Spanish", "value": "spanish"},
+        ],
+    }
+    profile = {
+        "native_language": "Mandarin",
+        "answers": {},
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "skip"
+    assert plan["blocking"] is False
+    assert python_runtime._languages_other_than_english_answer(profile) is True
+
+
 def test_based_in_metro_long_option_matches_negative_answer():
     field = {
         "kind": "single",
@@ -13544,3 +13867,144 @@ def test_based_in_metro_long_option_matches_negative_answer():
     )
 
     assert choice == "No, I am not located in the Chicagoland area or Houston, TX"
+
+
+def test_opt_cpt_status_question_answers_yes_from_approved_visa_facts():
+    profile = {
+        "answers": {
+            "What type of visa sponsorship will you require?": "OPT",
+        },
+        "sensitive_answers": {
+            "sponsorship": {
+                "approved": True,
+                "answer": "Yes",
+                "patterns": ["sponsorship"],
+            },
+            "sponsorship_type": {
+                "approved": True,
+                "answer": "OPT",
+                "patterns": ["visa type", "sponsorship type"],
+            },
+        },
+    }
+    relay_question = {
+        "kind": "radiogroup",
+        "label": "Do you plan to work under OPT?*",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+
+    assert python_runtime._opt_cpt_status_answer(relay_question["label"], profile) == "Yes"
+    assert python_runtime._priority_auto_answer(relay_question["label"], profile) == "Yes"
+    plan = python_runtime._plan_field(relay_question, profile, None)
+    assert plan["action"] == "check"
+    assert plan["option"]["label"] == "Yes"
+    assert (
+        python_runtime._opt_cpt_status_answer(
+            "Are you currently on an F1 OPT/CPT status?*",
+            profile,
+        )
+        == "Yes"
+    )
+
+
+def test_high_school_graduation_year_select_falls_back_to_other():
+    profile = {
+        "high_school": {
+            "school": "Guangming High School",
+            "end_year": "2019",
+        },
+        "education": [
+            {
+                "school": "Guangming High School",
+                "degree": "High School",
+                "end_year": "2019",
+            }
+        ],
+    }
+    field = {
+        "kind": "single",
+        "tag": "select",
+        "type": "select",
+        "label": "What year did you graduate high school?",
+        "required": True,
+        "options": ["2022", "2023", "2024", "2025", "2026", "Other"],
+    }
+
+    assert python_runtime._auto_answer(field["label"], profile) == "2019"
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "select",
+        "value": "Other",
+    }
+
+
+def test_graduation_date_radio_group_uses_other_for_future_only_cohort():
+    profile = {
+        "graduation_date": "May 2026",
+        "education": [
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's",
+                "field": "Computer Science",
+                "end_date": "2026-05",
+            }
+        ],
+    }
+    field = {
+        "kind": "radiogroup",
+        "label": "Graduation date or expected graduation date:",
+        "required": True,
+        "options": [
+            {"label": "December 2026/January 2027"},
+            {"label": "Spring 2027"},
+            {"label": "December 2027/January 2028"},
+            {"label": "Other"},
+        ],
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "check"
+    assert plan["option"]["label"] == "Other"
+    assert python_runtime._graduation_date_aliases("May 2026") == ["Already graduated", "May - Aug 2026", "May - August 2026", "Spring 2026"]
+    assert python_runtime._option_matches("Spring 2027", "May 2026") is False
+
+
+def test_highest_education_completed_label_resolves_master_degree():
+    profile = {
+        "education": [
+            {
+                "school": "Stevens Institute of Technology",
+                "degree": "Master's Degree",
+                "field": "Computer Science",
+            }
+        ]
+    }
+
+    assert (
+        python_runtime._auto_answer("Highest Education Completed?", profile)
+        == "Master's Degree"
+    )
+
+
+def test_active_immigration_case_uses_approved_no_fact():
+    field = {
+        "kind": "radiogroup",
+        "label": "Do you currently have an active immigration case (ex H-1B extension, green card)?",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "answers": {},
+        "sensitive_answers": {
+            "active_immigration_case": {
+                "approved": True,
+                "answer": "No",
+                "patterns": ["active immigration case", "immigration case"],
+            }
+        },
+    }
+
+    assert python_runtime._is_sensitive(field["label"]) is True
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan["action"] == "check"
+    assert plan["option"]["label"] == "No"

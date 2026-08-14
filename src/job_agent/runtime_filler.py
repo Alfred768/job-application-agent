@@ -84,6 +84,7 @@ const SENSITIVE = [
   "clearance", "citizen", "certify", "arbitration", "acknowledgement", "acknowledgment",
   "consent", "privacy", "personal data", "confirm the statement", "notetaker", "notetakers", "transcribe",
   "true and accurate", "false or misleading", "terms and conditions",
+  "immigration", "h 1b", "right to work",
 ];
 
 const NEXT_PATTERNS = /^\s*(next|continue|save\s+and\s+continue|create\s+account|sign\s+up|sign\s+in|->|→|step\s|\d+\s*\/\s*\d+|forward|\u4e0b\u4e00\u6b65|\u7ee7\u7eed|\u4fdd\u5b58\u5e76\u7ee7\u7eed)/i;
@@ -1849,8 +1850,65 @@ function bachelorsDegreeAnswer(label, profile) {
   return "No";
 }
 
+function optCptStatusAnswer(label, profile) {
+  const n = norm(label || "");
+  const mentionsOpt = /\bopt\b/.test(n) ||
+    n.includes("optional practical training") ||
+    n.includes("curricular practical training") ||
+    n.includes("cpt") ||
+    /\bf\s*1\b/.test(n);
+  if (!mentionsOpt) return null;
+  const markers = [
+    "do you plan", "plan to", "are you currently", "do you currently",
+    "will you", "work under", "status", "authorized", "eligible", "intend",
+  ];
+  if (!markers.some((marker) => n.includes(marker))) return null;
+  const approvedType = approvedSensitiveEntryAnswer(profile, "sponsorship_type") || "";
+  const answers = (profile && profile.answers) || {};
+  let raw = approvedType || null;
+  for (const key of [
+    "Are you currently on an F1 OPT/CPT status?*",
+    "Are you currently on an F1 OPT/CPT status?",
+    "If Yes: - What type of visa sponsorship will you require? - Do you currently hold a valid U.S. visa?",
+    "What type of visa sponsorship will you require?",
+  ]) {
+    const value = answers[key];
+    if (value !== null && value !== undefined && String(value).trim() !== "") {
+      raw = String(value);
+      break;
+    }
+  }
+  if (raw == null) return null;
+  const rawNorm = norm(String(raw));
+  if (rawNorm === "yes" || rawNorm === "opt" || rawNorm === "f 1 opt" || rawNorm === "f1 opt" || rawNorm.includes("opt")) return "Yes";
+  if (isNegativeAnswer(String(raw))) return "No";
+  return null;
+}
+
+function educationDateOtherOption(field, profile, answer) {
+  const normalized = norm(String(field && field.label || ""));
+  const isEducationDateQuestion = normalized.includes("graduation") ||
+    normalized.includes("expected graduation") ||
+    normalized.includes("graduate") ||
+    (normalized.includes("high school") && (normalized.includes("year") || normalized.includes("graduation") || normalized.includes("graduate"))) ||
+    (normalized.includes("start date") && (normalized.includes("current school") || normalized.includes("education")));
+  if (!isEducationDateQuestion) return null;
+  const rawAnswer = String(answer || "").trim();
+  if (!rawAnswer) return null;
+  const options = (field && field.options) || [];
+  const other = options.find((option) => norm(optionText(option)) === "other");
+  if (!other) return null;
+  for (const option of options) {
+    if (option === other) continue;
+    if (optionMatches(optionText(option), rawAnswer)) return null;
+  }
+  return other;
+}
+
 function priorityAutoAnswer(label, profile) {
   const n = norm(label);
+  const optStatus = optCptStatusAnswer(label, profile);
+  if (optStatus != null) return optStatus;
   const consent = communicationConsentAnswer(label, profile);
   if (consent != null) return consent;
   const timezone = timezoneAnswer(label, profile);
@@ -2532,6 +2590,14 @@ function expandedLocationText(value) {
   }).join(" ");
 }
 
+function yearSetsCompatible(left, right) {
+  const leftYears = new Set(String(left || "").match(/\b(?:19|20)\d{2}\b/g) || []);
+  const rightYears = new Set(String(right || "").match(/\b(?:19|20)\d{2}\b/g) || []);
+  if (!leftYears.size || !rightYears.size) return true;
+  for (const year of leftYears) if (rightYears.has(year)) return true;
+  return false;
+}
+
 function optionMatches(option, answer) {
   const optLabel = norm(optionText(option));
   const optValue = norm(optionValue(option));
@@ -2552,17 +2618,17 @@ function optionMatches(option, answer) {
   )) return true;
   const exactDemographicWants = new Set(["asian", "east asian", "asian not hispanic or latino", "man", "woman", "male", "female"]);
   if (wants.some((candidate) => (
-    optLabel === candidate || optValue === candidate ||
-    expandedLocationText(optLabel) === expandedLocationText(candidate) ||
-    expandedLocationText(optValue) === expandedLocationText(candidate)
+    (optLabel === candidate || optValue === candidate) ||
+    (expandedLocationText(optLabel) === expandedLocationText(candidate) && yearSetsCompatible(candidate, optLabel)) ||
+    (expandedLocationText(optValue) === expandedLocationText(candidate) && yearSetsCompatible(candidate, optValue))
   ))) return true;
   if (wants.some((candidate) => exactDemographicWants.has(candidate) && (
     optLabel.startsWith(candidate + " ") || optLabel.startsWith(candidate + " (")
   ))) return true;
   const fuzzyWants = wants.filter((candidate) => !exactDemographicWants.has(candidate));
   const genericOption = new Set(["other", "no answer", "select", "select one"]);
-  if (!genericOption.has(optLabel) && fuzzyWants.some((candidate) => optLabel.length >= 3 && (optLabel.includes(candidate) || candidate.includes(optLabel)))) return true;
-  if (!genericOption.has(optValue) && fuzzyWants.some((candidate) => optValue.length >= 3 && (optValue.includes(candidate) || candidate.includes(optValue)))) return true;
+  if (!genericOption.has(optLabel) && fuzzyWants.some((candidate) => optLabel.length >= 3 && (optLabel.includes(candidate) || candidate.includes(optLabel)) && yearSetsCompatible(candidate, optLabel))) return true;
+  if (!genericOption.has(optValue) && fuzzyWants.some((candidate) => optValue.length >= 3 && (optValue.includes(candidate) || candidate.includes(optValue)) && yearSetsCompatible(candidate, optValue))) return true;
   const labelTokens = new Set(optLabel.split(" ").filter(Boolean));
   const valueTokens = new Set(optValue.split(" ").filter(Boolean));
   return fuzzyWants.some((candidate) => {
@@ -2574,6 +2640,7 @@ function optionMatches(option, answer) {
       (optionTokenSet.has("not") && !wantTokens.includes("not")) ||
       (wantTokens.includes("not") && !optionTokenSet.has("not"))
     ) return false;
+    if (!yearSetsCompatible(candidate, optLabel) && !yearSetsCompatible(candidate, optValue)) return false;
     return true;
   });
 }
@@ -5182,6 +5249,14 @@ function planField(f, profile, ctx) {
         sensitive,
       };
     }
+    const educationDateOther = educationDateOtherOption(f, profile, ans);
+    if (educationDateOther != null) {
+      const other = typeof educationDateOther === "object" ? educationDateOther : { label: optionText(educationDateOther), value: optionText(educationDateOther) };
+      if (f.kind === "buttongroup") {
+        return { action: "buttonclick", optionAutofillId: other.autofillId, optionValue: other.value, optionText: optionText(other) };
+      }
+      return { action: "check", optionId: other.id, optionValue: other.value, optionText: optionText(other), optionAutofillId: other.autofillId, groupName: f.name };
+    }
     return { action: "skip", reason: "no option matches saved answer", sensitive };
   }
   if (f.kind === "checkboxgroup") {
@@ -5290,6 +5365,8 @@ function planField(f, profile, ctx) {
       const other = (f.options || []).find((option) => norm(optionText(option)) === "other");
       if (other) return { action: "select", value: optionText(other) };
     }
+    const educationDateOther = educationDateOtherOption(f, profile, ans);
+    if (educationDateOther != null) return { action: "select", value: optionText(educationDateOther) };
     const sourceOpt = matchingOptions(f, ans, profile)[0] || null;
     if (sourceOpt) return { action: "select", value: optionText(sourceOpt) };
     if (!f.required) return { action: "skip", reason: "non-required unmapped field", blocking: false };
@@ -8510,6 +8587,7 @@ function capMonsterConfig() {
       }
     : null;
   const rawMinScore = Number(process.env.CAPMONSTER_RECAPTCHA_MIN_SCORE || 0.3);
+  const rawGreenhouseMinScore = Number(process.env.CAPMONSTER_GREENHOUSE_MIN_SCORE || 0.7);
   return {
     enabled: enabled && Boolean(apiKey),
     apiKey,
@@ -8517,6 +8595,7 @@ function capMonsterConfig() {
     timeoutMs: Math.max(15000, Number(process.env.CAPMONSTER_TIMEOUT_SECONDS || 120) * 1000),
     proxy,
     recaptchaMinScore: Math.min(0.9, Math.max(0.1, Number.isFinite(rawMinScore) ? rawMinScore : 0.3)),
+    greenhouseMinScore: Math.min(0.9, Math.max(0.1, Number.isFinite(rawGreenhouseMinScore) ? rawGreenhouseMinScore : 0.7)),
     hcaptchaTaskType: ["HCaptchaTask", "HCaptchaTaskProxyless"].includes(String(process.env.CAPMONSTER_HCAPTCHA_TASK_TYPE || "").trim())
       ? String(process.env.CAPMONSTER_HCAPTCHA_TASK_TYPE || "").trim()
       : "HCaptchaTaskProxyless",
@@ -8724,7 +8803,22 @@ async function discoverCaptcha(page) {
       };
     }
     if (greenhouseEnterpriseKey && greenhouseEnterpriseEndpoint.includes("recaptcha/enterprise")) {
-      return { kind: "recaptchaV3Enterprise", websiteURL: currentURL, websiteKey: greenhouseEnterpriseKey, pageAction: "apply_to_job", minScore: 0.7, userAgent: navigator.userAgent };
+      let greenhouseApiDomain = "";
+      try {
+        greenhouseApiDomain = new URL(greenhouseEnterpriseEndpoint).hostname || "";
+      } catch (e) {
+        greenhouseApiDomain = "";
+      }
+      return {
+        kind: "recaptchaV3Enterprise",
+        websiteURL: currentURL,
+        websiteKey: greenhouseEnterpriseKey,
+        pageAction: "apply_to_job",
+        minScore: 0.7,
+        apiDomain: greenhouseApiDomain,
+        greenhouse: true,
+        userAgent: navigator.userAgent,
+      };
     }
     return null;
   }).catch(() => null);
@@ -8790,14 +8884,18 @@ function capMonsterTaskFor(challenge, cfg) {
   }
   if (challenge.kind === "recaptchaV3" || challenge.kind === "recaptchaV3Enterprise") {
     if (!challenge.websiteKey) return null;
+    const effectiveMinScore = challenge.greenhouse
+      ? cfg.greenhouseMinScore
+      : (typeof challenge.minScore === "number" ? challenge.minScore : cfg.recaptchaMinScore);
     const task = {
       type: challenge.kind === "recaptchaV3Enterprise" ? "RecaptchaV3EnterpriseTask" : "RecaptchaV3TaskProxyless",
       websiteURL: challenge.websiteURL,
       websiteKey: challenge.websiteKey,
       pageAction: challenge.pageAction || "verify",
-      minScore: typeof challenge.minScore === "number" ? challenge.minScore : cfg.recaptchaMinScore,
+      minScore: effectiveMinScore,
     };
     if (challenge.userAgent) task.userAgent = challenge.userAgent;
+    if (challenge.apiDomain) task.apiDomain = challenge.apiDomain;
     return task;
   }
   if (challenge.kind === "funcaptcha") {
@@ -8857,6 +8955,9 @@ function capMonsterTasksFor(challenge, cfg) {
     }
     if (challenge && challenge.kind === "turnstile" && task.type !== "TurnstileTaskProxyless") {
       tasks.push({ ...task, type: "TurnstileTaskProxyless" });
+    }
+    if (challenge && challenge.kind === "recaptchaV3Enterprise" && task.type === "RecaptchaV3EnterpriseTask") {
+      tasks.push({ ...task, type: "RecaptchaV3TaskProxyless", isEnterprise: true });
     }
     return tasks;
   }
@@ -9285,10 +9386,12 @@ async function solveCaptchaIfConfigured(page) {
     if (!solution) throw new Error("CapMonster did not return a solution");
     const injected = await injectCaptchaSolution(page, challenge, solution);
     const detail = challenge.kind + " at " + challenge.websiteURL + (solution.userAgent ? " (solution userAgent returned)" : "");
-    return {
+    const result = {
       status: injected ? "solved" : "solution_not_injected",
       detail,
     };
+    if (solution.userAgent) result.userAgent = solution.userAgent;
+    return result;
   } catch (e) {
     if (challenge.kind === "hcaptcha") {
       const vision = await solveHcaptchaWithVision(page);
@@ -9297,6 +9400,30 @@ async function solveCaptchaIfConfigured(page) {
     }
     return { status: "error", detail: e.message || String(e) };
   }
+}
+
+async function applyCaptchaUserAgent(page, captchaResult) {
+  const ua = String((captchaResult && captchaResult.userAgent) || "").trim();
+  if (!ua) {
+    if (page._jobAgentCaptchaUserAgent) page._jobAgentCaptchaUserAgent.value = "";
+    return false;
+  }
+  if (!page._jobAgentCaptchaUserAgent) {
+    const holder = { value: ua };
+    page._jobAgentCaptchaUserAgent = holder;
+    await page.route("**/*", (route) => {
+      const headers = route.request().headers();
+      const active = holder.value;
+      if (active && headers["user-agent"] !== active) {
+        headers["user-agent"] = active;
+        return route.continue({ headers });
+      }
+      return route.continue();
+    }).catch(() => {});
+  } else {
+    page._jobAgentCaptchaUserAgent.value = ua;
+  }
+  return true;
 }
 
 function captchaResultBlocksSubmission(captchaResult) {
@@ -9654,6 +9781,7 @@ async function main() {
   const captchaResult = blockingReview.length
     ? { status: "skipped", detail: "blocking review fields present" }
     : await solveCaptchaIfConfigured(page);
+  await applyCaptchaUserAgent(page, captchaResult);
   let submit = await findSubmitButton(page);
   if (await isJobPageApplyButton(page, submit)) submit = null;
   console.log("=== Simplify-style autofill report ===");
@@ -9740,6 +9868,7 @@ async function main() {
     let processingError = outcome.processingError;
     for (let retryNumber = 1; retryNumber <= CAPTCHA_RECOVERY_ATTEMPTS && isRetryableCaptchaError(processingError); retryNumber++) {
       const retryCaptcha = await solveCaptchaIfConfigured(page);
+      await applyCaptchaUserAgent(page, retryCaptcha);
       console.log("CapMonster CAPTCHA retry " + retryNumber + ": " + retryCaptcha.status + " (" + retryCaptcha.detail + ")");
       if (retryCaptcha.status !== "solved") {
         processingError = captchaRecoveryFailure(retryCaptcha);
@@ -9767,6 +9896,7 @@ async function main() {
       verification = verification || "code field found on page";
       console.log("Email verification code entered: " + verification);
       const verificationCaptcha = await solveCaptchaIfConfigured(page);
+      await applyCaptchaUserAgent(page, verificationCaptcha);
       console.log("CapMonster CAPTCHA for verification submit: " + verificationCaptcha.status + " (" + verificationCaptcha.detail + ")");
       const resubmit = await findSubmitButton(page);
       if (resubmit && ["solved", "none", "skipped"].includes(verificationCaptcha.status)) {

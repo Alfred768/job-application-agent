@@ -175,6 +175,7 @@ def test_hcaptcha_task_includes_official_acceptance_fields():
         page_action="apply",
         min_score=0.7,
         enterprise=True,
+        api_domain="www.recaptcha.net",
         user_agent="Mozilla/5.0",
     ) == {
         "type": "RecaptchaV3EnterpriseTask",
@@ -182,6 +183,7 @@ def test_hcaptcha_task_includes_official_acceptance_fields():
         "websiteKey": "v3-key",
         "pageAction": "apply",
         "minScore": 0.7,
+        "apiDomain": "www.recaptcha.net",
         "userAgent": "Mozilla/5.0",
     }
     assert build_funcaptcha_task(

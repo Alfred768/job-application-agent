@@ -163,6 +163,7 @@ def build_recaptcha_v3_task(
     page_action: str | None = None,
     min_score: float | None = None,
     enterprise: bool = False,
+    api_domain: str | None = None,
     user_agent: str | None = None,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
@@ -174,6 +175,8 @@ def build_recaptcha_v3_task(
         task["pageAction"] = page_action
     if min_score is not None:
         task["minScore"] = min_score
+    if api_domain:
+        task["apiDomain"] = api_domain
     if user_agent:
         task["userAgent"] = user_agent
     return task

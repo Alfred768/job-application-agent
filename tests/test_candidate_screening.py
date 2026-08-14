@@ -93,6 +93,57 @@ def test_screening_rejects_foreign_city_only_locations_for_us_candidate():
         assert any("outside" in reason for reason in result.reasons)
 
 
+def test_screening_rejects_johor_bahru_malaysia_location_for_us_candidate():
+    result = screen_job_for_candidate(
+        Job(
+            title="Cloud Infra/DevOps Engineer",
+            company="AvePoint",
+            raw_jd="",
+            location="Johor Bahru, Johor, Malaysia",
+        ),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_additional_european_and_abbreviation_locations():
+    for location in [
+        "Sofia, Bulgaria",
+        "Ramat Gan (Hybrid)",
+        "Slovenia / Remote",
+        "Riga, Latvia",
+        "Bulgaria",
+        "Slovakia",
+        "Bratislava, Slovakia",
+        "Edmonton, AB, CAN",
+    ]:
+        result = screen_job_for_candidate(
+            Job(title="Software Engineer", company="Example", raw_jd="", location=location),
+            _early_career_profile(),
+        )
+
+        assert result.eligible is False, location
+        assert any("outside" in reason for reason in result.reasons)
+
+
+def test_screening_rejects_johor_bahru_origin_statement_in_jd():
+    result = screen_job_for_candidate(
+        Job(
+            title="Cloud Infra/DevOps Engineer",
+            company="AvePoint",
+            raw_jd="This role is fully onsite, based in Johor Bahru. "
+            "Are you a Malaysia Citizen or Malaysia Permanent Resident?",
+            location="All",
+        ),
+        _early_career_profile(),
+    )
+
+    assert result.eligible is False
+    assert any("outside" in reason for reason in result.reasons)
+
+
 def test_screening_rejects_strong_non_us_origin_statement_in_jd():
     result = screen_job_for_candidate(
         Job(

@@ -322,6 +322,7 @@ SENSITIVE = [
     "personal data",
     "terms and conditions",
     "background check",
+    "immigration",
     "confirm the statement",
     "true and accurate",
     "false or misleading",
@@ -1097,6 +1098,7 @@ def run_runtime_payload(
             captcha_result = {"status": "skipped", "detail": "blocking review fields present"}
             if not blocking_review:
                 captcha_result = _solve_captcha_if_configured(page)
+                _apply_captcha_user_agent(page, captcha_result)
             submit = _find_button(page, kind="submit")
             if _is_job_page_apply_button(page, submit):
                 submit = None
@@ -1324,6 +1326,7 @@ def run_runtime_payload(
                             processing_error = "captcha native restore failed"
                             break
                         retry_captcha = _solve_captcha_if_configured(page)
+                        _apply_captcha_user_agent(page, retry_captcha)
                         print(
                             f"CapMonster CAPTCHA retry {retry_number}: "
                             f"{retry_captcha['status']} ({retry_captcha['detail']})"
@@ -1333,6 +1336,7 @@ def run_runtime_payload(
                             break
                     else:
                         retry_captcha = _solve_captcha_if_configured(page)
+                        _apply_captcha_user_agent(page, retry_captcha)
                         print(
                             f"CapMonster CAPTCHA retry {retry_number}: "
                             f"{retry_captcha['status']} ({retry_captcha['detail']})"
@@ -1380,6 +1384,7 @@ def run_runtime_payload(
                     verification = verification or "code field found on page"
                     print(f"Email verification code entered: {verification}")
                     verification_captcha = _solve_captcha_if_configured(page)
+                    _apply_captcha_user_agent(page, verification_captcha)
                     print(
                         "CapMonster CAPTCHA for verification submit: "
                         f"{verification_captcha['status']} ({verification_captcha['detail']})"
@@ -3142,6 +3147,10 @@ def _label_is_office_commitment(label: str) -> bool:
             "day per week",
             "days per week",
             "days a week",
+            "time per week",
+            "times per week",
+            "time a week",
+            "times a week",
             "able to commit",
             "able to work",
             "comfortable",
@@ -3157,6 +3166,10 @@ def _label_is_office_commitment(label: str) -> bool:
             "work in our",
             "work from the",
             "work at the",
+            "come into",
+            "come in to",
+            "come to the",
+            "come to our",
         )
     )
 
@@ -4606,7 +4619,11 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
         field = str(education.get("field") or "Computer Science")
         school = str(education.get("school") or "Stevens Institute of Technology")
         return f"{degree} in {field} from {school}"
-    if "highest level of education" in normalized and "completed" in normalized:
+    if (
+        "highest" in normalized
+        and "education" in normalized
+        and "completed" in normalized
+    ):
         degree = str(_current_education_value(profile, "degree") or "Master's Degree")
         degree_normalized = _norm(degree)
         if "master" in degree_normalized:
@@ -6320,6 +6337,61 @@ def _work_authorization_dropdown_answer(label: str, profile: dict[str, Any]) -> 
     return None
 
 
+def _opt_cpt_status_answer(label: str, profile: dict[str, Any]) -> str | None:
+    """Answer yes/no OPT/CPT status prompts from the approved visa facts."""
+    normalized = _norm(label)
+    mentions_opt = bool(
+        re.search(r"\bopt\b", normalized)
+        or "optional practical training" in normalized
+        or "curricular practical training" in normalized
+        or "cpt" in normalized
+        or re.search(r"\bf\s*1\b", normalized)
+    )
+    if not mentions_opt:
+        return None
+    if not any(
+        marker in normalized
+        for marker in (
+            "do you plan",
+            "plan to",
+            "are you currently",
+            "do you currently",
+            "will you",
+            "work under",
+            "status",
+            "authorized",
+            "eligible",
+            "intend",
+        )
+    ):
+        return None
+    approved_type = (
+        _approved_sensitive_entry_answer(profile, "sponsorship_type") or ""
+    )
+    answers = profile.get("answers") or {}
+    raw = None
+    for key in (
+        "Are you currently on an F1 OPT/CPT status?*",
+        "Are you currently on an F1 OPT/CPT status?",
+        "If Yes: - What type of visa sponsorship will you require? - Do you currently hold a valid U.S. visa?",
+        "What type of visa sponsorship will you require?",
+    ):
+        value = answers.get(key)
+        if value not in {None, ""}:
+            raw = value
+            break
+    if raw is None:
+        raw = approved_type
+    if raw is None:
+        return None
+    raw_norm = _norm(str(raw))
+    if raw_norm in {"yes", "opt", "f 1 opt", "f1 opt"} or "opt" in raw_norm:
+        return "Yes"
+    if _is_negative_answer(str(raw)):
+        return "No"
+    return None
+
+
 def _legal_signature_value(label: str, profile: dict[str, Any]) -> str | None:
     normalized = _norm(label)
     if "full name" not in normalized or "date" not in normalized:
@@ -6903,10 +6975,13 @@ def _graduation_date_aliases(raw: str) -> list[str]:
         aliases.append("Already graduated")
     if 1 <= month <= 4:
         aliases.append(f"Jan - April {year}")
+        aliases.append(f"Spring {year}")
     elif 5 <= month <= 8:
         aliases.extend([f"May - Aug {year}", f"May - August {year}"])
+        aliases.append(f"Spring {year}")
     else:
         aliases.extend([f"Sept - Dec {year}", f"September - December {year}"])
+        aliases.append(f"Fall {year}")
     return aliases
 
 
@@ -9244,6 +9319,19 @@ def _readback_matches_date(value: Any, target: date) -> bool:
     return parsed == target
 
 
+def _year_sets_compatible(left: str, right: str) -> bool:
+    """Return False only when both texts carry years that are disjoint.
+
+    ``Spring 2026`` must never fuzzy-match ``Spring 2027``, while range
+    options such as ``December 2026/January 2027`` remain compatible with a
+    saved ``Spring 2027`` because they share the year 2027.
+    """
+    left_years = set(re.findall(r"\b(?:19|20)\d{2}\b", left))
+    right_years = set(re.findall(r"\b(?:19|20)\d{2}\b", right))
+    if not left_years or not right_years:
+        return True
+    return bool(left_years & right_years)
+
 def _option_matches(option: Any, answer: Any) -> bool:
     option_text = _norm(option)
     wants = [_norm(alias) for alias in _answer_aliases(answer) if _norm(alias)]
@@ -9258,7 +9346,7 @@ def _option_matches(option: Any, answer: Any) -> bool:
     for want in wants:
         expanded_option = _expanded_location_text(option_text)
         expanded_want = _expanded_location_text(want)
-        if expanded_option == expanded_want:
+        if expanded_option == expanded_want and _year_sets_compatible(want, option_text):
             return True
         if want in {"asian", "east asian", "asian not hispanic or latino"}:
             if option_text == want or option_text.startswith(f"{want} ") or option_text.startswith(f"{want} ("):
@@ -9311,13 +9399,23 @@ def _option_matches(option: Any, answer: Any) -> bool:
             return True
         if option_text == want:
             return True
-        if len(want) >= 3 and len(option_text) >= 3 and want in option_text:
+        if (
+            len(want) >= 3
+            and len(option_text) >= 3
+            and want in option_text
+            and _year_sets_compatible(want, option_text)
+        ):
             return True
         # Never infer a generic "Other"/placeholder choice from a longer
         # negative answer such as "Not open to other locations".
         if option_text in {"other", "no answer", "select", "select one"}:
             continue
-        if len(want) >= 3 and len(option_text) >= 3 and option_text in want:
+        if (
+            len(want) >= 3
+            and len(option_text) >= 3
+            and option_text in want
+            and _year_sets_compatible(want, option_text)
+        ):
             if f"not {option_text}" in want:
                 continue
             return True
@@ -9330,6 +9428,8 @@ def _option_matches(option: Any, answer: Any) -> bool:
             if ("not" in option_tokens and "not" not in want_tokens) or (
                 "not" in want_tokens and "not" not in option_tokens
             ):
+                continue
+            if not _year_sets_compatible(want, option_text):
                 continue
             return True
     return False
@@ -10096,6 +10196,7 @@ def _office_location_combobox_fallback_choice(
     field: dict[str, Any],
     available: list[str],
     answer: str,
+    profile: dict[str, Any] | None = None,
 ) -> str | None:
     if not available:
         return None
@@ -10115,6 +10216,21 @@ def _office_location_combobox_fallback_choice(
         return "New York"
     if "san francisco" in preferred_norm and any("san francisco" in _norm(item) for item in available):
         return "San Francisco"
+    if profile is not None and _approved_all_us_locations(profile):
+        any_of_above = next(
+            (
+                item
+                for item in available
+                if "any of the above" in _norm(item) or "any of these" in _norm(item)
+            ),
+            None,
+        )
+        if any_of_above:
+            return any_of_above
+        for item in available:
+            item_norm = _norm(item)
+            if _looks_like_location_checkbox_option(item_norm) or item_norm == "remote":
+                return item
     return None
 
 
@@ -10185,10 +10301,49 @@ def _is_primary_office_question(text: str) -> bool:
 def _department_combobox_fallback_choice(
     field: dict[str, Any],
     available: list[str],
+    profile: dict[str, Any] | None = None,
 ) -> str | None:
     label = _norm(field.get("label") or "")
     if "department" not in label:
         return None
+    if profile is not None:
+        interest_text = _norm(
+            " ".join(
+                str(value or "")
+                for value in [
+                    profile.get("interested_roles"),
+                    profile.get("specializations"),
+                    profile.get("target_title"),
+                    profile.get("answers", {}).get(
+                        "What kinds of roles are you interested in?"
+                    ),
+                ]
+            )
+        )
+        if any(
+            marker in interest_text
+            for marker in ("ai", "machine learning", "ml", "research", "data")
+        ):
+            ai_foundations = next(
+                (
+                    item
+                    for item in available
+                    if "ai" in _norm(item) and "foundation" in _norm(item)
+                ),
+                None,
+            )
+            if ai_foundations:
+                return ai_foundations
+            ai_options = [
+                item
+                for item in available
+                if any(
+                    marker in _norm(item)
+                    for marker in ("ai", "machine learning", "research", "data")
+                )
+            ]
+            if len(ai_options) == 1:
+                return ai_options[0]
     for item in available:
         normalized = _norm(item)
         if normalized == "engineering":
@@ -10299,35 +10454,30 @@ def _select_greenhouse_react_combobox_option(
 
         return None
     option_names = [step]
-    fallback = _office_location_combobox_fallback_choice(field, [step], step)
+    fallback = _office_location_combobox_fallback_choice(field, [step], step, profile)
     if fallback and fallback not in option_names:
         option_names.append(fallback)
 
     def committed_selection(expected: str = step) -> str | None:
-        try:
-            selected = _verify_control_selection(page, field, expected)
-        except Exception:
-            selected = None
-        if selected:
-            return selected
-        try:
-            _values, expanded = _control_selection_readback(page, field)
-        except Exception:
-            expanded = False
-        if not expanded:
-            return None
+        deadline = time.monotonic() + 4.0
         keyboard = getattr(page, "keyboard", None)
-        for key in ("Enter", "Tab"):
+        while time.monotonic() < deadline:
             try:
-                if keyboard is None:
-                    break
-                keyboard.press(key)
-                page.wait_for_timeout(250)
                 selected = _verify_control_selection(page, field, expected)
-                if selected:
-                    return selected
             except Exception:
-                pass
+                selected = None
+            if selected:
+                return selected
+            try:
+                _values, expanded = _control_selection_readback(page, field)
+            except Exception:
+                expanded = False
+            if not expanded and keyboard is not None:
+                try:
+                    keyboard.press("Enter")
+                except Exception:
+                    pass
+            page.wait_for_timeout(300)
         return None
 
     for option_name in option_names:
@@ -10565,6 +10715,38 @@ def _select_greenhouse_react_combobox_option(
                     return selected
         except Exception:
             pass
+    # Last-resort Playwright-native typing. Some Greenhouse comboboxes (for
+    # example country and degree-year) only commit after the inner input
+    # receives real key events, which JS-dispatched events can miss.
+    try:
+        locator.scroll_into_view_if_needed()
+        locator.click(timeout=3000)
+        page.wait_for_timeout(300)
+        try:
+            locator.fill("")
+        except Exception:
+            pass
+        try:
+            locator.press_sequentially(str(step)[:40], delay=35)
+        except Exception:
+            try:
+                locator.type(str(step)[:40], delay=35)
+            except Exception:
+                pass
+        page.wait_for_timeout(700)
+        try:
+            page.get_by_role("option", name=step, exact=True).first.click(timeout=2500)
+        except Exception:
+            try:
+                page.keyboard.press("ArrowDown")
+                page.keyboard.press("Enter")
+            except Exception:
+                pass
+        selected = committed_selection()
+        if selected:
+            return selected
+    except Exception:
+        pass
     return None
 
 
@@ -10753,6 +10935,9 @@ def _bachelors_degree_answer(label: str, profile: dict[str, Any]) -> str | None:
 
 def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
     normalized = _norm(label)
+    opt_status = _opt_cpt_status_answer(label, profile)
+    if opt_status is not None:
+        return opt_status
     if (
         "enter your relevant employment" in normalized
         and ("add another employment" in normalized or "military service" in normalized)
@@ -10934,7 +11119,11 @@ def _priority_auto_answer(label: str, profile: dict[str, Any]) -> str | None:
         return _auto_answer(label, profile, sensitive=False)
     if "degree in computer science" in normalized:
         return _auto_answer(label, profile, sensitive=False)
-    if "highest level of education" in normalized and "completed" in normalized:
+    if (
+        "highest" in normalized
+        and "education" in normalized
+        and "completed" in normalized
+    ):
         return _auto_answer(label, profile, sensitive=False)
     if (
         "professional software development experience" in normalized
@@ -12185,6 +12374,25 @@ def _live_binary_option_choice(
         marker in normalized for marker in ("willing", "able", "open")
     ):
         binary_family = "travel"
+    elif any(
+        marker in normalized
+        for marker in ("work from", "able to work from", "willing to work from")
+    ) and any(
+        marker in normalized
+        for marker in (
+            "san francisco",
+            "new york",
+            "nyc",
+            "mountain view",
+            "bay area",
+            "seattle",
+            "austin",
+            "chicago",
+            "los angeles",
+            "remote",
+        )
+    ):
+        binary_family = "required_location"
     elif (
         any(
             marker in normalized
@@ -12207,7 +12415,14 @@ def _live_binary_option_choice(
             value = match_screening_rule("willing to travel", profile.get("screening_answer_rules"))
         profile_polarity = _binary_answer_polarity(value)
     elif binary_family == "required_location":
-        profile_polarity = True if _approved_all_us_locations(profile) else None
+        profile_polarity = (
+            True
+            if (
+                _approved_all_us_locations(profile)
+                or _profile_relocation_willing(profile)
+            )
+            else None
+        )
     else:
         relocation = (
             _find_answer("Are you open to relocation?", profile.get("answers") or {})
@@ -12249,6 +12464,40 @@ def _option_denies_sponsorship(option: Any) -> bool:
             "no, i do not require",
             "without sponsorship",
         )
+    )
+
+
+def _option_requires_sponsorship(option: Any) -> bool:
+    """Return True for options that truthfully ask the employer to sponsor."""
+    text = _norm(_option_text(option))
+    if _option_denies_sponsorship(option):
+        return False
+    if any(
+        marker in text
+        for marker in (
+            "do not need",
+            "does not need",
+            "no need",
+            "don t need",
+            "doesn t need",
+            "not require",
+            "no longer require",
+            "will not require",
+            "won t require",
+            "do not require",
+            "does not require",
+        )
+    ):
+        return False
+    has_need_verb = any(
+        marker in text
+        for marker in ("require", "requires", "need", "needs", "will require")
+    )
+    if not has_need_verb:
+        return False
+    return any(
+        marker in text
+        for marker in ("sponsorship", "sponsor", "visa", "immigration")
     )
 
 
@@ -12340,19 +12589,7 @@ def _sponsorship_statement_option(
     if _truthy_answer(sponsorship):
         candidates = []
         for option in options:
-            text = _norm(_option_text(option))
-            if _option_denies_sponsorship(option):
-                continue
-            if any(
-                marker in text
-                for marker in (
-                    "require new sponsorship",
-                    "would require sponsorship",
-                    "will require sponsorship",
-                    "require immigration sponsorship",
-                    "require sponsorship",
-                )
-            ):
+            if _option_requires_sponsorship(option):
                 candidates.append(option)
         if not candidates:
             return None
@@ -12421,6 +12658,110 @@ def _english_level_choice(field: Mapping[str, Any], profile: Mapping[str, Any]) 
     return None
 
 
+def _languages_other_than_english_answer(profile: Mapping[str, Any]) -> bool | None:
+    """Return the approved answer for "languages other than English" questions."""
+    answers = profile.get("answers") or {}
+    for answer_key, value in answers.items():
+        key_norm = _norm(answer_key)
+        if not any(
+            marker in key_norm
+            for marker in (
+                "languages other than english",
+                "languages do you speak",
+                "languages spoken",
+                "other languages",
+            )
+        ):
+            continue
+        raw = _norm(str(value or ""))
+        if not raw or raw in {"none", "n a", "n/a", "english only", "only english"}:
+            return False
+        if any(
+            language in raw
+            for language in (
+                "mandarin",
+                "cantonese",
+                "chinese",
+                "spanish",
+                "french",
+                "japanese",
+                "korean",
+                "german",
+                "portuguese",
+            )
+        ):
+            return True
+        return False
+    native = _norm(str(profile.get("native_language") or ""))
+    if native in {"mandarin", "chinese", "cantonese"}:
+        return True
+    return None
+
+
+def _languages_other_than_english_live_choice(
+    field: Mapping[str, Any],
+    available: list[str],
+    profile: Mapping[str, Any],
+) -> str | None:
+    label = _norm(str(field.get("label") or ""))
+    if not any(
+        marker in label
+        for marker in ("languages other than english", "other languages")
+    ):
+        return None
+    has_other = _languages_other_than_english_answer(profile)
+    if has_other is None:
+        return None
+    wanted = "Yes" if has_other else "No"
+    for text in available:
+        if _norm(text) == wanted:
+            return text
+    if has_other:
+        for text in available:
+            if any(
+                marker in _norm(text)
+                for marker in ("mandarin", "cantonese", "chinese")
+            ):
+                return text
+    return None
+
+
+def _languages_other_than_english_checkbox_plan(
+    field: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not (field.get("options") or []):
+        return None
+    label = _norm(str(field.get("label") or ""))
+    if not any(
+        marker in label
+        for marker in ("languages other than english", "other languages")
+    ):
+        return None
+    has_other = _languages_other_than_english_answer(profile)
+    if has_other is None:
+        return None
+    wanted = "Yes" if has_other else "No"
+    option = next(
+        (
+            candidate
+            for candidate in field.get("options") or []
+            if _norm(_option_text(candidate)) == wanted
+        ),
+        None,
+    )
+    if option is None:
+        label_norm = _norm(str(field.get("label") or ""))
+        if "bonus" in label_norm or not field.get("required"):
+            return {
+                "action": "skip",
+                "reason": "approved language has no matching optional option",
+                "blocking": False,
+            }
+        return None
+    return {"action": "checkmany", "options": [option]}
+
+
 def _bachelor_graduation_year_choice(field: Mapping[str, Any], profile: Mapping[str, Any]) -> str | None:
     normalized = _norm(str(field.get("label") or ""))
     if "year did you graduate" not in normalized or "bachelor" not in normalized:
@@ -12435,6 +12776,23 @@ def _bachelor_graduation_year_choice(field: Mapping[str, Any], profile: Mapping[
         if year:
             return year
     return None
+
+
+def _most_recent_degree_year_choice(field: Mapping[str, Any], profile: Mapping[str, Any]) -> str | None:
+    """Return the graduation year for generic 'most recent degree' questions."""
+    normalized = _norm(str(field.get("label") or ""))
+    if "year" not in normalized or "degree" not in normalized:
+        return None
+    if not any(
+        marker in normalized
+        for marker in ("most recent degree", "most recent", "last degree", "latest degree")
+    ):
+        return None
+    entry = _highest_education_entry(profile)
+    if not entry:
+        return None
+    year = str(entry.get("end_year") or entry.get("end_date") or "").strip()
+    return year[:4] if year else None
 
 
 def _dynamic_combobox_fallback_choice(
@@ -12475,6 +12833,39 @@ def _dynamic_combobox_fallback_choice(
         state_choice = _live_state_option_choice(available, profile)
         if state_choice:
             return state_choice
+        language_choice = _languages_other_than_english_live_choice(
+            field,
+            available,
+            profile,
+        )
+        if language_choice:
+            return language_choice
+        live_location_commitment = _location_commitment_plan(
+            {
+                **field,
+                "options": [{"label": text, "value": text} for text in available],
+            },
+            profile,
+        )
+        if live_location_commitment is not None:
+            value = live_location_commitment.get("value")
+            if value is not None:
+                return str(value)
+        recent_degree_year = _most_recent_degree_year_choice(field, profile)
+        if recent_degree_year:
+            year_choice = next(
+                (text for text in available if _norm(text) == _norm(recent_degree_year)),
+                None,
+            )
+            if year_choice:
+                return year_choice
+        salary_field = dict(field)
+        salary_field["options"] = [
+            {"label": text, "value": text} for text in available
+        ]
+        salary_choice = _salary_range_option(salary_field, profile)
+        if salary_choice is not None:
+            return _option_text(salary_choice)
         if any(
             phrase in normalized_label
             for phrase in (
@@ -12596,9 +12987,10 @@ def _dynamic_combobox_fallback_choice(
                 field,
                 available,
                 requested_text,
+                profile,
             )
         if not choice:
-            choice = _department_combobox_fallback_choice(field, available)
+            choice = _department_combobox_fallback_choice(field, available, profile)
         if not choice:
             choice = next(
                 (
@@ -13208,6 +13600,53 @@ def _degree_field_question(label: str) -> str | None:
     return None
 
 
+def _education_date_other_option(
+    field: dict[str, Any], profile: dict[str, Any], answer: Any
+) -> Any | None:
+    """Return the genuine ``Other`` option for education date/year dropdowns.
+
+    Some ATS forms constrain graduation and school-start dates to a narrow
+    cohort window (for example only 2027 start dates) that cannot contain the
+    candidate's approved fact. When the form itself exposes ``Other``, that
+    truthful option is preferred over blocking the whole application.
+    """
+    normalized = _norm(str(field.get("label") or ""))
+    is_education_date_question = (
+        "graduation" in normalized
+        or "expected graduation" in normalized
+        or "graduate" in normalized
+        or (
+            "high school" in normalized
+            and any(marker in normalized for marker in ("year", "graduation", "graduate"))
+        )
+        or (
+            "start date" in normalized
+            and any(marker in normalized for marker in ("current school", "education"))
+        )
+    )
+    if not is_education_date_question:
+        return None
+    raw_answer = str(answer or "").strip()
+    if not raw_answer:
+        return None
+    other = next(
+        (
+            option
+            for option in field.get("options") or []
+            if _norm(_option_text(option)) == "other"
+        ),
+        None,
+    )
+    if other is None:
+        return None
+    for option in field.get("options") or []:
+        if option is other:
+            continue
+        if _option_matches(option, raw_answer):
+            return None
+    return other
+
+
 def _privacy_preserving_pronoun_option(field: dict[str, Any]) -> Any | None:
     if "pronouns" not in _norm(field.get("label") or ""):
         return None
@@ -13733,6 +14172,98 @@ def _metro_office_relocation_option(
     return None
 
 
+def _location_commitment_option(
+    field: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> Any | None:
+    """Choose a truthful option for location-commitment screening questions."""
+    options = list(field.get("options") or [])
+    if not options:
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    mentioned = _mentioned_metros(normalized)
+    if not mentioned:
+        return None
+    if not any(
+        marker in normalized
+        for marker in (
+            "able to work from",
+            "willing to work from",
+            "can you work from",
+            "does that work",
+            "does this work",
+            "does that work for you",
+            "are you able",
+            "willing to commit",
+            "able to commit",
+            "work onsite",
+            "work in our",
+            "in-person",
+            "in person",
+            "onsite",
+        )
+    ):
+        return None
+    open_to_location = (
+        _approved_all_us_locations(profile)
+        or _profile_relocation_willing(profile)
+    )
+    if not open_to_location:
+        return None
+    exact_yes = next(
+        (option for option in options if _norm(_option_text(option)) == "yes"),
+        None,
+    )
+    if exact_yes is not None:
+        return exact_yes
+    profile_location = _norm(
+        str(profile.get("location") or profile.get("city") or "")
+    )
+    for option in options:
+        text = _norm(_option_text(option))
+        if any(
+            marker in text
+            for marker in (
+                "not willing",
+                "unwilling",
+                "cannot",
+                "can t",
+                "won t",
+                "do not want",
+                "no or other",
+                "no,",
+            )
+        ):
+            continue
+        if "relocat" in text or "move" in text:
+            return option
+    for option in options:
+        text = _norm(_option_text(option))
+        if any(marker in text for marker in ("currently live", "currently based")):
+            if any(alias in profile_location for alias in mentioned):
+                return option
+            continue
+        if text.startswith("yes") or "yes" in text:
+            return option
+    return None
+
+
+def _location_commitment_plan(
+    field: Mapping[str, Any],
+    profile: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    option = _location_commitment_option(field, profile)
+    if option is None:
+        return None
+    if field.get("kind") == "buttongroup":
+        return {"action": "buttonclick", "option": option}
+    if field.get("role") == "combobox" or field.get("kind") == "single":
+        return {"action": "combobox", "value": _option_text(option)}
+    if field.get("tag") == "select":
+        return {"action": "select", "value": _option_text(option)}
+    return {"action": "check", "option": option}
+
+
 def _mentioned_metros(text: str) -> list[str]:
     aliases = {
         "san francisco": ["san francisco", "bay area"],
@@ -13860,6 +14391,9 @@ def _plan_field(
     yes_no_plan = _yes_no_screening_answer(field, profile, answer_label)
     if yes_no_plan is not None:
         return yes_no_plan
+    location_commitment = _location_commitment_plan(field, profile)
+    if location_commitment is not None:
+        return location_commitment
     if _is_honeypot_field(mapping_label):
         return {"action": "skip", "reason": "honeypot field", "blocking": False}
     if _requires_external_application_portal(" ".join([label, mapping_label])):
@@ -14112,8 +14646,24 @@ def _plan_field(
                 "defer_live_options": True,
                 "sensitive": sensitive,
             }
+        education_date_other = _education_date_other_option(field, profile, answer)
+        if education_date_other is not None:
+            return {
+                "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                "option": (
+                    {"label": _option_text(education_date_other), "value": _option_text(education_date_other)}
+                    if not isinstance(education_date_other, dict)
+                    else education_date_other
+                ),
+            }
         return {"action": "skip", "reason": "no option matches saved answer", "sensitive": sensitive}
     if field.get("kind") == "checkboxgroup":
+        language_group_plan = _languages_other_than_english_checkbox_plan(
+            field,
+            profile,
+        )
+        if language_group_plan is not None:
+            return language_group_plan
         palantir_plan = _palantir_checkbox_group_plan(field, profile)
         if palantir_plan is not None:
             return palantir_plan
@@ -14156,7 +14706,12 @@ def _plan_field(
             if isinstance(generalized, str):
                 answer = generalized
         if answer is None:
-            return {"action": "skip", "reason": "checkbox group needs saved answer / manual selection", "sensitive": sensitive}
+            return {
+                "action": "skip",
+                "reason": "checkbox group needs saved answer / manual selection",
+                "sensitive": sensitive,
+                "blocking": bool(required),
+            }
         matches = _matching_options(field, answer, profile)
         if matches:
             return {"action": "checkmany", "options": matches}
@@ -14176,7 +14731,12 @@ def _plan_field(
                 "sensitive": sensitive,
                 "blocking": False,
             }
-        return {"action": "skip", "reason": "no checkbox option matches saved answer", "sensitive": sensitive}
+        return {
+            "action": "skip",
+            "reason": "no checkbox option matches saved answer",
+            "sensitive": sensitive,
+            "blocking": bool(required),
+        }
     if field.get("type") == "file":
         combined = _norm(" ".join(str(field.get(key) or "") for key in ["label", "id", "name"]))
         cover_letter_path = cover_letter_file or profile.get("cover_letter_file")
@@ -14231,6 +14791,9 @@ def _plan_field(
         bachelor_year_choice = _bachelor_graduation_year_choice(field, profile)
         if bachelor_year_choice is not None:
             answer = bachelor_year_choice
+        most_recent_year_choice = _most_recent_degree_year_choice(field, profile)
+        if most_recent_year_choice is not None:
+            answer = most_recent_year_choice
         if answer is None and ashby_edu_subfield == "school" and edu_entry is not None:
             answer = str(edu_entry.get("school") or "").strip() or None
         if answer is None and preferred_office is not None:
@@ -14485,6 +15048,9 @@ def _plan_field(
         bachelor_year_choice = _bachelor_graduation_year_choice(field, profile)
         if bachelor_year_choice is not None:
             answer = bachelor_year_choice
+        most_recent_year_choice = _most_recent_degree_year_choice(field, profile)
+        if most_recent_year_choice is not None:
+            answer = most_recent_year_choice
         if answer is None:
             answer = _match_sensitive(label, profile) if sensitive else _find_answer(label, profile.get("answers") or {})
         if answer is None and not sensitive:
@@ -14524,6 +15090,9 @@ def _plan_field(
             )
             if other:
                 return {"action": "select", "value": other}
+        education_date_other = _education_date_other_option(field, profile, answer)
+        if education_date_other is not None:
+            return {"action": "select", "value": _option_text(education_date_other)}
         source_matches = _matching_options(field, answer, profile)
         if source_matches:
             guarded = _guard_local_residency_option(field, source_matches[0], profile, label)
@@ -20305,8 +20874,7 @@ def _detect_ats(url: str | None) -> str:
 
 def _discover_captcha(page) -> dict[str, Any] | None:
     try:
-        return page.evaluate(
-            """() => {
+        script = """() => {
               const attr = (node, name) => node && node.getAttribute ? node.getAttribute(name) : "";
               const visibleCaptchaFrame = (frame) => {
                 if (!frame || !frame.src) return false;
@@ -20463,12 +21031,19 @@ def _discover_captcha(page) -> dict[str, Any] | None:
                 const ghKind = ghEndpoint.includes("recaptcha/enterprise")
                   ? "recaptchaV3Enterprise"
                   : "recaptchaV3";
+                let ghApiDomain = "";
+                try {
+                  ghApiDomain = new URL(ghEndpoint).hostname || "";
+                } catch (e) {
+                  ghApiDomain = "";
+                }
                 return {
                   kind: ghKind,
                   websiteURL: currentURL,
                   websiteKey: greenhouseEnterpriseKey,
                   pageAction: "apply_to_job",
-                  minScore: 0.7,
+                  minScore: __JOB_AGENT_GREENHOUSE_MIN_SCORE__,
+                  apiDomain: ghApiDomain,
                   userAgent: navigator.userAgent,
                 };
               }
@@ -20509,7 +21084,11 @@ def _discover_captcha(page) -> dict[str, Any] | None:
               };
               return null;
             }"""
+        script = script.replace(
+            "__JOB_AGENT_GREENHOUSE_MIN_SCORE__",
+            repr(_greenhouse_captcha_min_score()),
         )
+        return page.evaluate(script)
     except Exception:
         return None
 
@@ -20582,6 +21161,7 @@ def _capmonster_task_for(challenge: dict[str, Any] | None) -> dict[str, Any] | N
             page_action=str(challenge.get("pageAction") or "verify"),
             min_score=min_score,
             enterprise=challenge.get("kind") == "recaptchaV3Enterprise",
+            api_domain=str(challenge.get("apiDomain") or "") or None,
             user_agent=str(challenge.get("userAgent") or "") or None,
         )
     if challenge.get("kind") == "funcaptcha":
@@ -20678,6 +21258,11 @@ def _capmonster_tasks_for(challenge: dict[str, Any] | None) -> list[dict[str, An
         alternate = dict(task)
         alternate["type"] = "TurnstileTaskProxyless"
         tasks.append(alternate)
+    if challenge.get("kind") == "recaptchaV3Enterprise" and task.get("type") == "RecaptchaV3EnterpriseTask":
+        alternate = dict(task)
+        alternate["type"] = "RecaptchaV3TaskProxyless"
+        alternate["isEnterprise"] = True
+        tasks.append(alternate)
     return tasks
 
 
@@ -20694,6 +21279,17 @@ def _parse_capmonster_min_score() -> float | None:
         score = float(raw)
     except ValueError:
         return 0.3
+    return min(0.9, max(0.1, score))
+
+
+def _greenhouse_captcha_min_score() -> float:
+    raw = os.getenv("CAPMONSTER_GREENHOUSE_MIN_SCORE")
+    if raw is None or raw.strip() == "":
+        return 0.7
+    try:
+        score = float(raw)
+    except ValueError:
+        return 0.7
     return min(0.9, max(0.1, score))
 
 
@@ -21043,12 +21639,15 @@ def _solve_captcha_if_configured(page) -> dict[str, str]:
             raise CapMonsterError("; ".join(errors) or "CapMonster did not return a solution")
         injected = _inject_captcha_solution(page, challenge, solution)
         detail = _captcha_solution_detail(challenge, api_ready=api_ready)
-        if solution.get("userAgent"):
-            detail += " (solution userAgent returned)"
-        return {
+        result: dict[str, str] = {
             "status": "solved" if injected else "solution_not_injected",
             "detail": detail,
         }
+        solution_user_agent = str(solution.get("userAgent") or "").strip()
+        if solution_user_agent:
+            result["user_agent"] = solution_user_agent
+            result["detail"] = detail + " (solution userAgent returned)"
+        return result
     except (CapMonsterError, TimeoutError) as exc:
         if challenge.get("kind") == "hcaptcha":
             vision_result = _solve_hcaptcha_with_vision(page)
@@ -21059,6 +21658,47 @@ def _solve_captcha_if_configured(page) -> dict[str, str]:
                 "detail": f"CapMonster token API: {exc}; vision fallback: {vision_result['detail']}",
             }
         return {"status": "error", "detail": str(exc)}
+
+
+def _apply_captcha_user_agent(page, captcha_result: dict[str, Any] | None) -> bool:
+    """Make subsequent page requests carry the UA CapMonster bound the token to.
+
+    CapMonster includes a `userAgent` in most token task solutions and requires
+    submitting that token with the exact UA, otherwise the site rejects it.
+    The override is applied at the network layer so the page's own fetch or
+    form POST carries the UA; a later solution without a UA restores the
+    browser's original headers.
+    """
+    user_agent = str((captcha_result or {}).get("user_agent") or "").strip()
+    if not user_agent:
+        holder = getattr(page, "_job_agent_captcha_ua_holder", None)
+        if holder is not None:
+            holder["value"] = None
+        return False
+    holder = getattr(page, "_job_agent_captcha_ua_holder", None)
+    if holder is None:
+        holder = {"value": user_agent}
+
+        def route_handler(route) -> None:
+            headers = dict(route.request.headers)
+            active_ua = holder["value"]
+            if active_ua and headers.get("user-agent") != active_ua:
+                headers["user-agent"] = active_ua
+                route.continue_(headers=headers)
+            else:
+                route.continue_()
+
+        try:
+            page.route("**/*", route_handler)
+        except Exception:
+            return False
+        try:
+            page._job_agent_captcha_ua_holder = holder
+        except Exception:
+            pass
+    else:
+        holder["value"] = user_agent
+    return True
 
 
 def _captcha_vision_enabled() -> bool:

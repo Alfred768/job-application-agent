@@ -128,6 +128,53 @@ def test_resolver_returns_short_text_for_free_text():
     assert resolver.answer_for_field(field, profile, label="Describe your experience") == "I have built production AI agents."
 
 
+def test_resolver_free_text_prompt_includes_bounded_resume_excerpt():
+    fake = FakeLLM('{"answer": "I rebuilt a flaky evaluation pipeline and added drift monitoring."}')
+    resolver = LLMAnswerResolver(llm=fake, max_calls=5)
+    resume_text = (
+        "Work History\\nAI/ML Engineer Intern at DHL Express\\nBuilt an XGBoost churn "
+        "pipeline and added MLflow drift monitoring after a regression.\n"
+    ) * 200
+
+    field = {"kind": "single", "tag": "textarea", "label": "Describe a failure you overcame"}
+    profile = {
+        "target_company": "Acme",
+        "target_title": "SDE",
+        "resume_text": resume_text,
+    }
+
+    answer = resolver.answer_for_field(field, profile, label="Describe a failure you overcame")
+
+    assert answer == "I rebuilt a flaky evaluation pipeline and added drift monitoring."
+    prompt = fake.calls[0][1]["content"]
+    assert "Resume excerpt:" in prompt
+    assert "XGBoost churn" in prompt
+    assert "resume excerpt" in prompt
+    assert len(resume_text) > 2500
+    assert resume_text not in prompt
+
+
+def test_resolver_option_prompt_includes_resume_excerpt():
+    fake = FakeLLM('{"answer": "ML Infrastructure"}')
+    resolver = LLMAnswerResolver(llm=fake, max_calls=5)
+
+    field = {
+        "kind": "combobox",
+        "label": "Which team best matches your background?",
+        "options": ["Product Design", "ML Infrastructure", "Sales Engineering"],
+    }
+    profile = {
+        "target_company": "Acme",
+        "target_title": "SDE",
+        "resume_text": "Built LangChain multi-agent evaluation systems.",
+    }
+
+    assert resolver.answer_for_field(field, profile, label="Which team best matches your background?") == "ML Infrastructure"
+    prompt = fake.calls[0][1]["content"]
+    assert "Resume excerpt:" in prompt
+    assert "LangChain" in prompt
+
+
 def test_resolver_rejects_free_text_when_validator_denies():
     fake = FakeLLM('{"answer": "I built AWS data platforms."}')
     resolver = LLMAnswerResolver(

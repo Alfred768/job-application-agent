@@ -704,3 +704,83 @@ def test_dynamic_combobox_derives_grounded_binary_answer_before_llm(monkeypatch)
         "",
         profile,
     ) == "Yes"
+
+
+def test_generalized_screening_answer_never_generates_for_sensitive_fields():
+    from job_agent.python_runtime import _generalized_screening_answer
+
+    fake_llm = FakeLLM('{"answer": "No"}')
+    resolver = LLMAnswerResolver(llm=fake_llm, max_calls=5)
+    set_llm_answer_resolver(resolver)
+    field = {
+        "kind": "combobox",
+        "label": "Do you have any first-degree relatives employed here?",
+        "options": ["Yes", "No"],
+    }
+    profile = {
+        "target_company": "Acme",
+        "target_title": "SDE",
+        "resume_text": "Built ML systems.",
+    }
+
+    assert _generalized_screening_answer(
+        field,
+        profile,
+        field["label"],
+        sensitive=True,
+    ) is None
+    assert fake_llm.calls == []
+
+
+def test_dynamic_combobox_office_commitment_covers_come_into_times_per_week():
+    from job_agent.python_runtime import _dynamic_combobox_fallback_choice
+
+    field = {
+        "role": "combobox",
+        "label": (
+            "This role is in our Boston, MA office. Will you come into the Boston "
+            "office five (5) times per week for this role?"
+        ),
+        "required": True,
+    }
+    profile = {
+        "screening_answer_rules": [
+            {
+                "patterns": ["come into the office", "times per week"],
+                "answer": "Yes",
+            }
+        ],
+        "sensitive_answers": {},
+    }
+
+    assert _dynamic_combobox_fallback_choice(
+        field,
+        ["Yes", "No"],
+        "",
+        profile,
+    ) == "Yes"
+
+
+def test_office_location_combobox_fallback_uses_all_us_approval():
+    from job_agent.python_runtime import _office_location_combobox_fallback_choice
+
+    field = {
+        "role": "combobox",
+        "label": "Which office location do you prefer for this role?",
+        "required": True,
+    }
+    profile = {"open_to_all_us_locations": True}
+
+    assert _office_location_combobox_fallback_choice(
+        field,
+        ["Redwood City, CA", "Tysons, VA"],
+        "New York",
+        profile,
+    ) == "Redwood City, CA"
+
+    assert _office_location_combobox_fallback_choice(
+        field,
+        ["Any of the above locations", "Redwood City, CA"],
+        "New York",
+        profile,
+    ) == "Any of the above locations"

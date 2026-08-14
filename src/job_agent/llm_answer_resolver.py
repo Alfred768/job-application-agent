@@ -9,11 +9,12 @@ when a question has no saved profile answer:
    "conflict of interest"), so one rule generalizes across every employer.
    Because the user writes the rule, the answer stays truthful and approved.
 2. ``LLMAnswerResolver`` — a guarded LLM fallback that answers *non-sensitive*
-   screening questions from the candidate's own profile facts. It is never
-   consulted for sensitive fields (those still require an approved
-   sensitive-KB answer), never for user-authored/no-AI questions, and it can
-   only pick from the options a control actually offers (validated locally).
-   Any failure degrades to the original blocking-review path.
+   screening questions from the candidate's own profile facts and a bounded
+   excerpt of the candidate's resume. It is never consulted for sensitive
+   fields (those still require an approved sensitive-KB answer), never for
+   user-authored/no-AI questions, and it can only pick from the options a
+   control actually offers (validated locally). Any failure degrades to the
+   original blocking-review path.
 
 The LLM layer is enabled when ``OPENAI_API_KEY`` is configured; set
 ``JOB_AGENT_LLM_ANSWERS=0`` to disable it. ``JOB_AGENT_LLM_ANSWERS_MAX_CALLS``
@@ -211,22 +212,24 @@ class LLMAnswerResolver:
             if kind in _MULTI_SELECT_KINDS:
                 instruction = (
                     "Choose EVERY option that truthfully applies to the candidate "
-                    "from the candidate facts below, including stated skills, "
-                    "projects, education, and preferences (usually just one). "
+                    "from the candidate facts and resume excerpt below, including "
+                    "stated skills, projects, education, and preferences (usually "
+                    "just one). "
                     'Reply with ONLY JSON: {"answers": ["<exact option text>", ...]}.'
                 )
             else:
                 instruction = (
                     "Choose the single option that best matches the candidate from "
-                    "the candidate facts below, including stated skills, projects, "
-                    "education, and preferences. "
+                    "the candidate facts and resume excerpt below, including stated "
+                    "skills, projects, education, and preferences. "
                     'Reply with ONLY JSON: {"answer": "<exact option text>"}.'
                 )
             prompt = (
                 "You are completing a job application on behalf of the candidate. "
-                "Choose the most truthful option using the candidate facts below. "
-                "Never invent employment history, credentials, citizenship, "
-                "clearance, salary, or work authorization facts. "
+                "Choose the most truthful option using the candidate facts and "
+                "resume excerpt below. Never invent employment history, credentials, "
+                "citizenship, clearance, salary, or work authorization facts beyond "
+                "what the profile and resume support. "
                 "If no option can be supported, reply with "
                 '{"answer": ""} (or {"answers": []}).\n\n'
                 f"Company: {company}\nRole: {title}\n\n"
@@ -239,15 +242,17 @@ class LLMAnswerResolver:
             prompt = (
                 "You are completing a job application on behalf of the candidate. "
                 "Write a concise, truthful first-person answer to the application "
-                "question below. Base your answer on the candidate facts provided, "
-                "including stated skills, projects, education, and preferences; "
-                "preference, opinion, and open-ended questions should get a "
-                "reasonable answer grounded in those facts. Never invent "
+                "question below. Base your answer on the candidate facts and resume "
+                "excerpt provided, including stated skills, projects, education, and "
+                "preferences; open-ended questions such as hobbies, essays, personal "
+                "projects, and failure stories should get a reasonable, grounded "
+                "answer from the candidate's own resume and profile. Never invent "
                 "employment history, credentials, citizenship, clearance, salary, "
-                "or work authorization facts. If the question asks you to type a "
-                "specific verification code or word, reply with exactly that code "
-                "or word. Keep the answer under 60 words. Only reply with an empty "
-                'answer when no truthful response is possible. '
+                "or work authorization facts beyond what the profile and resume "
+                "support. If the question asks you to type a specific verification "
+                "code or word, reply with exactly that code or word. Keep the answer "
+                "under 60 words. Only reply with an empty answer when no truthful "
+                "response is possible. "
                 'Reply with ONLY JSON: {"answer": "..."}.\n\n'
                 f"Company: {company}\nRole: {title}\n\n"
                 f"Application question: {question}\n\n"

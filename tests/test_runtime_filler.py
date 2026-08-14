@@ -580,6 +580,12 @@ def test_runtime_autofill_script_includes_optional_capmonster_support():
     assert "RecaptchaV3TaskProxyless" in script
     assert "RecaptchaV2EnterpriseTask" in script
     assert "RecaptchaV3EnterpriseTask" in script
+    assert "RecaptchaV3TaskProxyless" in script
+    assert "isEnterprise: true" in script
+    assert "apiDomain" in script
+    assert "greenhouse: true" in script
+    assert "CAPMONSTER_GREENHOUSE_MIN_SCORE" in script
+    assert "greenhouseMinScore" in script
     assert "FunCaptchaTask" in script
     assert "GeeTestTask" in script
     assert "DataDome" in script
@@ -592,10 +598,25 @@ def test_runtime_autofill_script_includes_optional_capmonster_support():
     assert "newContext(browserContextOptions())" in script
     assert "waitBeforeSubmit(page)" in script
     assert "solution userAgent returned" in script
+    assert "applyCaptchaUserAgent" in script
     assert "repairInvalidRequiredFields" in script
     assert "Autofill repair field: " in script
     assert "graduationDateAliases" in script
     assert "Already graduated" in script
+
+
+def test_runtime_autofill_script_applies_capmonster_user_agent_to_submission_requests():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "async function applyCaptchaUserAgent(page, captchaResult)" in script
+    assert "if (solution.userAgent) result.userAgent = solution.userAgent;" in script
+    assert "page._jobAgentCaptchaUserAgent" in script
+    assert 'const headers = route.request().headers();' in script
+    assert 'headers["user-agent"] = active;' in script
+    assert "return route.continue({ headers });" in script
+    assert "await applyCaptchaUserAgent(page, captchaResult);" in script
+    assert "await applyCaptchaUserAgent(page, retryCaptcha);" in script
+    assert "await applyCaptchaUserAgent(page, verificationCaptcha);" in script
 
 
 def test_runtime_autofill_script_includes_live_screening_answer_rules():
