@@ -447,10 +447,10 @@ def run_runtime_payload(
     try:
         _FILL_TIME_BUDGET_SECONDS[0] = max(
             30.0,
-            float(os.getenv("JOB_AGENT_FILL_TIME_BUDGET_SECONDS") or "240"),
+            float(os.getenv("JOB_AGENT_FILL_TIME_BUDGET_SECONDS") or "600"),
         )
     except (TypeError, ValueError):
-        _FILL_TIME_BUDGET_SECONDS[0] = 240.0
+        _FILL_TIME_BUDGET_SECONDS[0] = 600.0
 
     def _check_runtime_deadline() -> None:
         if watchdog_deadline_seconds and watchdog_deadline_seconds > 0:
@@ -882,7 +882,7 @@ def run_runtime_payload(
                     )
                 _extend_unique_filled(all_filled, page_filled)
                 all_review.extend(result["review"])
-                if any(item.get("blocking", True) for item in result["review"]):
+                if _review_blocks_navigation(result["review"]):
                     review_artifact = _write_review_evidence(page, payload, result["review"])
                     if review_artifact:
                         print(f"Review evidence: {review_artifact}")
@@ -1095,8 +1095,9 @@ def run_runtime_payload(
             _install_application_navigation_guard(page, application_url)
             all_review = _filter_successful_readback_reviews(all_review, all_filled)
             blocking_review = [item for item in all_review if item.get("blocking", True)]
+            submit_blocking_review = _filter_field_blocking_review(blocking_review)
             captcha_result = {"status": "skipped", "detail": "blocking review fields present"}
-            if not blocking_review:
+            if not submit_blocking_review:
                 captcha_result = _solve_captcha_if_configured(page)
                 _apply_captcha_user_agent(page, captcha_result)
             submit = _find_button(page, kind="submit")
@@ -1146,7 +1147,7 @@ def run_runtime_payload(
                 print(f"Review evidence: {review_artifact}")
             if (
                 _submit_complete_enabled()
-                and not blocking_review
+                and not submit_blocking_review
                 and submit
                 and _captcha_result_blocks_submission(captcha_result)
             ):
@@ -1167,7 +1168,7 @@ def run_runtime_payload(
                     if artifact:
                         print(f"Submission evidence: {artifact}")
                     return 0
-            if _submit_complete_enabled() and not blocking_review and submit:
+            if _submit_complete_enabled() and not submit_blocking_review and submit:
                 verification_requested_at_ns = verification_window_started_at_ns
                 try:
                     _wait_before_submit(page, skip_delay=(captcha_result.get('status') == 'solved'))
@@ -1470,6 +1471,12 @@ def _runtime_submit_policy_context(
         or payload.get("resumeSourceDir")
     )
     resume_verified = bool(payload.get("resumeFile")) or not required_resume
+    effective_review = _filter_field_blocking_review(blocking_review)
+    ignored_fields = (
+        _field_blocking_review_items(blocking_review)
+        if _force_submit_enabled()
+        else []
+    )
     return {
         "phase": "final_submission",
         "application_url": application_url,
@@ -1480,13 +1487,21 @@ def _runtime_submit_policy_context(
                 "label": str(item.get("label") or ""),
                 "reason": str(item.get("reason") or ""),
             }
-            for item in blocking_review
+            for item in effective_review
             if item.get("blocking", True)
         ],
         "unapproved_sensitive_fields": [
             str(item.get("label") or "")
-            for item in blocking_review
+            for item in effective_review
             if item.get("sensitive")
+        ],
+        "force_ignored_fields": [
+            {
+                "label": str(item.get("label") or ""),
+                "reason": str(item.get("reason") or ""),
+                "sensitive": bool(item.get("sensitive", False)),
+            }
+            for item in ignored_fields
         ],
         "resume_verified": resume_verified,
         "confirmation_required": True,
@@ -1502,6 +1517,130 @@ def run_runtime_script(script_path: str | Path) -> int:
 def _submit_complete_enabled() -> bool:
     raw = str(os.getenv("JOB_AGENT_SUBMIT_COMPLETE") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
+
+
+def _aggressive_fallback_enabled() -> bool:
+    raw = str(os.getenv("JOB_AGENT_AGGRESSIVE_OPTION_FALLBACK") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _force_submit_enabled() -> bool:
+    raw = str(os.getenv("JOB_AGENT_FORCE_SUBMIT") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _llm_open_ended_enabled() -> bool:
+    raw = str(os.getenv("JOB_AGENT_LLM_OPEN_ENDED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+_FIELD_BLOCKING_REASON_MARKERS = (
+    "browser reports field as invalid",
+    "required field remains empty after fill",
+    "no option matches saved answer",
+    "no checkbox option matches saved answer",
+    "no matching option / answer",
+    "no approved answer for screening question",
+    "needs saved answer / manual selection",
+    "no combobox option matches saved answer",
+    "no button dropdown option matches saved answer",
+    "combobox made no progress before field repair deadline",
+    "unmapped field",
+    "no grounded answer could be generated from live",
+)
+
+
+def _is_field_blocking_reason(reason: str) -> bool:
+    normalized = _norm(str(reason or ""))
+    if not normalized:
+        return False
+    if any(_norm(marker) in normalized for marker in _FIELD_BLOCKING_REASON_MARKERS):
+        return True
+    # A no-AI/essay field is only ignorable when the bounded LLM generator is
+    # enabled; otherwise leaving it blank would submit a missing answer.
+    if (
+        normalized == "question requires user-authored answer / no ai assistance"
+        and _llm_open_ended_enabled()
+    ):
+        return True
+    return False
+
+
+def _field_blocking_review_items(
+    review: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [item for item in review if _is_field_blocking_reason(item.get("reason", ""))]
+
+
+def _filter_field_blocking_review(
+    review: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the review items that must still block submission.
+
+    With force-submit enabled, only field-filling blockers are ignored;
+    account, captcha, anti-spam and other terminal states keep their blocking
+    flag unchanged.  When the flag is off, this returns ``review`` untouched so
+    the conservative gate remains the default.
+    """
+    if not _force_submit_enabled():
+        return review
+    return [item for item in review if not _is_field_blocking_reason(item.get("reason", ""))]
+
+
+def _review_blocks_navigation(review: list[dict[str, Any]]) -> bool:
+    """Whether a page must stop advancing because of an unresolved review item.
+
+    Force-submit relaxes only field-filling blockers so the agent can attempt
+    the next page (the ATS itself remains the authority on whether it will
+    accept the incomplete form).  Account, captcha, anti-spam and other
+    terminal states always stop navigation.
+    """
+    blocking = [item for item in review if item.get("blocking", True)]
+    if not blocking:
+        return False
+    if _force_submit_enabled():
+        return any(
+            not _is_field_blocking_reason(item.get("reason", ""))
+            for item in blocking
+        )
+    return True
+
+
+def _aggressive_option_match(options: list[Any], answer: Any) -> str | None:
+    """Pick the closest available option even below the normal confidence floor.
+
+    This reuses :func:`_best_option_match` with a relaxed threshold rather than
+    duplicating its scoring, so the polarity, placeholder, alias and numeric
+    rules stay identical to the conservative path.  A genuine tie still
+    resolves to ``None`` because there is no single "most likely" option.
+    """
+    raw_answer = str(answer or "").strip()
+    if not raw_answer or not options:
+        return None
+    best = _best_option_match(options, answer, threshold=10)
+    if best:
+        return best
+    # Deterministic binary tiebreak: only map an explicit Yes/No polarity to a
+    # literal Yes/No/True/False option.  Prose options are never force-mapped.
+    polarity = _binary_answer_polarity(raw_answer)
+    if polarity is None:
+        return None
+    wanted = {"yes", "true"} if polarity else {"no", "false"}
+    for opt in options:
+        if _norm(_option_text(opt)) in wanted:
+            return _option_text(opt)
+    return None
+
+
+def _aggressive_option_object(options: list[Any], answer: Any) -> Any | None:
+    """Return the original option object for an aggressive match, or a dict."""
+    text = _aggressive_option_match(options, answer)
+    if not text:
+        return None
+    for option in options:
+        if _norm(_option_text(option)) == _norm(text):
+            return option
+    return {"label": text, "value": text}
 
 
 def _parse_viewport(raw: str | None) -> dict[str, int]:
@@ -2648,10 +2787,10 @@ def _candidate_fact_family(label: str) -> str | None:
         return None
     if any(
         marker in normalized
-        for marker in ("sms", "text message", "text me", "via text", "text updates", "whatsapp")
+        for marker in ("sms", "text message", "text me", "via text", "text updates", "whatsapp", "text notification")
     ) and any(
         marker in normalized
-        for marker in ("consent", "agree", "contact", "receive", "updates", "communications", "ok")
+        for marker in ("consent", "agree", "contact", "receive", "updates", "communications", "ok", "notification")
     ):
         return "communication_consent"
     if any(marker in normalized for marker in ("on site", "onsite", "in office", "in-office", "office", "hq")) and any(
@@ -2682,6 +2821,41 @@ def _candidate_fact_family(label: str) -> str | None:
         return "product_use"
     if any(marker in normalized for marker in ("how familiar", "familiarity")):
         return "familiarity"
+    if any(
+        marker in normalized
+        for marker in (
+            "ai to fabricate",
+            "misrepresent",
+            "disqualification",
+            "generated",
+            "edited",
+            "supplemented",
+            "ai tools",
+            "own work",
+            "own words",
+            "artificial intelligence",
+            "ai generated",
+            "ai-assisted",
+            "ai assisted",
+            "large language model",
+            "llm",
+        )
+    ) and any(
+        marker in normalized
+        for marker in (
+            "application",
+            "interview",
+            "information",
+            "materials",
+            "responses",
+            "answer",
+            "work",
+            "qualifications",
+            "experience",
+            "skills",
+        )
+    ):
+        return "ai_usage"
     return None
 
 
@@ -3032,7 +3206,8 @@ def _explicit_candidate_fact_answer(label: str, profile: dict[str, Any]) -> str 
             return str(structured)
     if "experience" in normalized:
         if (
-            "how many years of professional experience" in normalized
+            "how many years of" in normalized
+            and "professional experience" in normalized
             and "excluding internships" in normalized
         ):
             structured = _zero_based_professional_experience_range_answer(profile)
@@ -3138,10 +3313,24 @@ def _family_employment_negative_answer(label: str, profile: Mapping[str, Any]) -
 
 def _label_is_office_commitment(label: str) -> bool:
     normalized = _norm(label)
-    return any(
+    mentions_office = any(
         phrase in normalized
         for phrase in ("office", "hq", "in office", "in person", "on site", "onsite", "commute")
-    ) and any(
+    )
+    weekday_schedule = any(
+        phrase in normalized
+        for phrase in (
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "monday through friday",
+            "monday to friday",
+            "mon fri",
+        )
+    )
+    commitment_language = any(
         phrase in normalized
         for phrase in (
             "day per week",
@@ -3172,6 +3361,7 @@ def _label_is_office_commitment(label: str) -> bool:
             "come to our",
         )
     )
+    return mentions_office and (weekday_schedule or commitment_language)
 
 
 def _approved_office_commitment_answer(profile: Mapping[str, Any]) -> str | None:
@@ -3207,7 +3397,7 @@ def _approved_office_commitment_answer(profile: Mapping[str, Any]) -> str | None
             for pattern in rule.get("patterns") or []
         ):
             return answer
-    for key in ("office",):
+    for key in ("office", "office_hybrid_us"):
         approved = _approved_sensitive_entry_answer(profile, key)
         if approved is not None:
             return str(approved)
@@ -4254,6 +4444,16 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
         for marker in ("current age", "your age", "age are you", "age bracket", "age group", "what is your age")
     ):
         return age_bucket
+    if "over the age" in normalized and "18" in normalized:
+        raw_birthday = str(profile.get("birthday") or profile.get("birth_date") or "").strip()
+        if not raw_birthday:
+            return None
+        try:
+            birth_year = int(re.search(r"(?:19|20)\d{2}", raw_birthday).group(0))
+        except (AttributeError, ValueError):
+            return None
+        current_year = date.today().year
+        return "Yes" if current_year - birth_year >= 18 else "No"
     if _requires_explicit_candidate_fact(label):
         explicit = _explicit_candidate_fact_answer(label, profile)
         if explicit is not None:
@@ -4315,6 +4515,47 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
                 return "PhD"
             return "Other" if cs_entries else None
         return "Yes" if cs_entries else "No"
+    if (
+        "hold" in normalized
+        and any(
+            marker in normalized
+            for marker in ("master s", "phd", "doctorate", "doctoral")
+        )
+    ):
+        highest = _highest_education_entry(profile) or {}
+        degree_text = _norm(
+            " ".join(
+                str(highest.get(key) or "")
+                for key in ("degree", "field")
+            )
+        )
+        if not degree_text:
+            return None
+        related_technical = any(
+            marker in degree_text
+            for marker in (
+                "computer science",
+                "computer engineering",
+                "software",
+                "engineering",
+                "mathematics",
+                "math",
+                "data science",
+                "applied mathematics",
+                "computational science",
+                "artificial intelligence",
+                "machine learning",
+            )
+        )
+        if not related_technical:
+            return None
+        if "phd" in degree_text or "doctor" in degree_text:
+            return "Yes"
+        if "master" in degree_text and any(
+            marker in normalized for marker in ("phd", "doctorate", "doctoral")
+        ):
+            return "Yes"
+        return "Yes" if "master" in degree_text and "bachelor" not in degree_text else None
     if "which part of the bay area" in normalized and "based" in normalized:
         location = str(profile.get("location") or "Jersey City, NJ, USA")
         return (
@@ -4654,10 +4895,11 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
             or ("hybrid schedule" in normalized and "in office" in normalized)
             or ("hybrid schedule" in normalized and "in-office" in normalized)
             or "hybrid policy" in normalized
+            or ("hybrid schedule" in normalized and "days per week" in normalized)
+            or ("hybrid schedule" in normalized and "days a week" in normalized)
         )
-        and ("office" in normalized or "in person" in normalized or "hybrid policy" in normalized)
     ):
-        office_answer = (
+        office_answer = _approved_office_commitment_answer(profile) or (
             answers.get("Are you open to working in-person in one of our offices 25% of the time?")
             or answers.get("Are you able to commit to working from one of our offices on Anchor Days each week?")
             or answers.get("Are you open to a hybrid schedule with in-office days on Monday, Wednesday, and Friday?")
@@ -5106,7 +5348,8 @@ def _auto_answer(label: str, profile: dict[str, Any], sensitive: bool = False) -
     if biopharma_compliance is not None:
         return biopharma_compliance
     if (
-        "how many years of professional experience" in normalized
+        "how many years of" in normalized
+        and "professional experience" in normalized
         and "excluding internships" in normalized
     ):
         return _zero_based_professional_experience_range_answer(profile)
@@ -5859,6 +6102,58 @@ def _legal_terms_consent_answer(label: str, profile: dict[str, Any]) -> str | No
             or "own work and experience" in normalized
         )
     )
+    is_ai_generated_content_attestation = (
+        any(
+            re.search(rf"\b{re.escape(marker)}\b", normalized) is not None
+            for marker in (
+                "ai",
+                "llm",
+            )
+        )
+        and any(marker in normalized for marker in (
+            "generated",
+            "fabricate",
+            "misrepresent",
+            "supplemented",
+            "edited",
+            "own work",
+            "own words",
+        ))
+        or any(marker in normalized for marker in (
+            "artificial intelligence",
+            "large language model",
+            "chatgpt",
+            "claude",
+            "gemini",
+        ))
+    ) and any(
+        marker in normalized
+        for marker in (
+            "application",
+            "interview",
+            "information",
+            "materials",
+            "responses",
+            "work",
+            "experience",
+            "qualifications",
+            "skills",
+        )
+    ) and any(
+        re.search(rf"\b{re.escape(marker)}\b", normalized)
+        for marker in (
+            "confirm",
+            "certify",
+            "represent",
+            "warrant",
+            "understand",
+            "agree",
+            "acknowledge",
+            "submit",
+            "penalty",
+            "disqualification",
+        )
+    )
     is_privacy_consent = (
         (
             "personal data" in normalized
@@ -5912,6 +6207,7 @@ def _legal_terms_consent_answer(label: str, profile: dict[str, Any]) -> str | No
         or is_candidate_ai_responsible_use_ack
         or is_affirmation_consent
         or is_salary_acknowledgement
+        or is_ai_generated_content_attestation
     ):
         return None
     if is_salary_acknowledgement:
@@ -5927,6 +6223,15 @@ def _legal_terms_consent_answer(label: str, profile: dict[str, Any]) -> str | No
             or _approved_sensitive_entry_answer(profile, "terms_consent")
             or _approved_sensitive_entry_answer(profile, "legal_attestation")
         )
+    elif is_ai_generated_content_attestation:
+        approved = (
+            _approved_sensitive_entry_answer(profile, "legal_attestation")
+            or _approved_sensitive_entry_answer(profile, "terms_consent")
+            or _find_answer(label, profile.get("answers") or {})
+            or _find_answer("During this application process I agree to use only my own words", profile.get("answers") or {})
+        )
+        if approved is None:
+            return "Yes"
     else:
         approved = (
             _approved_sensitive_entry_answer(profile, "terms_consent")
@@ -9435,7 +9740,12 @@ def _option_matches(option: Any, answer: Any) -> bool:
     return False
 
 
-def _best_option_match(options: list[Any], answer: Any) -> str | None:
+def _best_option_match(
+    options: list[Any],
+    answer: Any,
+    *,
+    threshold: int = 65,
+) -> str | None:
     """Return the available option text that is the closest semantic match.
 
     This is a fallback for ``_option_matches``: when no option is an exact,
@@ -9531,8 +9841,6 @@ def _best_option_match(options: list[Any], answer: Any) -> str | None:
     best_text: str | None = None
     best_score = 0
     best_tied = False
-    threshold = 65
-
     for opt in options:
         opt_text = _option_text(opt).strip()
         opt_norm = _norm(opt_text)
@@ -12461,11 +12769,49 @@ def _option_denies_sponsorship(option: Any) -> bool:
             "does not require sponsorship",
             "will not require sponsorship",
             "no sponsorship is required",
-            "no, i do not require",
+            "i do not require sponsorship",
+            "i don t require sponsorship",
+            "do not need sponsorship",
+            "does not need sponsorship",
             "without sponsorship",
         )
     )
 
+
+def _preference_text_answer_option(
+    field: Mapping[str, Any],
+    answer: Any,
+) -> Any | None:
+    """Select a truthful contact-preference option for SMS/email comboboxes.
+
+    ATSs often render "are you comfortable receiving a text notification?"
+    as a preference dropdown ("Yes, email is best; text is fine for urgent
+    follow-ups" / "I prefer email only").  The approved consent answer is
+    binary, so map an affirmative answer to the option that both affirms the
+    choice and mentions text communication.
+    """
+    if not _truthy_answer(answer):
+        return None
+    normalized = _norm(str(field.get("label") or ""))
+    if not any(
+        marker in normalized
+        for marker in ("text", "sms", "whatsapp", "notification")
+    ):
+        return None
+    options = list(field.get("options") or [])
+    for option in options:
+        option_norm = _norm(_option_text(option))
+        if not option_norm:
+            continue
+        if any(
+            marker in option_norm
+            for marker in ("text is fine", "text message", "via text", "sms", "urgent")
+        ) and not any(
+            marker in option_norm
+            for marker in ("no ", "not ", "never", "do not", "don t", "won t", "unable")
+        ):
+            return option
+    return None
 
 def _option_requires_sponsorship(option: Any) -> bool:
     """Return True for options that truthfully ask the employer to sponsor."""
@@ -13130,6 +13476,8 @@ def _dynamic_combobox_fallback_choice(
                     )
                 if not choice:
                     choice = _best_option_match(available, generated_text)
+    if not choice and requested_text and _aggressive_fallback_enabled():
+        choice = _aggressive_option_match(available, requested_text)
     return choice
 
 
@@ -13273,6 +13621,90 @@ def _technical_screening_checkbox_options(
         )
         if other is not None:
             matched.append(other)
+    return matched
+
+
+def _interests_checkbox_options(
+    field: dict[str, Any],
+    profile: dict[str, Any],
+) -> list[Any]:
+    """Select profile-backed interest checkboxes from saved areas of interest.
+
+    Greenhouse-style "areas of interest (pick all that apply)" screens expose
+    options like "AI / ML systems" and "Data pipelines".  The profile stores
+    comma-separated interests, so each saved interest is matched against the
+    live options through its semantic keyword family instead of an exact
+    label match.  Only options supported by at least one approved interest
+    are selected; placeholder "Other" options are never chosen.
+    """
+    options = field.get("options") or []
+    if not options:
+        return []
+    context = _norm(
+        " ".join(
+            str(field.get(key) or "")
+            for key in ("label", "section", "name", "id", "ariaLabel", "ariaDescription", "placeholder")
+        )
+    )
+    if not any(
+        marker in context
+        for marker in (
+            "areas of interest",
+            "what are you interested",
+            "what topics interest",
+            "what areas interest",
+            "fields of interest",
+            "select your interests",
+            "interest areas",
+        )
+    ):
+        return []
+    raw_values = [
+        profile.get("interested_roles"),
+        (profile.get("answers") or {}).get("What kinds of roles are you interested in?"),
+        (profile.get("answers") or {}).get("What are you interested in?"),
+    ]
+    if not raw_values:
+        return []
+    interests: list[str] = []
+    for raw in raw_values:
+        if not raw:
+            continue
+        if isinstance(raw, str):
+            interests.extend(part.strip() for part in re.split(r"[;,]", raw) if part.strip())
+        elif isinstance(raw, list):
+            interests.extend(str(part).strip() for part in raw if str(part).strip())
+    if not interests:
+        return []
+    interest_norm = " ".join(_norm(interest) for interest in interests)
+
+    def family_matches(option_norm: str) -> bool:
+        families = (
+            ("ai", "machine learning", "ml", "artificial intelligence"),
+            ("data", "analytics", "database", "databases"),
+            ("api", "apis", "api design", "backend", "back end"),
+            ("cloud", "aws", "gcp", "azure", "infrastructure", "devops", "platform"),
+            ("healthcare", "health", "bio", "biotech", "biotechnology"),
+            ("security", "cyber", "safety", "privacy"),
+            ("automotive", "transportation", "vehicle", "robotics", "hardware"),
+            ("crypto", "web3", "blockchain"),
+            ("consumer", "product", "entertainment", "gaming", "fintech"),
+            ("frontend", "front end", "ui", "mobile"),
+            ("search", "retrieval", "knowledge graph", "graph"),
+        )
+        return any(
+            any(marker in option_norm for marker in family)
+            and any(marker in interest_norm for marker in family)
+            for family in families
+        )
+
+    matched: list[Any] = []
+    for option in options:
+        option_norm = _norm(_option_text(option))
+        if not option_norm or option_norm in {"other", "none", "none of the above", "not applicable", "n a"}:
+            continue
+        if family_matches(option_norm):
+            matched.append(option)
     return matched
 
 
@@ -13799,7 +14231,7 @@ def _generalized_screening_answer(
     rule_answer = match_screening_rule(label, profile.get("screening_answer_rules"))
     if rule_answer is not None:
         return rule_answer
-    if _requires_user_authored_answer(label, profile):
+    if _requires_user_authored_answer(label, profile) and not _llm_open_ended_enabled():
         return None
     prior_engagement = _prior_employment_engagement_answer(label, profile)
     if prior_engagement is not None:
@@ -14600,6 +15032,26 @@ def _plan_field(
             return {"action": "skip", "reason": "no approved answer for screening question", "sensitive": sensitive, "blocking": bool(required)}
         matches = _matching_options(field, answer, profile)
         if len(matches) > 1 and _norm(answer) in {"yes", "no", "true", "false"}:
+            if _aggressive_fallback_enabled():
+                wanted = "yes" if _norm(answer) in {"yes", "true"} else "no"
+                aggressive_option = next(
+                    (
+                        option
+                        for option in matches
+                        if _norm(_option_text(option)) == wanted
+                    ),
+                    None,
+                )
+                if aggressive_option is None:
+                    aggressive_option = _aggressive_option_object(
+                        field.get("options") or [],
+                        answer,
+                    )
+                if aggressive_option is not None:
+                    return {
+                        "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                        "option": aggressive_option,
+                    }
             return {
                 "action": "skip",
                 "reason": "no option matches saved answer",
@@ -14656,6 +15108,23 @@ def _plan_field(
                     else education_date_other
                 ),
             }
+        if _aggressive_fallback_enabled():
+            aggressive_option = _aggressive_option_object(
+                field.get("options") or [],
+                answer,
+            )
+            if aggressive_option is not None:
+                guarded = _guard_local_residency_option(
+                    field,
+                    aggressive_option,
+                    profile,
+                    label,
+                )
+                if guarded is not None:
+                    return {
+                        "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                        "option": guarded,
+                    }
         return {"action": "skip", "reason": "no option matches saved answer", "sensitive": sensitive}
     if field.get("kind") == "checkboxgroup":
         language_group_plan = _languages_other_than_english_checkbox_plan(
@@ -14676,6 +15145,9 @@ def _plan_field(
         technical_options = _technical_screening_checkbox_options(field, profile)
         if technical_options:
             return {"action": "checkmany", "options": technical_options}
+        interests_options = _interests_checkbox_options(field, profile)
+        if interests_options:
+            return {"action": "checkmany", "options": interests_options}
         location_group_plan = _location_checkbox_group_plan(field, profile)
         if location_group_plan is not None:
             return location_group_plan
@@ -14731,6 +15203,13 @@ def _plan_field(
                 "sensitive": sensitive,
                 "blocking": False,
             }
+        if _aggressive_fallback_enabled():
+            aggressive_option = _aggressive_option_object(
+                field.get("options") or [],
+                answer,
+            )
+            if aggressive_option is not None:
+                return {"action": "checkmany", "options": [aggressive_option]}
         return {
             "action": "skip",
             "reason": "no checkbox option matches saved answer",
@@ -14916,6 +15395,9 @@ def _plan_field(
             citizenship_option = _citizenship_status_option(field, profile)
             if citizenship_option is not None:
                 return {"action": "combobox", "value": _option_text(citizenship_option)}
+            preference_text_option = _preference_text_answer_option(field, answer)
+            if preference_text_option is not None:
+                return {"action": "combobox", "value": _option_text(preference_text_option)}
             matches = _matching_options(field, answer, profile)
             if matches:
                 guarded = _guard_local_residency_option(field, matches[0], profile, label)
@@ -15099,6 +15581,13 @@ def _plan_field(
             if guarded is None:
                 return {"action": "skip", "reason": "select answer requires a false local-residency claim", "sensitive": sensitive}
             return {"action": "select", "value": guarded}
+        if _aggressive_fallback_enabled():
+            aggressive_option = _aggressive_option_object(
+                field.get("options") or [],
+                answer,
+            )
+            if aggressive_option is not None:
+                return {"action": "select", "value": aggressive_option}
         if not required:
             return {"action": "skip", "reason": "non-required unmapped field", "blocking": False}
         return {"action": "skip", "reason": "no matching option / answer", "sensitive": sensitive}
@@ -15434,7 +15923,7 @@ def _plan_field(
     auto = _auto_answer(label, profile)
     if auto:
         return {"action": "fill", "value": str(auto)}
-    if _requires_user_authored_answer(label, profile):
+    if _requires_user_authored_answer(label, profile) and not _llm_open_ended_enabled():
         return {"action": "skip", "reason": "question requires user-authored answer / no AI assistance", "blocking": True}
     generalized = _generalized_screening_answer(field, profile, label, sensitive=False)
     if isinstance(generalized, dict):

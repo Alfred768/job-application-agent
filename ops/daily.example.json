@@ -11,7 +11,7 @@
   "min_score": 70,
   "limit": 100,
   "daily_submit_target": 100,
-  "timeout_seconds": 300,
+  "timeout_seconds": 900,
   "empty_wake_minutes": 15,
   "use_llm": true,
   "llm_answers": true,

@@ -6848,6 +6848,39 @@ def test_hispanic_latino_yes_no_field_maps_east_asian_to_no():
     }
 
 
+def test_sponsorship_matching_keeps_bare_no_and_affirmative_options():
+    profile = {
+        "sensitive_answers": {
+            "sponsorship": {
+                "patterns": ["sponsorship"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        }
+    }
+
+    assert not python_runtime._option_denies_sponsorship({"label": "No"})
+    assert python_runtime._option_denies_sponsorship(
+        {"label": "No, I do not require sponsorship"}
+    )
+
+    field = {
+        "label": "Will you now or in the future require sponsorship by Navan to attain or maintain your employment eligibility?*",
+        "kind": "single",
+        "role": "combobox",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}, {"label": "Unknown"}],
+    }
+
+    assert [python_runtime._option_text(option) for option in python_runtime._matching_options(field, "No", profile)] == [
+        "No"
+    ]
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
 def test_hispanic_latino_yes_no_field_beats_broad_eeo_ethnicity_kb():
     field = {
         "kind": "single",
@@ -8663,6 +8696,228 @@ def test_bachelors_degree_yes_uses_education():
         "action": "combobox",
         "value": "Yes",
     }
+
+
+def test_master_phd_technical_degree_question_uses_highest_education():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": (
+            "Do you hold a Master's or PhD in Applied Mathematics, Computer Science, "
+            "Computational Science, Engineering, or a closely related technical field?*"
+        ),
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "education": [
+            {"degree": "Bachelor's", "field": "Computer Science"},
+            {"degree": "Master's", "field": "Computer Science"},
+        ]
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_office_commitment_with_weekday_list_uses_approved_answer():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": (
+            "Pave operates on a hybrid model with in-office days on Monday, Tuesday, "
+            "Thursday, and Friday. Does this schedule work for you?*"
+        ),
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "sensitive_answers": {
+            "office_hybrid_us": {
+                "patterns": ["hybrid model with in-office days", "office days monday tuesday"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_hybrid_schedule_days_per_week_question_uses_approved_answer():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": "Can you work a hybrid schedule consisting of 3 days per week in Alpharetta, GA ? *",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {
+        "answers": {
+            "Are you open to working in-person in one of our offices 25% of the time?": "Yes"
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_over_age_18_combobox_uses_birthday():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": "Are you over the age of 18 ?*",
+        "required": True,
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+    profile = {"birthday": "2001-12-18"}
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes",
+    }
+
+
+def test_ai_usage_attestation_checkbox_uses_saved_yes():
+    field = {
+        "kind": "single",
+        "type": "checkbox",
+        "label": (
+            "By submitting my application, I represent and warrant, under penalty of law, "
+            "that all information provided in this application (and in any follow-up information "
+            "requests throughout my engagement with Yoodli) is true, complete, and accurate and "
+            "does not misrepresent or omit any material facts. I understand that using AI to fabricate "
+            "or misrepresent my identity, work experience, skills, or qualifications will result in "
+            "immediate disqualification from consideration.*"
+        ),
+        "required": True,
+    }
+    profile = {
+        "answers": {
+            "During this application process I agree to use only my own words": "Yes",
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {"action": "check"}
+
+
+def test_ai_usage_attestation_checkbox_defaults_to_yes():
+    field = {
+        "kind": "single",
+        "type": "checkbox",
+        "label": (
+            "I confirm that my application materials and interview responses reflect my own work "
+            "and were not generated, edited, or supplemented by AI tools.*"
+        ),
+        "required": True,
+    }
+
+    assert python_runtime._plan_field(field, {}, None) == {"action": "check"}
+
+
+def test_full_time_professional_experience_years_uses_profile_years():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": (
+            "How many years of full-time, professional experience do you have as a software "
+            "engineer? Please include only positions where you were employed full time, "
+            "excluding internships.*"
+        ),
+        "required": True,
+        "options": [
+            {"label": "0-1 years"},
+            {"label": "1-3 years"},
+            {"label": "3-5 years"},
+            {"label": "5+ years"},
+        ],
+    }
+    profile = {"years_experience": "3"}
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "1-3 years",
+    }
+
+
+def test_text_preference_combobox_selects_affirmative_text_option():
+    field = {
+        "kind": "single",
+        "role": "combobox",
+        "tag": "button",
+        "label": (
+            "Our team primarily uses email to ensure all communications are documented. "
+            "In the event that an update is time-sensitive, are you comfortable receiving "
+            "a brief text notification?*"
+        ),
+        "required": True,
+        "options": [
+            {"label": "Yes, email is best; text is fine for urgent follow-ups."},
+            {"label": "I prefer email only."},
+            {"label": "I prefer phone calls."},
+        ],
+    }
+    profile = {
+        "sensitive_answers": {
+            "terms_consent": {
+                "patterns": ["text notification", "text message"],
+                "answer": "Yes",
+                "approved": True,
+            }
+        }
+    }
+
+    assert python_runtime._plan_field(field, profile, None) == {
+        "action": "combobox",
+        "value": "Yes, email is best; text is fine for urgent follow-ups.",
+    }
+
+
+def test_areas_of_interest_checkbox_group_uses_saved_interests():
+    field = {
+        "kind": "checkboxgroup",
+        "type": "checkbox",
+        "label": "What are your areas of interest? (pick all that apply) *",
+        "required": True,
+        "options": [
+            {"label": "Graph / knowledge graphs"},
+            {"label": "AI / ML systems"},
+            {"label": "API design"},
+            {"label": "Search & retrieval"},
+            {"label": "Data pipelines"},
+            {"label": "Healthcare / research data"},
+            {"label": "Cloud infrastructure"},
+            {"label": "Other"},
+        ],
+    }
+    profile = {
+        "answers": {
+            "What kinds of roles are you interested in?": (
+                "AI & Machine Learning, Data & Analytics, Healthcare, Enterprise Software"
+            )
+        }
+    }
+
+    plan = python_runtime._plan_field(field, profile, None)
+
+    assert plan["action"] == "checkmany"
+    assert [option["label"] for option in plan["options"]] == [
+        "AI / ML systems",
+        "Data pipelines",
+        "Healthcare / research data",
+    ]
 
 
 def test_clearance_yes_no_combobox_maps_never_held_to_no():
@@ -14008,3 +14263,131 @@ def test_active_immigration_case_uses_approved_no_fact():
     plan = python_runtime._plan_field(field, profile, None)
     assert plan["action"] == "check"
     assert plan["option"]["label"] == "No"
+
+
+def test_aggressive_option_match_relaxes_threshold_without_substring():
+    options = ["JavaScript Developer", "Backend"]
+    assert python_runtime._best_option_match(options, "Frontend JavaScript") is None
+    assert (
+        python_runtime._aggressive_option_match(options, "Frontend JavaScript")
+        == "JavaScript Developer"
+    )
+
+
+def test_aggressive_option_match_uses_binary_polarity_tiebreak():
+    assert python_runtime._aggressive_option_match(["Yes", "No"], "False") == "No"
+    assert python_runtime._aggressive_option_match(["Yes", "No"], "True") == "Yes"
+    assert python_runtime._aggressive_option_match(["Yes", "No"], "Maybe") is None
+
+
+def test_aggressive_option_object_preserves_original_option_dict():
+    options = [
+        {"label": "JavaScript Developer", "id": "opt-1", "autofillId": 7},
+        {"label": "Backend", "id": "opt-2", "autofillId": 8},
+    ]
+    matched = python_runtime._aggressive_option_object(options, "Frontend JavaScript")
+    assert matched == options[0]
+
+
+def test_filter_field_blocking_review_is_conservative_by_default(monkeypatch):
+    monkeypatch.delenv("JOB_AGENT_FORCE_SUBMIT", raising=False)
+    review = [
+        {"label": "Country", "reason": "unmapped field", "blocking": True},
+        {"label": "Account", "reason": "candidate account creation required", "blocking": True},
+    ]
+    assert python_runtime._filter_field_blocking_review(review) == review
+    assert python_runtime._review_blocks_navigation(review) is True
+
+
+def test_force_submit_filters_only_field_blockers(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_FORCE_SUBMIT", "1")
+    field_blocker = {"label": "Country", "reason": "unmapped field", "blocking": True}
+    terminal = {
+        "label": "Account",
+        "reason": "candidate account creation required",
+        "blocking": True,
+    }
+    review = [field_blocker, terminal]
+    assert python_runtime._filter_field_blocking_review(review) == [terminal]
+    assert python_runtime._review_blocks_navigation([field_blocker]) is False
+    assert python_runtime._review_blocks_navigation(review) is True
+
+
+def test_force_submit_never_ignores_missing_candidate_facts(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_FORCE_SUBMIT", "1")
+    review = [
+        {
+            "label": "Highest degree",
+            "reason": "candidate fact needs explicit approved answer",
+            "blocking": True,
+        }
+    ]
+    assert python_runtime._filter_field_blocking_review(review) == review
+    assert python_runtime._review_blocks_navigation(review) is True
+
+
+def test_submit_policy_context_records_force_ignored_fields(monkeypatch):
+    monkeypatch.setenv("JOB_AGENT_FORCE_SUBMIT", "1")
+    payload = {"resumeFile": "/tmp/resume.pdf"}
+    review = [
+        {
+            "label": "Country",
+            "reason": "browser reports field as invalid",
+            "sensitive": False,
+            "blocking": True,
+        },
+        {
+            "label": "Work Authorization",
+            "reason": "no option matches saved answer",
+            "sensitive": True,
+            "blocking": True,
+        },
+        {
+            "label": "Candidate account",
+            "reason": "candidate account creation required",
+            "sensitive": False,
+            "blocking": True,
+        },
+    ]
+    context = python_runtime._runtime_submit_policy_context(
+        payload,
+        {"name": "Candidate"},
+        review,
+        "https://example.com/apply",
+    )
+    assert context["blocking_review_items"] == [
+        {"label": "Candidate account", "reason": "candidate account creation required"}
+    ]
+    assert context["unapproved_sensitive_fields"] == []
+    assert [item["label"] for item in context["force_ignored_fields"]] == [
+        "Country",
+        "Work Authorization",
+    ]
+
+
+def test_plan_field_generates_open_ended_answer_only_when_enabled(monkeypatch):
+    class Resolver:
+        def answer_for_field(self, field, profile, *, label=None):
+            return "I want to build reliable AI systems."
+
+    field = {
+        "tag": "input",
+        "type": "text",
+        "label": "Why do you want to work here?",
+        "required": True,
+    }
+    profile = {
+        "application_requires_user_authored_answers": True,
+        "target_company": "Acme",
+        "target_title": "Software Engineer",
+    }
+
+    monkeypatch.delenv("JOB_AGENT_LLM_OPEN_ENDED", raising=False)
+    monkeypatch.setattr(python_runtime, "get_llm_answer_resolver", lambda: Resolver())
+    blocked = python_runtime._plan_field(field, profile, None)
+    assert blocked["action"] == "skip"
+    assert "user-authored" in blocked["reason"]
+
+    monkeypatch.setenv("JOB_AGENT_LLM_OPEN_ENDED", "1")
+    plan = python_runtime._plan_field(field, profile, None)
+    assert plan == {"action": "fill", "value": "I want to build reliable AI systems."}

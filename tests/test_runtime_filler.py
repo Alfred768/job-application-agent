@@ -85,6 +85,21 @@ def test_runtime_autofill_script_includes_metropolitan_area_rule():
     assert "isSalaryAcknowledgement" in script
 
 
+def test_runtime_autofill_script_includes_closest_candidate_fact_fallback():
+    script = render_runtime_autofill_script(profile=_profile())
+
+    assert "function closestCandidateFactAnswer" in script
+    assert "closestCandidateFactAnswer(label, answers)" in script
+    assert "function candidateFactAnswerSafe" in script
+    assert "candidateFactAnswerSafe(label, best)" in script
+    # Longer live labels should still match shorter saved-answer keys when the
+    # saved key is mostly covered by the live field text.
+    assert "keyCoverage >= 0.6" in script
+    assert "common >= 2" in script
+    assert 'return "ai_usage";' in script
+    assert "aiUsageCommitment" in script
+
+
 def test_runtime_autofill_script_includes_sponsorship_type_guard():
     script = render_runtime_autofill_script(profile=_profile())
 
