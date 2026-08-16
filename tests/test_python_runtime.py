@@ -932,6 +932,19 @@ def test_best_option_match_rejects_low_confidence_overlap():
     ) is None
 
 
+def test_closest_option_object_uses_normal_confidence_threshold():
+    options = [
+        {"label": "0-1 years", "value": "0-1 years"},
+        {"label": "1-3 years", "value": "1-3 years"},
+        {"label": "3-5 years", "value": "3-5 years"},
+    ]
+    assert python_runtime._closest_option_object(options, "4 years") == {
+        "label": "3-5 years",
+        "value": "3-5 years",
+    }
+    assert python_runtime._closest_option_object(options, "office") is None
+
+
 def test_candidate_commitments_require_exact_approved_answers():
     onsite_label = "Are you willing to work onsite from our New York City office 5 days/week?*"
     familiarity_label = "How familiar were you with our company before applying?*"

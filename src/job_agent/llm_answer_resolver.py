@@ -18,7 +18,7 @@ when a question has no saved profile answer:
 
 The LLM layer is enabled when ``OPENAI_API_KEY`` is configured; set
 ``JOB_AGENT_LLM_ANSWERS=0`` to disable it. ``JOB_AGENT_LLM_ANSWERS_MAX_CALLS``
-bounds per-run API usage (default 40).
+bounds per-run API usage (default 160).
 """
 
 from __future__ import annotations
@@ -52,9 +52,9 @@ def llm_answers_enabled(env: dict[str, str] | None = None) -> bool:
 def llm_answers_max_calls() -> int:
     raw = str(os.getenv("JOB_AGENT_LLM_ANSWERS_MAX_CALLS", "")).strip()
     try:
-        return max(1, min(200, int(raw))) if raw else 40
+        return max(1, min(200, int(raw))) if raw else 160
     except ValueError:
-        return 40
+        return 160
 
 
 def match_screening_rule(label: str, rules: Any) -> str | None:

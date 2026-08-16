@@ -1643,6 +1643,63 @@ def _aggressive_option_object(options: list[Any], answer: Any) -> Any | None:
     return {"label": text, "value": text}
 
 
+def _closest_option_object(options: list[Any], answer: Any) -> Any | None:
+    """Return the closest available option at the normal confidence threshold.
+
+    Unlike :func:`_aggressive_option_object`, this does not lower the semantic
+    threshold and never maps a bare Yes/No polarity onto prose options. It is
+    the conservative fallback for static option-bearing controls whose exact
+    match failed only because the ATS paraphrases a long screening statement.
+    """
+    if not options or not str(answer or "").strip():
+        return None
+    text = _best_option_match(options, answer)
+    if not text:
+        return None
+    for option in options:
+        if _norm(_option_text(option)) == _norm(text):
+            return option
+    return {"label": text, "value": text}
+
+
+def _llm_option_fallback(
+    field: dict[str, Any],
+    profile: dict[str, Any],
+    label: str,
+) -> Any | None:
+    """Choose a static option with the guarded resolver when exact matching fails.
+
+    This is only used for non-sensitive controls whose page options are already
+    known. It reuses the existing guarded resolver path, so no candidate fact is
+    invented: the returned value is one of the original page options and is
+    validated against the field's option list.
+    """
+    if not field.get("options") or get_llm_answer_resolver() is None:
+        return None
+    generated = _generalized_screening_answer(
+        field,
+        profile,
+        label,
+        sensitive=False,
+    )
+    if isinstance(generated, list) and generated:
+        return generated[0]
+    if isinstance(generated, dict):
+        return generated
+    if isinstance(generated, str):
+        generated_norm = _norm(generated)
+        for option in field.get("options") or []:
+            if _norm(_option_text(option)) == generated_norm:
+                return option
+        best = _best_option_match(field.get("options") or [], generated)
+        if best:
+            for option in field.get("options") or []:
+                if _norm(_option_text(option)) == _norm(best):
+                    return option
+            return {"label": best, "value": best}
+    return None
+
+
 def _parse_viewport(raw: str | None) -> dict[str, int]:
     text = str(raw or "").strip().lower()
     match = re.match(r"^(\d{3,5})\s*[x,]\s*(\d{3,5})$", text)
@@ -15108,6 +15165,33 @@ def _plan_field(
                     else education_date_other
                 ),
             }
+        if not sensitive:
+            llm_option = _llm_option_fallback(field, profile, label)
+            if llm_option is not None:
+                guarded = _guard_local_residency_option(
+                    field,
+                    llm_option,
+                    profile,
+                    label,
+                )
+                if guarded is not None:
+                    return {
+                        "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                        "option": guarded,
+                    }
+        closest_option = _closest_option_object(field.get("options") or [], answer)
+        if closest_option is not None:
+            guarded = _guard_local_residency_option(
+                field,
+                closest_option,
+                profile,
+                label,
+            )
+            if guarded is not None:
+                return {
+                    "action": "buttonclick" if field.get("kind") == "buttongroup" else "check",
+                    "option": guarded,
+                }
         if _aggressive_fallback_enabled():
             aggressive_option = _aggressive_option_object(
                 field.get("options") or [],
@@ -15203,6 +15287,13 @@ def _plan_field(
                 "sensitive": sensitive,
                 "blocking": False,
             }
+        if not sensitive:
+            llm_option = _llm_option_fallback(field, profile, label)
+            if llm_option is not None:
+                return {"action": "checkmany", "options": [llm_option]}
+        closest_option = _closest_option_object(field.get("options") or [], answer)
+        if closest_option is not None:
+            return {"action": "checkmany", "options": [closest_option]}
         if _aggressive_fallback_enabled():
             aggressive_option = _aggressive_option_object(
                 field.get("options") or [],
